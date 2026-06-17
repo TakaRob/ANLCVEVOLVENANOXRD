@@ -1,0 +1,42 @@
+name: hotspot_1x1_phase1
+num_workers_generate: 2
+num_workers_tune: 2
+model:
+  model_name: claudeopus46
+  api_key_env_var: ARGO_API_KEY
+  api_base: https://apps.inside.anl.gov/argoapi/v1
+  max_retries: 15
+  rate_limit_resend_attempts: 30
+  rate_limit_sleep_seconds: 60
+workspace:
+  root_dir: /mnt/c/Users/trobson/OneDrive - Argonne National Laboratory/2026-1_Luo/cvevolve_1x1/sessions
+  data_dir: /mnt/c/Users/trobson/OneDrive - Argonne National Laboratory/2026-1_Luo/cvevolve_1x1/test_data
+  holdout_data_dir: /mnt/c/Users/trobson/OneDrive - Argonne National Laboratory/2026-1_Luo/cvevolve_1x1/holdout_data
+  require_dangerous_command_approval: true
+metric:
+  name_hint: f2 score (recall-weighted)
+  direction_hint: maximize
+  target_value: null
+  description_hint: >-
+    PRIMARY METRIC: mean per-center-bin F2 score (recall-weighted, beta=2)
+    for recovering known Bragg peak features. Phase 1 focuses on recovering
+    all validated features from the 3x3 feature catalog. The algorithm
+    detects peaks in single-exposure frames, links them across spatial
+    neighbors, and verifies Voigt intensity profiles. A detection within 40
+    pixels of a known feature is a match. Recall is the PRIMARY GOAL —
+    missing a known 3x3 feature is much worse than an extra detection, since
+    1x1 sensitivity legitimately surfaces more peaks than the 3x3 ground
+    truth records. Recall is weighted ~4x precision (F2). Maximize mean F2.
+branching:
+  warmup_rounds: 3
+  tune_every: 3
+  evolve_every: 2
+  min_scored_for_tune: 1
+  min_scored_for_evolve: 2
+  lineage_selection_temperature: 1
+stopping:
+  max_rounds: 25
+  patience_rounds: 12
+  min_improvement: 0.0
+tracking:
+  enabled: false

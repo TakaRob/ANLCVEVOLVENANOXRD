@@ -1,0 +1,13 @@
+numpy
+scipy
+matplotlib
+h5py
+hdf5plugin
+pandas
+tifffile
+Pillow
+ipykernel
+jupyter
+PyQt5
+pyyaml
+mictools

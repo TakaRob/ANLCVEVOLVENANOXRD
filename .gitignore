@@ -1,0 +1,75 @@
+# ── Python environments ──
+.venv/
+**/.venv/
+venv/
+env/
+
+# ── Python build / cache ──
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.ipynb_checkpoints/
+.pytest_cache/
+
+# ── Nested / external repositories (cloned separately) ──
+/CVEvolve/
+
+# ── Raw & bulk data: LINK at runtime, never commit ──
+/raw_scans/
+/Visualizationss/
+/203 other/
+data/raw_scans/
+data/bins/
+
+# ── Per-project runtime workspace ──
+/config.yaml
+/data/
+/runs/
+/hutch/
+/mlruns/
+**/mlruns/
+**/sessions/
+
+# ── Generated analysis outputs ──
+/results/
+**/results/
+**/holdout_data/
+**/test_data/
+
+# ── Large binary data formats ──
+*.h5
+*.hdf5
+*.tif
+*.tiff
+*.npy
+*.npz
+
+# Exception: shared physics-input assets bundled with the package
+!src/xrd_tools/assets/
+!src/xrd_tools/assets/tth.tiff
+
+# ── Notebooks (large; force-add a specific one with `git add -f` if needed) ──
+*.ipynb
+
+# ── Images / preview renders ──
+*.png
+*.jpg
+*.jpeg
+
+# ── Large reference PDFs ──
+*.pdf
+
+# ── Secrets ──
+.env
+*.key
+
+# ── Claude Code local settings (machine-specific) ──
+**/.claude/settings.local.json
+
+# ── OS / editor cruft ──
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

@@ -1,0 +1,88 @@
+# Project Guide: Building the XRD-Tools Python Package
+
+This guide provides complete instructions for an agent to create and maintain the `xrd-tools` package.
+
+## 1. Package Goal
+Create a CLI application that:
+- Initializes XRD experiment directory structures.
+- Processes raw XRD data to find spatial features/peaks.
+- Integrates with CVevolve for algorithm evolution.
+- Launches interactive GUIs for labeling and viewing results.
+- Manages all data outputs in organized directories.
+
+## 2. Directory Structure
+The package should follow this structure:
+```
+xrd_tools/
+├── pyproject.toml
+├── README.md
+├── src/
+│   └── xrd_tools/
+│       ├── __init__.py
+│       ├── cli.py             # Entry point (Click CLI)
+│       ├── core/
+│       │   ├── processing.py  # Peak detection & spatial analysis
+│       │   ├── algorithms.py  # Noise reduction models
+│       │   └── io.py          # Data loading (HDF5, TIFF, CSV)
+│       ├── gui/
+│       │   ├── labeling.py    # PyQt5 labeling tool
+│       │   └── viewer.py      # PyQt5 feature viewer
+│       └── config.py          # Configuration management
+```
+
+## 3. Implementation Details
+
+### 4. Implementation Details
+
+#### CLI Commands
+- `xrd-tools init`: Interactively set up the project (create `data/`, `runs/`, `mlruns/`, `hutch/` directories).
+- `xrd-tools link`: Point to external raw data and coordinate maps. Stores absolute paths in `config.yaml` and attempts to create local symlinks in `data/` for transparency. Supports a `--copy` flag for physical duplication.
+- `xrd-tools process`: Run the spatial feature analysis. Automatically pulls data paths from the linked configuration if not provided.
+- `xrd-tools run-cvevolve`: Wrapper for `cvevolve run` with local config.
+- `xrd-tools label`: Launch the labeling GUI.
+- `xrd-tools view`: Launch the feature viewer GUI.
+
+#### GUI Data Awareness (The "Project-Centric" Approach)
+The best way to ensure GUIs know where files are located is to use a **Project Root + Config** model:
+1. **Pass Project Root:** The CLI should pass the absolute path of the project root to the GUI constructor.
+2. **Load Config Early:** In the GUI's `__init__` or a `setup()` method, read `config.yaml` from that root.
+3. **Resolve via Data Manager:** Use a dedicated `utils/io.py` or `DataManager` class to resolve paths. It should check:
+   - CLI/Argument overrides first.
+   - `config.yaml` `data_sources` second.
+   - Local `data/` directory defaults third.
+4. **Dynamic Updating:** If the user changes a file link via the CLI while the GUI is open, the GUI should provide a "Reload Config" or "Refresh Data" button to pick up the new paths without restarting.
+
+### 5. GUI Versatility Suggestions
+
+- **Argument Passing:** Modify `labeling_tool.py` and `feature_viewer.py` to use `argparse` for `data_path`, `tth_path`, and `project_root`.
+- **Remove Hardcoded Paths:** Replace all static paths (e.g., `/home/takaji/...`) with dynamic lookups via config or CLI args.
+- **Dynamic Algorithm Loading:** Ensure the GUI can discover and load evolved `.py` algorithms from a `top_algorithms.json` manifest.
+
+### Data Pipeline
+1. **Raw Data:** Load binned HDF5 scans.
+2. **Noise Reduction:** Fit Gaussian/Skewed/Fourier models to radial profiles.
+3. **Detection:** Use local thresholds and spatial linking (Union-Find) to find multi-bin features.
+4. **Filtering:** Use Gaussian-like profile checks to filter out noise.
+5. **Output:** Save results to `results/scanXXX/feature_catalog.json`.
+
+## 4. Setup Instructions for Agents
+1. **Install dependencies:** `pip install numpy scipy matplotlib h5py hdf5plugin tifffile PyQt5 click pyyaml`
+2. **Initialize Workspace:** Run `xrd-tools init` to create the structure.
+3. **Data Placement:** Place raw scans in `data/raw_scans/`.
+4. **Processing:** Run `xrd-tools process --bin-size 3` to generate initial features.
+5. **Labeling:** Use `xrd-tools label` to annotate ground truth for CVevolve.
+6. **Evolve:** Use `xrd-tools run-cvevolve` to start the agent-driven algorithm search.
+
+## 5. GUI Versatility Suggestions
+To make the GUIs more flexible for different experiments:
+- **Modular Algorithm Plugins:** Implement a plugin system where `.py` files in a specific directory are dynamically loaded. Each file should provide a standard `detect_peaks` interface.
+- **Dynamic Data Mapping:** Instead of hardcoded HDF5 keys, allow the user to select the dataset name (e.g., `entry/data/data`) via the UI or CLI.
+- **Project Configuration:** Use a `project.yaml` file to store all paths (raw scans, tth map, output directories) so the GUI stays synchronized with the CLI.
+- **Session State Persistence:** Save and restore UI state (contrast settings, colormaps, last viewed bin) to a local cache.
+- **Side-by-Side Comparison:** Implement a view mode to compare two different peak detection algorithms simultaneously on the same detector image.
+- **Batch Action Hooks:** Add buttons to trigger long-running processes (like full-scan feature linking) directly from the GUI.
+
+## 6. Future Enhancements
+- Add support for real-time data streaming from the detector.
+- Implement more sophisticated 3D visualization for rocking curves.
+- Add an "Auto-Label" feature using pre-trained models.

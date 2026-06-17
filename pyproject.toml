@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "xrd-tools"
+version = "0.1.0"
+description = "CLI and GUI tools for XRD data analysis and CVEvolve integration"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "numpy",
+    "scipy",
+    "matplotlib",
+    "h5py",
+    "hdf5plugin",
+    "tifffile",
+    "pandas",
+    "Pillow",
+    "PyQt5",
+    "click",
+    "pyyaml",
+]
+
+[project.optional-dependencies]
+notebook = ["ipykernel", "jupyter"]
+
+[project.scripts]
+xrd-tools = "xrd_tools.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+"xrd_tools" = ["assets/*"]

@@ -1,0 +1,14 @@
+FROM python:3.12-slim
+
+RUN pip install uv
+
+COPY CVEvolve /app/CVEvolve
+COPY cvevolve_5x5 /app/cvevolve_5x5
+
+WORKDIR /app/CVEvolve
+RUN uv venv && uv sync
+
+ENTRYPOINT ["uv", "run", "cvevolve", "run", \
+    "--config", "/app/cvevolve_5x5/config.yaml", \
+    "--prompt", "/app/cvevolve_5x5/prompt.md", \
+    "--holdout-test-prompt", "/app/cvevolve_5x5/holdout_test_prompt.md"]
