@@ -164,13 +164,36 @@ def status(root, bin_size, scan):
         ("tth_map", dm.tth_map()),
         ("grid_mapping", dm.grid_mapping(bin_size=bin_size)),
         ("reflections", dm.reflections()),
-        ("detector_script", dm.detector_script()),
+        ("detector_script", dm.detector_script(bin_size=bin_size)),
         (f"bins_{bin_size}x{bin_size}", dm.bins_h5(bin_size)),
         ("results_dir", dm.results_dir()),
     ]
     for name, path in entries:
         mark = "✓" if path and Path(path).exists() else "✗"
         click.echo(f"  [{mark}] {name:16s} {path}")
+
+
+# ─────────────────────────────────────────────────────────────────────
+# detectors — list the bundled detector-algorithm library
+# ─────────────────────────────────────────────────────────────────────
+@main.command()
+@click.option('--bin-size', type=int, default=None, help='Filter to one bin size')
+@click.option('--root', default='.', help='Project root directory')
+def detectors(bin_size, root):
+    """List the bundled detector algorithms and their holdout F1 scores."""
+    dm = DataManager(root)
+    entries = dm.list_detectors(bin_size)
+    if not entries:
+        click.echo("No bundled detectors found.")
+        return
+    click.echo(f"Bundled detectors ({dm.detectors_dir()}):\n")
+    click.echo(f"  {'bin':>4}  {'holdout_f1':>10}  {'src':>4}  name")
+    click.echo(f"  {'-'*4}  {'-'*10}  {'-'*4}  {'-'*30}")
+    for d in sorted(entries, key=lambda d: (d['bin_size'],
+                    -(d['holdout_f1'] or -1))):
+        f1 = f"{d['holdout_f1']:.4f}" if d.get('holdout_f1') is not None else "—"
+        click.echo(f"  {d['bin_size']:>4}  {f1:>10}  {str(d.get('source') or '—'):>4}  {d['name']}")
+    click.echo("\nUse with: xrd-tools process --detector <name>  (resolved per bin size)")
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -244,20 +267,21 @@ def bin(bin_size, scan, grid_mapping, output, compression, root):
 @click.option('--link-tolerance', type=int, default=5, help='Cross-bin link tolerance (px)')
 @click.option('--h5-path', help='Binned HDF5 file (defaults to resolved bins)')
 @click.option('--tth-path', help='2-theta TIFF map (defaults to resolved tth)')
-@click.option('--detector-script', help='Peak detector script (defaults to resolved)')
+@click.option('--detector', help='Detector path OR bundled name (see `xrd-tools detectors`)')
+@click.option('--detector-script', help='Alias of --detector')
 @click.option('--reflections', 'reflections_path', help='reflections.py (defaults to resolved)')
 @click.option('--grid-mapping', help='Grid mapping JSON (defaults to resolved)')
 @click.option('--output-dir', help='Results directory (defaults to results/<scan>/)')
 @click.option('--root', default='.', help='Project root directory')
-def process(bin_size, scan, snr, link_tolerance, h5_path, tth_path, detector_script,
-            reflections_path, grid_mapping, output_dir, root):
+def process(bin_size, scan, snr, link_tolerance, h5_path, tth_path, detector,
+            detector_script, reflections_path, grid_mapping, output_dir, root):
     """Run spatial feature analysis: detect -> link -> filter -> catalog."""
     from .core import processing
     dm = DataManager(root, scan=scan)
 
     h5 = dm.bins_h5(bin_size, h5_path)
     tth = dm.tth_map(tth_path)
-    det = dm.detector_script(detector_script)
+    det = dm.detector_script(detector or detector_script, bin_size=bin_size)
     refl = dm.reflections(reflections_path)
     gm = Path(grid_mapping) if grid_mapping else dm.grid_mapping(bin_size=bin_size)
     out = Path(output_dir) if output_dir else dm.results_dir()
@@ -481,12 +505,13 @@ def run_cvevolve(config_path, prompt_path, engine, cvevolve_dir, image, build,
 @click.option('--all', 'all_scans', is_flag=True, help='Discover all Scan_NNNN dirs under raw-root')
 @click.option('--bin-size', type=int, default=3, help='Spatial bin size (NxN)')
 @click.option('--snr', type=float, default=4.0, help='SNR threshold for detection')
+@click.option('--detector', default=None, help='Detector path OR bundled name for all scans')
 @click.option('--shape', default=None, help='Synthesize grids with no positions: ROWSxCOLS or COLS')
 @click.option('--compression', type=click.Choice(['gzip', 'lz4', 'none']), default='gzip')
 @click.option('--skip-existing', is_flag=True, help='Skip a scan whose feature catalog already exists')
 @click.option('--root', default='.', help='Project root directory')
 @click.pass_context
-def batch(ctx, scans, all_scans, bin_size, snr, shape, compression, skip_existing, root):
+def batch(ctx, scans, all_scans, bin_size, snr, detector, shape, compression, skip_existing, root):
     """Run grid -> bin -> process for many scans, each in its own per-scan dirs."""
     scan_list = _resolve_scan_list(scans, all_scans, root)
     if not scan_list:
@@ -505,7 +530,8 @@ def batch(ctx, scans, all_scans, bin_size, snr, shape, compression, skip_existin
         try:
             ctx.invoke(grid, bin_size=bin_size, scan=name, shape=shape, root=root)
             ctx.invoke(bin, bin_size=bin_size, scan=name, compression=compression, root=root)
-            ctx.invoke(process, bin_size=bin_size, scan=name, snr=snr, root=root)
+            ctx.invoke(process, bin_size=bin_size, scan=name, snr=snr,
+                       detector=detector, root=root)
         except SystemExit as e:
             if e.code:
                 click.echo(f"  ✗ {name} failed (exit {e.code})\n")

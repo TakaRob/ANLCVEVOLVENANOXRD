@@ -1,0 +1,198 @@
+{
+  "description": "Bundled XRD Bragg-peak detector algorithms. holdout_f1 is the per-center-bin F1 on the labeled holdout set (null = unscored).",
+  "metric": "holdout_f1 (spatially-validated per-bin F1; higher is better)",
+  "detectors": [
+    {
+      "name": "baseline",
+      "bin_size": "1x1",
+      "file": "1x1/baseline.py",
+      "role": "detector",
+      "holdout_f1": null,
+      "source": null
+    },
+    {
+      "name": "noise_reduction_algorithms",
+      "bin_size": "1x1",
+      "file": "1x1/noise_reduction_algorithms.py",
+      "role": "support",
+      "holdout_f1": null,
+      "source": null
+    },
+    {
+      "name": "tophat_band_adaptive_snr",
+      "bin_size": "1x1",
+      "file": "1x1/tophat_band_adaptive_snr.py",
+      "role": "detector",
+      "holdout_f1": null,
+      "source": null
+    },
+    {
+      "name": "baseline",
+      "bin_size": "3x3",
+      "file": "3x3/baseline.py",
+      "role": "detector",
+      "holdout_f1": null,
+      "source": null
+    },
+    {
+      "name": "log_tophat_hybrid_detector",
+      "bin_size": "3x3",
+      "file": "3x3/log_tophat_hybrid_detector.py",
+      "role": "detector",
+      "holdout_f1": 0.768,
+      "source": "5x5"
+    },
+    {
+      "name": "noise_reduction_algorithms",
+      "bin_size": "3x3",
+      "file": "3x3/noise_reduction_algorithms.py",
+      "role": "support",
+      "holdout_f1": null,
+      "source": null
+    },
+    {
+      "name": "tophat_band_adaptive_snr",
+      "bin_size": "3x3",
+      "file": "3x3/tophat_band_adaptive_snr.py",
+      "role": "detector",
+      "holdout_f1": 0.7905,
+      "source": "5x5"
+    },
+    {
+      "name": "tophat_dual_snr_detector",
+      "bin_size": "3x3",
+      "file": "3x3/tophat_dual_snr_detector.py",
+      "role": "detector",
+      "holdout_f1": 0.7778,
+      "source": "5x5"
+    },
+    {
+      "name": "tuned_multiscale_tophat_dual_snr",
+      "bin_size": "3x3",
+      "file": "3x3/tuned_multiscale_tophat_dual_snr.py",
+      "role": "detector",
+      "holdout_f1": 0.7691,
+      "source": "5x5"
+    },
+    {
+      "name": "tuned_multiscale_tophat_tight_bands",
+      "bin_size": "3x3",
+      "file": "3x3/tuned_multiscale_tophat_tight_bands.py",
+      "role": "detector",
+      "holdout_f1": 0.7706,
+      "source": "5x5"
+    },
+    {
+      "name": "baseline",
+      "bin_size": "4x4",
+      "file": "4x4/baseline.py",
+      "role": "detector",
+      "holdout_f1": null,
+      "source": null
+    },
+    {
+      "name": "log_tophat_hybrid_detector",
+      "bin_size": "4x4",
+      "file": "4x4/log_tophat_hybrid_detector.py",
+      "role": "detector",
+      "holdout_f1": 0.768,
+      "source": "5x5"
+    },
+    {
+      "name": "noise_reduction_algorithms",
+      "bin_size": "4x4",
+      "file": "4x4/noise_reduction_algorithms.py",
+      "role": "support",
+      "holdout_f1": null,
+      "source": null
+    },
+    {
+      "name": "tophat_band_adaptive_snr",
+      "bin_size": "4x4",
+      "file": "4x4/tophat_band_adaptive_snr.py",
+      "role": "detector",
+      "holdout_f1": 0.7905,
+      "source": "5x5"
+    },
+    {
+      "name": "tophat_dual_snr_detector",
+      "bin_size": "4x4",
+      "file": "4x4/tophat_dual_snr_detector.py",
+      "role": "detector",
+      "holdout_f1": 0.7778,
+      "source": "5x5"
+    },
+    {
+      "name": "tuned_multiscale_tophat_dual_snr",
+      "bin_size": "4x4",
+      "file": "4x4/tuned_multiscale_tophat_dual_snr.py",
+      "role": "detector",
+      "holdout_f1": 0.7691,
+      "source": "5x5"
+    },
+    {
+      "name": "tuned_multiscale_tophat_tight_bands",
+      "bin_size": "4x4",
+      "file": "4x4/tuned_multiscale_tophat_tight_bands.py",
+      "role": "detector",
+      "holdout_f1": 0.7706,
+      "source": "5x5"
+    },
+    {
+      "name": "baseline",
+      "bin_size": "5x5",
+      "file": "5x5/baseline.py",
+      "role": "detector",
+      "holdout_f1": null,
+      "source": null
+    },
+    {
+      "name": "log_tophat_hybrid_detector",
+      "bin_size": "5x5",
+      "file": "5x5/log_tophat_hybrid_detector.py",
+      "role": "detector",
+      "holdout_f1": 0.768,
+      "source": "5x5"
+    },
+    {
+      "name": "noise_reduction_algorithms",
+      "bin_size": "5x5",
+      "file": "5x5/noise_reduction_algorithms.py",
+      "role": "support",
+      "holdout_f1": null,
+      "source": null
+    },
+    {
+      "name": "tophat_band_adaptive_snr",
+      "bin_size": "5x5",
+      "file": "5x5/tophat_band_adaptive_snr.py",
+      "role": "detector",
+      "holdout_f1": 0.7905,
+      "source": "5x5"
+    },
+    {
+      "name": "tophat_dual_snr_detector",
+      "bin_size": "5x5",
+      "file": "5x5/tophat_dual_snr_detector.py",
+      "role": "detector",
+      "holdout_f1": 0.7778,
+      "source": "5x5"
+    },
+    {
+      "name": "tuned_multiscale_tophat_dual_snr",
+      "bin_size": "5x5",
+      "file": "5x5/tuned_multiscale_tophat_dual_snr.py",
+      "role": "detector",
+      "holdout_f1": 0.7691,
+      "source": "5x5"
+    },
+    {
+      "name": "tuned_multiscale_tophat_tight_bands",
+      "bin_size": "5x5",
+      "file": "5x5/tuned_multiscale_tophat_tight_bands.py",
+      "role": "detector",
+      "holdout_f1": 0.7706,
+      "source": "5x5"
+    }
+  ]
+}

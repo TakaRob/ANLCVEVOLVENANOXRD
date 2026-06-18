@@ -60,7 +60,19 @@ data/holdout/reflections.py    # expected Bragg peak 2θ + labels (bundled defau
 src/xrd_tools/assets/
 ├── tth.tiff          # default 2θ map used when a project has none
 └── reflections.py    # default reflections used when a project has none
+
+src/xrd_tools/detectors/          # detector-algorithm library
+├── catalog.json                  # metadata + holdout_f1 scores per detector
+├── 1x1/  <detector>.py …         # per-bin-size algorithm variants
+├── 3x3/  <detector>.py …
+├── 4x4/  <detector>.py …
+└── 5x5/  <detector>.py …
 ```
+
+When no detector is linked, `process` uses the highest-scoring bundled detector
+for the bin size (from `catalog.json`). `--detector <name>` selects one by name
+(resolved per bin size); `--detector <path>` uses an external script. List them
+with `xrd-tools detectors`.
 
 ## `config.yaml` schema
 
@@ -125,6 +137,11 @@ Print the config and every resolved path with `✓` (exists) / `✗` (missing).
 - `--scan <id>`, `--bin-size <N>` — which scan/bin to resolve for.
 - **Writes:** nothing.
 
+### `xrd-tools detectors`
+List the bundled detector algorithms and their `holdout_f1` scores.
+- `--bin-size <N>` — filter to one bin size.
+- **Writes:** nothing. Reads `src/xrd_tools/detectors/catalog.json`.
+
 ### `xrd-tools grid`
 Assign raw frames to a spatial bin grid → `grid_mapping_NxN.json`.
 - Uses the position CSV when present; otherwise `--shape ROWSxCOLS` (or `COLS`)
@@ -142,14 +159,16 @@ Sum each bin's raw frames into a single binned HDF5.
 Run the detection pipeline: per-bin detect → spatial link → Gaussian filter →
 write catalog.
 - `--bin-size <N>`, `--scan <id>`, `--snr <float>`, `--link-tolerance <px>`,
-  and explicit overrides `--h5-path/--tth-path/--detector-script/--reflections/--grid-mapping/--output-dir`.
+  `--detector <path|name>` (bundled name or external script; defaults to the
+  best bundled detector for the bin size), and explicit overrides
+  `--h5-path/--tth-path/--reflections/--grid-mapping/--output-dir`.
 - **Creates:** `results/<scan>/feature_catalog_NxN.json`,
   `kept_peaks_NxN.csv`, `filtered_peaks_NxN.csv`.
 
 ### `xrd-tools batch`
 Run `grid → bin → process` for many scans, each in its own per-scan dirs.
 - `--scans "203,204,205"` or `--all` (discover `Scan_NNNN` under `raw-root`).
-- `--bin-size <N>`, `--snr <float>`, `--shape ROWSxCOLS`,
+- `--bin-size <N>`, `--snr <float>`, `--detector <path|name>`, `--shape ROWSxCOLS`,
   `--compression`, `--skip-existing`.
 - **Creates:** the per-scan grid/bins/results files above for each scan.
 

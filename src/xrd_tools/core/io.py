@@ -36,12 +36,28 @@ DETECTOR_SHAPE = (1062, 1028)
 # Generic loaders
 # ─────────────────────────────────────────────────────────────────────
 def load_module(path: Union[str, Path]):
-    """Dynamically import a .py file as a module (detector / reflections)."""
+    """Dynamically import a .py file as a module (detector / reflections).
+
+    The file's own directory is placed on ``sys.path`` during import so a
+    detector can import sibling modules (e.g. ``noise_reduction_algorithms``).
+    """
+    import sys
     path = Path(path)
-    spec = importlib.util.spec_from_file_location(path.stem, str(path))
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
+    parent = str(path.resolve().parent)
+    added = parent not in sys.path
+    if added:
+        sys.path.insert(0, parent)
+    try:
+        spec = importlib.util.spec_from_file_location(path.stem, str(path))
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+    finally:
+        if added:
+            try:
+                sys.path.remove(parent)
+            except ValueError:
+                pass
 
 
 def load_tth_map(path: Union[str, Path]) -> np.ndarray:

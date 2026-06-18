@@ -314,8 +314,82 @@ class DataManager:
         default = proj if proj.exists() else self._asset("reflections.py")
         return self._resolve("reflections", override, default)
 
-    def detector_script(self, override: Optional[str] = None) -> Path:
-        return self._resolve("detector_script", override, self.hutch_dir / "detector.py")
+    # ----- bundled detector library -----------------------------------
+    def detectors_dir(self) -> Path:
+        """Directory of bundled detector algorithms shipped with the package."""
+        return Path(__file__).parent / "detectors"
+
+    def load_detector_catalog(self) -> dict:
+        """Read the bundled detector catalog (names, bin sizes, holdout_f1)."""
+        import json
+        cat = self.detectors_dir() / "catalog.json"
+        if cat.exists():
+            with open(cat) as f:
+                return json.load(f)
+        return {"detectors": []}
+
+    def list_detectors(self, bin_size: Optional[int] = None) -> list:
+        """List bundled *detector* entries (excludes support modules)."""
+        size = f"{bin_size}x{bin_size}" if bin_size else None
+        out = []
+        for d in self.load_detector_catalog().get("detectors", []):
+            if d.get("role") != "detector":
+                continue
+            if size and d.get("bin_size") != size:
+                continue
+            out.append(d)
+        return out
+
+    def best_detector(self, bin_size: int) -> Optional[Path]:
+        """Path to the highest-scoring bundled detector for ``bin_size``.
+
+        Falls back to 3x3 detectors, then to ``tophat_band_adaptive_snr``.
+        """
+        candidates = self.list_detectors(bin_size) or self.list_detectors(3) \
+            or self.list_detectors()
+        if not candidates:
+            return None
+        candidates.sort(
+            key=lambda d: (d.get("holdout_f1") if d.get("holdout_f1") is not None else -1,
+                           d.get("name") == "tophat_band_adaptive_snr"),
+            reverse=True)
+        return self.detectors_dir() / candidates[0]["file"]
+
+    def resolve_detector_name(self, name: str, bin_size: Optional[int] = None) -> Optional[Path]:
+        """Resolve a bare detector name (e.g. 'tophat_band_adaptive_snr') from the library."""
+        stem = name[:-3] if name.endswith(".py") else name
+        matches = [d for d in self.list_detectors() if d["name"] == stem]
+        if bin_size:
+            sized = [d for d in matches if d.get("bin_size") == f"{bin_size}x{bin_size}"]
+            matches = sized or matches
+        if matches:
+            return self.detectors_dir() / matches[0]["file"]
+        return None
+
+    def detector_script(self, override: Optional[str] = None,
+                        bin_size: Optional[int] = None) -> Path:
+        """Resolve the detector script.
+
+        Precedence: explicit path/name -> config -> hutch/detector.py ->
+        best bundled detector for ``bin_size``.
+        """
+        if override:
+            p = Path(override)
+            if p.exists():
+                return self._abs(override)
+            # Not a path on disk: try resolving as a bundled detector name.
+            byname = self.resolve_detector_name(override, bin_size)
+            if byname:
+                return byname
+            return self._abs(override)
+        configured = self.config.get("data_sources", "detector_script")
+        if configured:
+            return self._abs(configured)
+        hutch_default = self.hutch_dir / "detector.py"
+        if hutch_default.exists():
+            return hutch_default
+        bundled = self.best_detector(bin_size or 3)
+        return bundled if bundled else hutch_default
 
     def bins_h5(self, bin_size: int, override: Optional[str] = None, scan: object = None) -> Path:
         if override:
