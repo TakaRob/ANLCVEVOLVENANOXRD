@@ -75,6 +75,23 @@ xrd-tools batch --all --bin-size 3 --skip-existing
 Any single step also takes `--scan`, e.g. `xrd-tools process --scan 204`,
 `xrd-tools view --scan 204`.
 
+### Comparing across scans
+
+Once scans are processed, combine them into one dataset for analysis:
+
+```bash
+xrd-tools aggregate            # -> results/summary/features.csv, device_map.csv, analysis.db
+```
+
+- `features.csv` — one row per feature: intensity, prevalence (`n_bins`),
+  shape (`rocking_fwhm`, `strain_breadth`), orientation (`chi_deg`), per reflection/scan.
+- `device_map.csv` — long/tidy per-bin intensities (scan, reflection, bin).
+- `analysis.db` — SQLite with both tables, e.g.:
+  ```sql
+  SELECT reflection, COUNT(*), AVG(peak_intensity), AVG(n_bins), AVG(rocking_fwhm)
+  FROM features GROUP BY reflection;
+  ```
+
 ### No position CSV?
 
 `grid` uses the scan's position CSV when present (auto-found under
@@ -177,6 +194,7 @@ Each GUI also runs standalone, e.g. `python -m xrd_tools.gui.viewer --project-ro
 | `bin` | Sum each bin's frames into `xrd_NxN_bins.h5` (per scan). |
 | `process` | Detect → link → filter → write the feature catalog + CSVs. |
 | `batch` | Run `grid → bin → process` over many scans (`--scans` or `--all`). |
+| `aggregate` | Combine all scans' catalogs into `results/summary/` — `features.csv`, `device_map.csv`, `analysis.db` (SQLite). |
 | `label` / `view` / `device-map` / `orientation` | Launch the interactive GUIs. |
 | `run-cvevolve` | Run CVEvolve, by default inside a Podman container. |
 

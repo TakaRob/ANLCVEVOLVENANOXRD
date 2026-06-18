@@ -447,6 +447,43 @@ def batch(ctx, scans, all_scans, bin_size, snr, shape, compression, skip_existin
         raise SystemExit(1)
 
 
+@main.command()
+@click.option('--scans', help='Comma-separated scans to include (default: all in results/)')
+@click.option('--bin-size', type=int, default=None, help='Only this bin size (default: all)')
+@click.option('--output', help='Output directory (default: results/summary/)')
+@click.option('--format', 'fmt', type=click.Choice(['both', 'csv', 'db']), default='both',
+              help='What to write (default: both CSV and SQLite)')
+@click.option('--root', default='.', help='Project root directory')
+def aggregate(scans, bin_size, output, fmt, root):
+    """Combine all scans' feature catalogs into one comparable CSV + SQLite DB.
+
+    Produces a `features` table (intensity / prevalence / shape per feature) and
+    a long `device_map` table (per scan, reflection, spatial bin).
+    """
+    from .core import aggregate as agg
+    dm = DataManager(root)
+    results_dir = dm._abs(dm.config.get('paths', 'results_dir', default='results'))
+    out_dir = Path(output) if output else (results_dir / 'summary')
+    scan_list = [DataManager.scan_name_of(s.strip()) for s in scans.split(',')] if scans else None
+
+    features, device_map = agg.aggregate(results_dir, scan_list, bin_size, log=click.echo)
+    if not features:
+        click.echo(f"No feature catalogs found under {results_dir}. Run 'process' first.")
+        raise SystemExit(1)
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    if fmt in ('csv', 'both'):
+        f_csv = agg.write_csv(features, agg.FEATURE_COLUMNS, out_dir / 'features.csv')
+        d_csv = agg.write_csv(device_map, agg.DEVICEMAP_COLUMNS, out_dir / 'device_map.csv')
+        click.echo(f"  CSV: {f_csv}")
+        click.echo(f"  CSV: {d_csv}  ({len(device_map)} rows)")
+    if fmt in ('db', 'both'):
+        db = agg.write_sqlite(out_dir / 'analysis.db', features, device_map)
+        click.echo(f"  DB:  {db}  (tables: features, device_map)")
+    click.echo(f"\nDone: {len(features)} features across "
+               f"{len(set(r['scan'] for r in features))} scan(s).")
+
+
 def _resolve_scan_list(scans, all_scans, root):
     """Build the list of scan names from --scans or by discovering --raw-root."""
     if scans:

@@ -11,6 +11,7 @@ Usage:
 """
 
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -83,6 +84,16 @@ METRIC_ZLABELS = {
 
 METRIC_CMAPS = {
     "chi": "twilight",
+}
+
+# Short plain-language explanation shown under the metric selector.
+METRIC_DESCRIPTIONS = {
+    "none":       "Feature outlines colored by reflection",
+    "intensity":  "Integrated peak area (summed counts) per bin",
+    "chi":        "Azimuthal angle χ around the Debye ring",
+    "strain":     "Δ2θ — distance from the reference Bragg angle",
+    "rocking":    "Rocking-curve FWHM — mosaic spread / plane curvature",
+    "strain_bw":  "Spread of Δ2θ across the feature (strain gradient)",
 }
 
 METRIC_2D_TITLES = {
@@ -173,6 +184,10 @@ def _feat_in_chi_range(feat, chi_range):
     chi = feat.get("chi_deg")
     if chi is None:
         return True
+    # The range may be expressed in unwrapped coords (hi > 180) when the χ
+    # selection crosses the ±180 seam; shift a negative χ up to match.
+    if hi > 180 and chi < lo:
+        chi += 360
     return lo <= chi <= hi
 
 
@@ -412,6 +427,33 @@ class QRangeSlider(QWidget):
         self._dragging = None
 
 
+class _WrapSpinBox(QSpinBox):
+    """Spin box for a circular angle.
+
+    Its internal value lives in the *unwrapped* coordinate used by the slider
+    and histogram (so it can exceed +180 when the χ cluster crosses the ±180
+    seam), but it always displays — and accepts — the real wrapped angle in
+    [-180, 180]. e.g. internal 185 shows as "-175°"; typing "-175" stores 185.
+    """
+
+    @staticmethod
+    def _wrap(v):
+        return v - 360 if v > 180 else v
+
+    def textFromValue(self, v):
+        return str(self._wrap(v))
+
+    def valueFromText(self, text):
+        m = re.search(r"-?\d+", text)
+        if not m:
+            return self.value()
+        v = int(m.group())
+        lo, hi = self.minimum(), self.maximum()
+        if v < lo:                 # negative angle on the unwrapped (>180) side
+            v += 360
+        return max(lo, min(hi, v))
+
+
 class DeviceMapWindow(QMainWindow):
     def __init__(self, features, grids, n_rows, n_cols):
         super().__init__()
@@ -429,12 +471,20 @@ class DeviceMapWindow(QMainWindow):
         self._highlight_artists = []
         self._highlighted_idx = None
         self._locked_idx = None
-        self._chi_hist_ref = "All"
+        self._chi_hist_ref = None     # None = checked layers; else a reflection
+        self._chi_weight = "count"    # "count" or "area" (weight by n_bins)
 
+        # χ is a circular angle. When the data cluster crosses the ±180 seam
+        # (raw span > 180°), we work in an "unwrapped" coordinate where negative
+        # angles are shifted by +360, so the cluster is contiguous and the
+        # slider/spinboxes/red-lines stay left→right aligned with the histogram.
+        # Real wrapped angles are shown for display; see _wrap_chi / _WrapSpinBox.
         all_chi = [f["chi_deg"] for f in features if f.get("chi_deg") is not None]
-        if all_chi:
-            self._chi_data_min = int(np.floor(min(all_chi)))
-            self._chi_data_max = int(np.ceil(max(all_chi)))
+        self._chi_wraps = bool(all_chi) and (max(all_chi) - min(all_chi)) > 180
+        unwrapped = [self._unwrap_chi(c) for c in all_chi]
+        if unwrapped:
+            self._chi_data_min = int(np.floor(min(unwrapped)))
+            self._chi_data_max = int(np.ceil(max(unwrapped)))
         else:
             self._chi_data_min, self._chi_data_max = -180, 180
         self._chi_lo = float(self._chi_data_min)
@@ -523,6 +573,11 @@ class DeviceMapWindow(QMainWindow):
             self.metric_combo.addItem(label, key)
         self.metric_combo.currentIndexChanged.connect(self._on_metric_changed)
         sl.addWidget(self.metric_combo)
+        self.metric_desc_label = QLabel(METRIC_DESCRIPTIONS.get(self.metric, ""))
+        self.metric_desc_label.setWordWrap(True)
+        self.metric_desc_label.setStyleSheet(
+            "color: #666; font-size: 11px; font-style: italic; padding: 2px 2px 0 2px;")
+        sl.addWidget(self.metric_desc_label)
         rl.addWidget(sg)
 
         # --- Azimuthal distribution (χ) ---
@@ -531,11 +586,19 @@ class DeviceMapWindow(QMainWindow):
         ref_row = QHBoxLayout()
         ref_row.addWidget(QLabel("Reflection:"))
         self.chi_ref_combo = QComboBox()
-        self.chi_ref_combo.addItem("All")
+        self.chi_ref_combo.addItem("Checked layers")
         for ref in REFLECTIONS:
             self.chi_ref_combo.addItem(ref)
         self.chi_ref_combo.currentIndexChanged.connect(self._on_chi_ref_changed)
         ref_row.addWidget(self.chi_ref_combo)
+        ref_row.addStretch()
+        ref_row.addWidget(QLabel("Weight:"))
+        self.chi_weight_combo = QComboBox()
+        self.chi_weight_combo.addItem("Counts", "count")
+        self.chi_weight_combo.addItem("Area (bins)", "area")
+        self.chi_weight_combo.currentIndexChanged.connect(
+            self._on_chi_weight_changed)
+        ref_row.addWidget(self.chi_weight_combo)
         rl.addLayout(ref_row)
 
         self.chi_hist_fig = Figure(figsize=(4, 2.5))
@@ -557,7 +620,7 @@ class DeviceMapWindow(QMainWindow):
 
         entry_row = QHBoxLayout()
         entry_row.addWidget(QLabel("Min:"))
-        self.chi_min_spin = QSpinBox()
+        self.chi_min_spin = _WrapSpinBox()
         self.chi_min_spin.setRange(self._chi_data_min, self._chi_data_max)
         self.chi_min_spin.setValue(self._chi_data_min)
         self.chi_min_spin.setSuffix("°")
@@ -566,7 +629,7 @@ class DeviceMapWindow(QMainWindow):
         entry_row.addWidget(self.chi_min_spin)
         entry_row.addStretch()
         entry_row.addWidget(QLabel("Max:"))
-        self.chi_max_spin = QSpinBox()
+        self.chi_max_spin = _WrapSpinBox()
         self.chi_max_spin.setRange(self._chi_data_min, self._chi_data_max)
         self.chi_max_spin.setValue(self._chi_data_max)
         self.chi_max_spin.setSuffix("°")
@@ -611,6 +674,14 @@ class DeviceMapWindow(QMainWindow):
         self.ax_cb1 = self.fig.add_axes([0.93, 0.25, 0.015, 0.55])
         self.ax_cb1.set_visible(False)
 
+    def _unwrap_chi(self, c):
+        """Raw χ → unwrapped coordinate (negative angles shifted +360 if wrapped)."""
+        return c + 360 if (self._chi_wraps and c < 0) else c
+
+    def _wrap_chi(self, u):
+        """Unwrapped coordinate → real wrapped χ in [-180, 180] for display."""
+        return u - 360 if u > 180 else u
+
     def _chi_range(self):
         if (self._chi_lo <= self._chi_data_min
                 and self._chi_hi >= self._chi_data_max):
@@ -653,6 +724,9 @@ class DeviceMapWindow(QMainWindow):
     def _on_layer_toggle(self):
         self.visible_refs = [ref for ref in REFLECTIONS
                              if self.layer_cbs[ref].isChecked()]
+        # The histogram's "Checked layers" mode follows the layer checkboxes.
+        if self._chi_hist_ref is None:
+            self._draw_chi_histogram()
         self._redraw()
 
     def _on_labels_toggle(self, checked):
@@ -661,6 +735,7 @@ class DeviceMapWindow(QMainWindow):
 
     def _on_metric_changed(self):
         key = self.metric_combo.currentData()
+        self.metric_desc_label.setText(METRIC_DESCRIPTIONS.get(key, ""))
         if key == self.metric:
             return
         self.metric = key
@@ -675,53 +750,53 @@ class DeviceMapWindow(QMainWindow):
         self._draw_chi_histogram()
         self._draw_chi_arc()
         self.chi_range_label.setText(
-            f"χ: {self._chi_lo:.0f}° to {self._chi_hi:.0f}°")
+            f"χ: {self._wrap_chi(self._chi_lo):.0f}° "
+            f"to {self._wrap_chi(self._chi_hi):.0f}°")
 
     def _draw_chi_histogram(self):
         ax = self.chi_hist_ax
         ax.clear()
         ax.set_facecolor("white")
 
-        ref_filter = self._chi_hist_ref
-        all_chis = []
+        ref_filter = self._chi_hist_ref     # None -> follow checked layers
+        area_mode = self._chi_weight == "area"
+        chis, weights = [], []
         for f in self.features:
-            if ref_filter != "All" and f["reflection"] != ref_filter:
+            if ref_filter is None:
+                if f["reflection"] not in self.visible_refs:
+                    continue
+            elif f["reflection"] != ref_filter:
                 continue
             chi = f.get("chi_deg")
-            if chi is not None:
-                all_chis.append(chi)
+            if chi is None:
+                continue
+            chis.append(chi)
+            weights.append(float(f.get("n_bins", 0)) if area_mode else 1.0)
 
-        if not all_chis:
+        if not chis or sum(weights) == 0:
             ax.text(0.5, 0.5, "No χ data", transform=ax.transAxes,
                     ha="center", va="center", color="#aaa", fontsize=10)
             self.chi_hist_canvas.draw_idle()
             return
 
-        in_range = [c for c in all_chis if self._chi_lo <= c <= self._chi_hi]
-
-        chi_min, chi_max = min(all_chis), max(all_chis)
-        wraps = (chi_max - chi_min) > 180
-        if wraps:
-            all_plot = [c + 360 if c < 0 else c for c in all_chis]
-            in_plot = [c + 360 if c < 0 else c for c in in_range]
-            lo_plot = self._chi_lo + (360 if self._chi_lo < 0 else 0)
-            hi_plot = self._chi_hi + (360 if self._chi_hi < 0 else 0)
-        else:
-            all_plot = list(all_chis)
-            in_plot = list(in_range)
-            lo_plot = self._chi_lo
-            hi_plot = self._chi_hi
+        # Work in the same unwrapped coordinate as the slider so the red range
+        # markers line up with the slider handles (lo/hi are already unwrapped).
+        all_plot = [self._unwrap_chi(c) for c in chis]
+        selected = [self._chi_lo <= u <= self._chi_hi for u in all_plot]
+        in_plot = [u for u, s in zip(all_plot, selected) if s]
+        in_w = [w for w, s in zip(weights, selected) if s]
+        lo_plot = self._chi_lo
+        hi_plot = self._chi_hi
 
         bin_lo = min(all_plot) - 5
         bin_hi = max(all_plot) + 5
         edges = np.arange(bin_lo, bin_hi + 5, 5)
         centers = (edges[:-1] + edges[1:]) / 2
-        h_all, _ = np.histogram(all_plot, bins=edges)
-        h_in, _ = np.histogram(in_plot, bins=edges)
+        h_all, _ = np.histogram(all_plot, bins=edges, weights=weights)
+        h_in, _ = np.histogram(in_plot, bins=edges, weights=in_w)
 
-        n_in = len(in_range)
-        n_all = len(all_chis)
-        pct = 100 * n_in / n_all if n_all else 0
+        total = sum(weights)
+        pct = 100 * sum(in_w) / total if total else 0
         span = self._chi_hi - self._chi_lo
 
         ax.bar(centers, h_all, width=4.5, color="#ccc", alpha=0.5,
@@ -732,9 +807,10 @@ class DeviceMapWindow(QMainWindow):
         ax.axvline(lo_plot, color="red", ls="--", lw=1.2, alpha=0.8)
         ax.axvline(hi_plot, color="red", ls="--", lw=1.2, alpha=0.8)
 
-        ref_label = ref_filter if ref_filter != "All" else "all refs"
+        ref_label = "checked layers" if ref_filter is None else ref_filter
         ax.set_xlabel("χ (°)", color="#222", fontsize=8)
-        ax.set_ylabel("Count", color="#222", fontsize=8)
+        ax.set_ylabel("Total bins (area)" if area_mode else "Count",
+                      color="#222", fontsize=8)
         ax.set_title(
             f"{ref_label} — azimuthal  ({pct:.0f}% selected, "
             f"{span:.0f}° span)",
@@ -743,7 +819,7 @@ class DeviceMapWindow(QMainWindow):
                   labelcolor="#222")
         ax.tick_params(colors="#222", labelsize=7)
 
-        if wraps:
+        if self._chi_wraps:
             import matplotlib.ticker as mticker
             ax.xaxis.set_major_formatter(
                 mticker.FuncFormatter(
@@ -757,9 +833,13 @@ class DeviceMapWindow(QMainWindow):
     def _on_chi_ref_changed(self):
         idx = self.chi_ref_combo.currentIndex()
         if idx == 0:
-            self._chi_hist_ref = "All"
+            self._chi_hist_ref = None          # follow the checked layers
         else:
             self._chi_hist_ref = REFLECTIONS[idx - 1]
+        self._draw_chi_histogram()
+
+    def _on_chi_weight_changed(self):
+        self._chi_weight = self.chi_weight_combo.currentData()
         self._draw_chi_histogram()
 
     def _sync_chi_widgets(self):
@@ -822,7 +902,11 @@ class DeviceMapWindow(QMainWindow):
                     lw=1.5, ls="--", alpha=0.9)
 
         ax.set_ylim(0, 1.1)
-        ax.set_theta_zero_location("N")
+        # χ = atan2(det_y - beam_y, det_x - beam_x), measured from the detector
+        # +x axis with rows increasing downward (images use origin='upper').
+        # Anchor χ=0 to East and run clockwise so the circle matches the raw
+        # detector frame: 0°→right (+x), ±180°→left (-x), +90°→down, -90°→up.
+        ax.set_theta_zero_location("E")
         ax.set_theta_direction(-1)
         ax.set_xticks([])
         ax.set_yticks([])

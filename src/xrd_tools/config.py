@@ -87,8 +87,20 @@ class ProjectConfig:
 
     @classmethod
     def load(cls, root: os.PathLike | str = ".") -> "ProjectConfig":
-        root = Path(root).resolve()
-        cfg = cls(root)
+        """Load the nearest project config at or above ``root``.
+
+        Walks up from ``root`` to the filesystem root looking for the first
+        directory containing ``config.yaml`` (like ``git`` locating ``.git``),
+        so commands and GUIs work from any subdirectory of the project. Falls
+        back to ``root`` itself when no config is found.
+        """
+        start = Path(root).resolve()
+        project_root = start
+        for d in (start, *start.parents):
+            if (d / CONFIG_FILENAME).exists():
+                project_root = d
+                break
+        cfg = cls(project_root)
         if cfg.config_path.exists():
             with open(cfg.config_path) as f:
                 cfg.data = yaml.safe_load(f) or {}

@@ -36,10 +36,14 @@ command does. For the narrative guide see `README.md`.
 │       └── <scan>/
 │           └── xrd_NxN_bins.h5           # created by `bin`
 └── results/
-    └── <scan>/
-        ├── feature_catalog_NxN.json      # created by `process` (kept features)
-        ├── kept_peaks_NxN.csv            # created by `process`
-        └── filtered_peaks_NxN.csv        # created by `process`
+    ├── <scan>/
+    │   ├── feature_catalog_NxN.json      # created by `process` (kept features)
+    │   ├── kept_peaks_NxN.csv            # created by `process`
+    │   └── filtered_peaks_NxN.csv        # created by `process`
+    └── summary/                          # created by `aggregate` (all scans combined)
+        ├── features.csv                  #   one row per feature (intensity/prevalence/shape)
+        ├── device_map.csv                #   one row per (scan, reflection, bin)
+        └── analysis.db                   #   SQLite: tables `features`, `device_map`
 ```
 
 Shared inputs (one per project, not per scan), resolved from `data/holdout/`,
@@ -148,6 +152,16 @@ Run `grid → bin → process` for many scans, each in its own per-scan dirs.
 - `--bin-size <N>`, `--snr <float>`, `--shape ROWSxCOLS`,
   `--compression`, `--skip-existing`.
 - **Creates:** the per-scan grid/bins/results files above for each scan.
+
+### `xrd-tools aggregate`
+Combine every scan's feature catalog into one comparable dataset.
+- `--scans "203,204"` (default: all scans in `results/`), `--bin-size <N>`
+  (default: all), `--output <dir>` (default `results/summary/`),
+  `--format [both|csv|db]`.
+- **Creates:** `results/summary/features.csv` (one row per feature: intensity,
+  prevalence=`n_bins`, shape=`rocking_fwhm`/`strain_breadth`, `chi_deg`),
+  `results/summary/device_map.csv` (per scan/reflection/bin), and
+  `results/summary/analysis.db` (SQLite with both tables).
 
 ### `xrd-tools run-cvevolve`
 Run CVEvolve (algorithm evolution), by default inside a Podman container.
