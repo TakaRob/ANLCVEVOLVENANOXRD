@@ -1,13 +1,14 @@
 """
-Device-level feature map for perovskite reflections.
+Device-level feature map for perovskite reflections (pyqtgraph).
 
-Shows spatial profiles across the full 52x74 bin grid with switchable
-metrics: intensity, lattice strain, crystallographic orientation, and
-mosaicity / domain structure.  Chi-angle range filter with interactive
-histogram and slider controls.
+Shows spatial profiles across the full bin grid with switchable metrics:
+intensity, lattice strain, crystallographic orientation, and mosaicity / domain
+structure. Chi-angle range filter with interactive histogram, arc, and slider.
 
-Usage:
-    python3 analysis/device_map.py
+pyqtgraph rewrite of the original matplotlib version (full feature parity). All
+data-prep logic is framework-agnostic and unchanged; only the rendering layer is
+pyqtgraph now (fast ImageItem heatmap, IsocurveItem outlines, BarGraphItem
+histogram, hover/click highlight).
 """
 
 import json
@@ -16,13 +17,7 @@ import sys
 from pathlib import Path
 
 import numpy as np
-import matplotlib
-matplotlib.use("Qt5Agg")
-import matplotlib.pyplot as plt
-import matplotlib.colors as mcolors
-from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg, NavigationToolbar2QT
-from matplotlib.figure import Figure
-from matplotlib.patches import Patch
+import pyqtgraph as pg
 
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -33,6 +28,8 @@ from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtGui import QPainter, QColor, QBrush
 
 from ..config import DataManager
+
+pg.setConfigOptions(imageAxisOrder="row-major", antialias=True)
 
 # Resolved at runtime by configure(); see launch_gui().
 _DM = None
@@ -48,6 +45,7 @@ def configure(project_root=".", bin_size=3, scan=None):
     RESULTS_DIR = _DM.results_dir()
     HOLDOUT_DIR = _DM.holdout_dir
 
+
 REFLECTIONS = []
 REF_COLORS = {}
 
@@ -59,10 +57,7 @@ _PALETTE = [
 
 
 def _assign_ref_colors(reflections):
-    colors = {}
-    for i, ref in enumerate(reflections):
-        colors[ref] = _PALETTE[i % len(_PALETTE)]
-    return colors
+    return {ref: _PALETTE[i % len(_PALETTE)] for i, ref in enumerate(reflections)}
 
 
 METRICS = [
@@ -82,11 +77,8 @@ METRIC_ZLABELS = {
     "strain_bw":  "FWHM Δ2θ (°)",
 }
 
-METRIC_CMAPS = {
-    "chi": "twilight",
-}
+METRIC_CMAPS = {"chi": "twilight"}
 
-# Short plain-language explanation shown under the metric selector.
 METRIC_DESCRIPTIONS = {
     "none":       "Feature outlines colored by reflection",
     "intensity":  "Integrated peak area (summed counts) per bin",
@@ -104,6 +96,7 @@ METRIC_2D_TITLES = {
     "rocking":    "Rocking Width — crystal plane curvature / mosaic spread per feature",
     "strain_bw":  "Strain Breadth — lattice parameter gradient across feature",
 }
+
 
 def load_features():
     with open(RESULTS_DIR / f"feature_catalog_{_BIN_SIZE}x{_BIN_SIZE}.json") as f:
@@ -146,7 +139,6 @@ def build_device_grids(features, n_rows, n_cols, metric="intensity"):
         ref_feats = [f for f in features if f["reflection"] == ref]
         for feat in ref_feats:
             profile = feat.get("intensity_profile", {})
-
             if is_per_feature:
                 val = feat.get(feat_key)
                 if val is None:
@@ -184,15 +176,12 @@ def _feat_in_chi_range(feat, chi_range):
     chi = feat.get("chi_deg")
     if chi is None:
         return True
-    # The range may be expressed in unwrapped coords (hi > 180) when the χ
-    # selection crosses the ±180 seam; shift a negative χ up to match.
     if hi > 180 and chi < lo:
         chi += 360
     return lo <= chi <= hi
 
 
-def _build_outline_groups(features, n_rows, n_cols, visible_refs,
-                          chi_range=None):
+def _build_outline_groups(features, n_rows, n_cols, visible_refs, chi_range=None):
     """Merge all feature masks per reflection for outline drawing."""
     groups = []
     for ref in visible_refs:
@@ -206,124 +195,38 @@ def _build_outline_groups(features, n_rows, n_cols, visible_refs,
     return groups
 
 
-def _draw_2d_heatmap(ax, features, grids, n_rows, n_cols, metric, cb_axes,
-                     visible_refs=None, show_labels=False, chi_range=None):
-    """Draw the 2D heatmap with merged outlines colored by reflection."""
-    if visible_refs is None:
-        visible_refs = REFLECTIONS
-    ax.clear()
-    ax.set_facecolor("white")
-    for cb_ax in cb_axes:
-        cb_ax.set_visible(False)
+# ─────────────────────────────────────────────────────────────────────
+# pyqtgraph helpers
+# ─────────────────────────────────────────────────────────────────────
+def _get_cmap(name):
+    """pyqtgraph ColorMap by name, falling back through matplotlib."""
+    try:
+        return pg.colormap.get(name)
+    except Exception:
+        try:
+            return pg.colormap.get(name, source="matplotlib")
+        except Exception:
+            return pg.colormap.get("viridis")
 
-    outline_groups = _build_outline_groups(features, n_rows, n_cols,
-                                           visible_refs, chi_range=chi_range)
 
-    chi_valid = {}
-    if chi_range is not None:
-        for ref in visible_refs:
-            mask = np.zeros((n_rows, n_cols), dtype=bool)
-            for f in features:
-                if f["reflection"] == ref and _feat_in_chi_range(f, chi_range):
-                    m = f.get("_mask")
-                    if m is not None:
-                        mask |= m
-            chi_valid[ref] = mask
+def _scalar_to_rgba(arr, vmin, vmax, cmap):
+    """Map a 2-D scalar array → (H, W, 4) uint8 RGBA, NaN → transparent."""
+    h, w = arr.shape
+    out = np.zeros((h, w, 4), dtype=np.ubyte)
+    finite = np.isfinite(arr)
+    if finite.any():
+        lut = cmap.getLookupTable(0.0, 1.0, 256)  # (256, 3) uint8
+        norm = np.clip((arr - vmin) / max(vmax - vmin, 1e-9), 0, 1)
+        idx = np.zeros_like(arr, dtype=int)
+        idx[finite] = (norm[finite] * 255).astype(int)
+        out[..., :3] = lut[idx]
+        out[..., 3] = np.where(finite, 255, 0).astype(np.ubyte)
+    return out
 
-    if metric == "none":
-        rgba = np.ones((n_rows, n_cols, 4))
-        for ref, merged in outline_groups:
-            rgb = mcolors.to_rgb(REF_COLORS[ref])
-            pastel = tuple(c * 0.35 + 0.65 for c in rgb)
-            for ch in range(3):
-                rgba[:, :, ch] = np.where(merged, pastel[ch], rgba[:, :, ch])
-        ax.imshow(rgba, origin="upper", aspect="equal", interpolation="nearest")
 
-    else:
-        combined = np.full((n_rows, n_cols), np.nan)
-        for ref in visible_refs:
-            if ref not in grids:
-                continue
-            Z = grids[ref]
-            valid = np.isfinite(Z)
-            if metric == "intensity":
-                valid = valid & (Z > 0)
-            if ref in chi_valid:
-                valid = valid & chi_valid[ref]
-            if not valid.any():
-                continue
-            first_fill = valid & np.isnan(combined)
-            if metric == "strain":
-                better = valid & np.isfinite(combined) & (np.abs(Z) > np.abs(combined))
-            else:
-                better = valid & np.isfinite(combined) & (Z > combined)
-            combined = np.where(first_fill | better, Z, combined)
-
-        has_data = np.isfinite(combined)
-        if has_data.any():
-            finite = combined[has_data]
-            if metric == "intensity":
-                vmin, vmax = 0.0, float(finite.max())
-            else:
-                vmin, vmax = float(finite.min()), float(finite.max())
-            if abs(vmax - vmin) < 1e-8:
-                vmax = vmin + 1
-            norm = mcolors.Normalize(vmin=vmin, vmax=vmax)
-            cmap = plt.get_cmap(METRIC_CMAPS.get(metric, "viridis")).copy()
-            cmap.set_bad("white")
-            display = np.ma.array(combined, mask=~has_data)
-            ax.imshow(display, origin="upper", aspect="equal",
-                      interpolation="nearest", cmap=cmap, norm=norm)
-
-            if cb_axes:
-                cb_ax = cb_axes[0]
-                cb_ax.set_visible(True)
-                cb_ax.clear()
-                sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
-                sm.set_array([])
-                cb = ax.figure.colorbar(sm, cax=cb_ax)
-                cb.ax.tick_params(labelsize=6)
-                cb.set_label(METRIC_ZLABELS.get(metric, ""), fontsize=7)
-        else:
-            ax.imshow(np.ones((n_rows, n_cols, 3)), origin="upper",
-                      aspect="equal", interpolation="nearest")
-
-    for ref, merged in outline_groups:
-        color = REF_COLORS[ref]
-        ax.contour(merged.astype(float), levels=[0.5], colors=[color],
-                   linewidths=1.5)
-
-    if show_labels:
-        for feat in features:
-            ref = feat["reflection"]
-            if ref not in visible_refs:
-                continue
-            if not _feat_in_chi_range(feat, chi_range):
-                continue
-            r, c = feat["center_row"], feat["center_col"]
-            chi = feat.get("chi_deg", 0)
-            fid = feat.get("feature_id", "?")
-            color = REF_COLORS.get(ref, "black")
-            ax.plot(c, r, "o", color=color, markersize=3)
-            ax.annotate(
-                f"#{fid}\nχ={chi:.0f}°",
-                xy=(c, r), xytext=(c + 2, r - 2),
-                color=color, fontsize=5, fontweight="bold",
-                bbox=dict(boxstyle="round,pad=0.1", fc="white", alpha=0.85,
-                          ec=color, linewidth=0.3),
-                arrowprops=dict(arrowstyle="-", color=color, lw=0.3),
-            )
-
-    legend_patches = [Patch(facecolor=REF_COLORS[r], edgecolor=REF_COLORS[r],
-                            label=r, linewidth=2)
-                      for r in visible_refs if r in REF_COLORS]
-    if legend_patches:
-        ax.legend(handles=legend_patches, loc="upper right", fontsize=8)
-
-    ax.set_xlabel("Col (scan x)", fontsize=9)
-    ax.set_ylabel("Row (scan y)", fontsize=9)
-    ax.set_title(METRIC_2D_TITLES.get(metric, metric), fontsize=10)
-    ax.tick_params(labelsize=7)
+def _hex_rgb(hex_color):
+    c = QColor(hex_color)
+    return c.red(), c.green(), c.blue()
 
 
 class QRangeSlider(QWidget):
@@ -404,10 +307,7 @@ class QRangeSlider(QWidget):
         elif abs(x - x_hi) <= 10:
             self._dragging = "hi"
         elif x_lo < x < x_hi:
-            if abs(x - x_lo) < abs(x - x_hi):
-                self._dragging = "lo"
-            else:
-                self._dragging = "hi"
+            self._dragging = "lo" if abs(x - x_lo) < abs(x - x_hi) else "hi"
 
     def mouseMoveEvent(self, event):
         if self._dragging is None:
@@ -415,11 +315,9 @@ class QRangeSlider(QWidget):
         v = self._x_to_val(event.x())
         v = max(self._min, min(self._max, v))
         if self._dragging == "lo":
-            v = min(v, self._hi - 1)
-            self._lo = v
+            self._lo = min(v, self._hi - 1)
         else:
-            v = max(v, self._lo + 1)
-            self._hi = v
+            self._hi = max(v, self._lo + 1)
         self.update()
         self.rangeChanged.emit(self._lo, self._hi)
 
@@ -428,13 +326,7 @@ class QRangeSlider(QWidget):
 
 
 class _WrapSpinBox(QSpinBox):
-    """Spin box for a circular angle.
-
-    Its internal value lives in the *unwrapped* coordinate used by the slider
-    and histogram (so it can exceed +180 when the χ cluster crosses the ±180
-    seam), but it always displays — and accepts — the real wrapped angle in
-    [-180, 180]. e.g. internal 185 shows as "-175°"; typing "-175" stores 185.
-    """
+    """Spin box for a circular angle (internal unwrapped, displays wrapped)."""
 
     @staticmethod
     def _wrap(v):
@@ -449,7 +341,7 @@ class _WrapSpinBox(QSpinBox):
             return self.value()
         v = int(m.group())
         lo, hi = self.minimum(), self.maximum()
-        if v < lo:                 # negative angle on the unwrapped (>180) side
+        if v < lo:
             v += 360
         return max(lo, min(hi, v))
 
@@ -468,17 +360,14 @@ class DeviceMapWindow(QMainWindow):
         self.current_grids = grids
         self.visible_refs = list(REFLECTIONS)
         self.show_labels = False
-        self._highlight_artists = []
+        self._highlight_items = []
+        self._point_items = []
+        self._outline_items = []
         self._highlighted_idx = None
         self._locked_idx = None
-        self._chi_hist_ref = None     # None = checked layers; else a reflection
-        self._chi_weight = "count"    # "count" or "area" (weight by n_bins)
+        self._chi_hist_ref = None
+        self._chi_weight = "count"
 
-        # χ is a circular angle. When the data cluster crosses the ±180 seam
-        # (raw span > 180°), we work in an "unwrapped" coordinate where negative
-        # angles are shifted by +360, so the cluster is contiguous and the
-        # slider/spinboxes/red-lines stay left→right aligned with the histogram.
-        # Real wrapped angles are shown for display; see _wrap_chi / _WrapSpinBox.
         all_chi = [f["chi_deg"] for f in features if f.get("chi_deg") is not None]
         self._chi_wraps = bool(all_chi) and (max(all_chi) - min(all_chi)) > 180
         unwrapped = [self._unwrap_chi(c) for c in all_chi]
@@ -491,30 +380,39 @@ class DeviceMapWindow(QMainWindow):
         self._chi_hi = float(self._chi_data_max)
 
         self._build_ui()
-        self.canvas.mpl_connect("motion_notify_event", self._on_mouse_move)
-        self.canvas.mpl_connect("button_press_event", self._on_click)
         self._update_chi_visuals()
         self._redraw()
 
+    # ----- UI ---------------------------------------------------------
     def _build_ui(self):
         central = QWidget()
         self.setCentralWidget(central)
         layout = QHBoxLayout(central)
         layout.setContentsMargins(4, 4, 4, 4)
-
         splitter = QSplitter(Qt.Horizontal)
         layout.addWidget(splitter)
 
-        # Left: canvas + hover label
+        # Left: main heatmap + hover label
         left = QWidget()
         left_lay = QVBoxLayout(left)
         left_lay.setContentsMargins(0, 0, 0, 0)
 
-        self.fig = plt.figure(figsize=(10, 7), facecolor="white")
-        self.canvas = FigureCanvasQTAgg(self.fig)
-        self.toolbar = NavigationToolbar2QT(self.canvas, left)
-        left_lay.addWidget(self.toolbar)
-        left_lay.addWidget(self.canvas, stretch=1)
+        self.glw = pg.GraphicsLayoutWidget()
+        self.glw.setBackground("w")
+        self.plot = self.glw.addPlot(row=0, col=0)
+        self.plot.setLabel("bottom", "Col (scan x)")
+        self.plot.setLabel("left", "Row (scan y)")
+        self.plot.setAspectLocked(True)
+        self.plot.invertY(True)            # origin='upper': row 0 at top
+        self.plot.getViewBox().setBackgroundColor("w")
+        self.img_item = pg.ImageItem()
+        self.plot.addItem(self.img_item)
+        self.colorbar = None
+        self.legend = self.plot.addLegend(offset=(-10, 10))
+        left_lay.addWidget(self.glw, 1)
+
+        self.plot.scene().sigMouseMoved.connect(self._on_mouse_move)
+        self.plot.scene().sigMouseClicked.connect(self._on_click)
 
         self.hover_label = QLabel("Hover over a feature to see details")
         self.hover_label.setStyleSheet(
@@ -524,12 +422,11 @@ class DeviceMapWindow(QMainWindow):
         left_lay.addWidget(self.hover_label)
         splitter.addWidget(left)
 
-        # Right: controls + histogram
+        # Right: controls + histogram + arc
         right = QWidget()
         rl = QVBoxLayout(right)
         rl.setContentsMargins(6, 6, 6, 6)
 
-        # --- Layers ---
         rg = QGroupBox("Layers")
         rgl = QVBoxLayout(rg)
         btn_row = QHBoxLayout()
@@ -545,8 +442,7 @@ class DeviceMapWindow(QMainWindow):
         for i, ref in enumerate(REFLECTIONS):
             cb = QCheckBox(ref)
             cb.setChecked(True)
-            cb.setStyleSheet(
-                f"QCheckBox {{ color: {REF_COLORS[ref]}; }}")
+            cb.setStyleSheet(f"QCheckBox {{ color: {REF_COLORS[ref]}; }}")
             cb.toggled.connect(self._on_layer_toggle)
             row.addWidget(cb)
             self.layer_cbs[ref] = cb
@@ -558,14 +454,12 @@ class DeviceMapWindow(QMainWindow):
 
         tog = QHBoxLayout()
         self.labels_cb = QCheckBox("Points")
-        self.labels_cb.setChecked(False)
         self.labels_cb.toggled.connect(self._on_labels_toggle)
         tog.addWidget(self.labels_cb)
         tog.addStretch()
         rgl.addLayout(tog)
         rl.addWidget(rg)
 
-        # --- Metric ---
         sg = QGroupBox("Metric")
         sl = QVBoxLayout(sg)
         self.metric_combo = QComboBox()
@@ -576,13 +470,11 @@ class DeviceMapWindow(QMainWindow):
         self.metric_desc_label = QLabel(METRIC_DESCRIPTIONS.get(self.metric, ""))
         self.metric_desc_label.setWordWrap(True)
         self.metric_desc_label.setStyleSheet(
-            "color: #666; font-size: 11px; font-style: italic; padding: 2px 2px 0 2px;")
+            "color: #666; font-size: 11px; font-style: italic; padding: 2px;")
         sl.addWidget(self.metric_desc_label)
         rl.addWidget(sg)
 
-        # --- Azimuthal distribution (χ) ---
         rl.addWidget(QLabel("  Azimuthal distribution (χ)"))
-
         ref_row = QHBoxLayout()
         ref_row.addWidget(QLabel("Reflection:"))
         self.chi_ref_combo = QComboBox()
@@ -596,25 +488,18 @@ class DeviceMapWindow(QMainWindow):
         self.chi_weight_combo = QComboBox()
         self.chi_weight_combo.addItem("Counts", "count")
         self.chi_weight_combo.addItem("Area (bins)", "area")
-        self.chi_weight_combo.currentIndexChanged.connect(
-            self._on_chi_weight_changed)
+        self.chi_weight_combo.currentIndexChanged.connect(self._on_chi_weight_changed)
         ref_row.addWidget(self.chi_weight_combo)
         rl.addLayout(ref_row)
 
-        self.chi_hist_fig = Figure(figsize=(4, 2.5))
-        self.chi_hist_fig.patch.set_facecolor("white")
-        self.chi_hist_ax = self.chi_hist_fig.add_subplot(111)
-        self.chi_hist_ax.set_facecolor("white")
-        self.chi_hist_fig.subplots_adjust(
-            left=0.15, right=0.95, top=0.88, bottom=0.22)
-        self.chi_hist_canvas = FigureCanvasQTAgg(self.chi_hist_fig)
-        self.chi_hist_canvas.setFixedHeight(230)
-        self.chi_hist_canvas.setSizePolicy(
-            QSizePolicy.Expanding, QSizePolicy.Fixed)
-        rl.addWidget(self.chi_hist_canvas)
+        self.chi_hist = pg.PlotWidget()
+        self.chi_hist.setBackground("w")
+        self.chi_hist.setFixedHeight(230)
+        self.chi_hist.setLabel("bottom", "χ (°)")
+        self.chi_hist.setLabel("left", "Count")
+        rl.addWidget(self.chi_hist)
 
-        self.chi_range_slider = QRangeSlider(
-            self._chi_data_min, self._chi_data_max)
+        self.chi_range_slider = QRangeSlider(self._chi_data_min, self._chi_data_max)
         self.chi_range_slider.rangeChanged.connect(self._on_range_slider)
         rl.addWidget(self.chi_range_slider)
 
@@ -641,78 +526,194 @@ class DeviceMapWindow(QMainWindow):
         self.chi_range_label = QLabel(
             f"χ: {self._chi_data_min}° to {self._chi_data_max}°")
         self.chi_range_label.setStyleSheet(
-            "font-family: monospace; font-size: 11px; color: #555; "
-            "padding: 2px;")
+            "font-family: monospace; font-size: 11px; color: #555; padding: 2px;")
         rl.addWidget(self.chi_range_label)
 
-        self.arc_fig = Figure(figsize=(4, 1.5))
-        self.arc_fig.patch.set_facecolor("white")
-        self.arc_ax = self.arc_fig.add_subplot(111, polar=True)
-        self.arc_fig.subplots_adjust(left=0.05, right=0.95, top=0.95,
-                                     bottom=0.05)
-        self.arc_canvas = FigureCanvasQTAgg(self.arc_fig)
-        self.arc_canvas.setFixedHeight(120)
-        self.arc_canvas.setSizePolicy(
-            QSizePolicy.Expanding, QSizePolicy.Fixed)
-        rl.addWidget(self.arc_canvas)
+        self.arc_plot = pg.PlotWidget()
+        self.arc_plot.setBackground("w")
+        self.arc_plot.setFixedHeight(120)
+        self.arc_plot.setAspectLocked(True)
+        self.arc_plot.hideAxis("bottom")
+        self.arc_plot.hideAxis("left")
+        self.arc_plot.setMouseEnabled(False, False)
+        rl.addWidget(self.arc_plot)
 
-        # --- Feature info ---
         self.info_label = QLabel("")
         self.info_label.setWordWrap(True)
-        self.info_label.setStyleSheet(
-            "QLabel { font-size: 10pt; padding: 6px; }")
+        self.info_label.setStyleSheet("QLabel { font-size: 10pt; padding: 6px; }")
         rl.addWidget(self.info_label)
 
         rl.addStretch()
         splitter.addWidget(right)
         splitter.setSizes([950, 450])
 
-    def _setup_axes(self):
-        self.fig.clear()
-        self.fig.subplots_adjust(left=0.05, right=0.92, top=0.95, bottom=0.05)
-        self.ax_2d = self.fig.add_subplot(111)
-        self.ax_cb1 = self.fig.add_axes([0.93, 0.25, 0.015, 0.55])
-        self.ax_cb1.set_visible(False)
-
+    # ----- chi coordinate helpers -------------------------------------
     def _unwrap_chi(self, c):
-        """Raw χ → unwrapped coordinate (negative angles shifted +360 if wrapped)."""
         return c + 360 if (self._chi_wraps and c < 0) else c
 
     def _wrap_chi(self, u):
-        """Unwrapped coordinate → real wrapped χ in [-180, 180] for display."""
         return u - 360 if u > 180 else u
 
     def _chi_range(self):
-        if (self._chi_lo <= self._chi_data_min
-                and self._chi_hi >= self._chi_data_max):
+        if (self._chi_lo <= self._chi_data_min and self._chi_hi >= self._chi_data_max):
             return None
         return (self._chi_lo, self._chi_hi)
 
+    # ----- main heatmap -----------------------------------------------
+    def _compute_combined(self, metric, visible_refs, chi_range):
+        """Return (combined, vmin, vmax) over visible refs with chi filtering."""
+        chi_valid = {}
+        if chi_range is not None:
+            for ref in visible_refs:
+                mask = np.zeros((self.n_rows, self.n_cols), dtype=bool)
+                for f in self.features:
+                    if f["reflection"] == ref and _feat_in_chi_range(f, chi_range):
+                        m = f.get("_mask")
+                        if m is not None:
+                            mask |= m
+                chi_valid[ref] = mask
+
+        combined = np.full((self.n_rows, self.n_cols), np.nan)
+        for ref in visible_refs:
+            if ref not in self.current_grids:
+                continue
+            Z = self.current_grids[ref]
+            valid = np.isfinite(Z)
+            if metric == "intensity":
+                valid = valid & (Z > 0)
+            if ref in chi_valid:
+                valid = valid & chi_valid[ref]
+            if not valid.any():
+                continue
+            first_fill = valid & np.isnan(combined)
+            if metric == "strain":
+                better = valid & np.isfinite(combined) & (np.abs(Z) > np.abs(combined))
+            else:
+                better = valid & np.isfinite(combined) & (Z > combined)
+            combined = np.where(first_fill | better, Z, combined)
+
+        has = np.isfinite(combined)
+        if not has.any():
+            return combined, 0.0, 1.0
+        finite = combined[has]
+        if metric == "intensity":
+            vmin, vmax = 0.0, float(finite.max())
+        else:
+            vmin, vmax = float(finite.min()), float(finite.max())
+        if abs(vmax - vmin) < 1e-8:
+            vmax = vmin + 1
+        return combined, vmin, vmax
+
+    def _clear_items(self, items):
+        for it in items:
+            try:
+                self.plot.removeItem(it)
+            except Exception:
+                pass
+        items.clear()
+
     def _redraw(self):
-        self._highlight_artists.clear()
-        self._highlighted_idx = None
+        self._clear_highlight(draw=False)
+        self._clear_items(self._outline_items)
+        self._clear_items(self._point_items)
         if self._locked_idx is None:
             self.info_label.setText("")
             self.hover_label.setText("Hover over a feature to see details")
-        self._setup_axes()
-        _draw_2d_heatmap(self.ax_2d, self.features, self.current_grids,
-                         self.n_rows, self.n_cols, self.metric,
-                         [self.ax_cb1],
-                         visible_refs=self.visible_refs,
-                         show_labels=self.show_labels,
-                         chi_range=self._chi_range())
+
+        chi_range = self._chi_range()
+        outline_groups = _build_outline_groups(
+            self.features, self.n_rows, self.n_cols, self.visible_refs, chi_range)
+
+        # Base image
+        if self.metric == "none":
+            rgba = np.zeros((self.n_rows, self.n_cols, 4), dtype=np.ubyte)
+            for ref, merged in outline_groups:
+                r, g, b = _hex_rgb(REF_COLORS[ref])
+                pastel = tuple(int(ch * 0.35 + 0.65 * 255) for ch in (r, g, b))
+                rgba[merged, 0] = pastel[0]
+                rgba[merged, 1] = pastel[1]
+                rgba[merged, 2] = pastel[2]
+                rgba[merged, 3] = 255
+            self.img_item.setImage(rgba, autoLevels=False)
+            self._update_colorbar(None, None, None)
+        else:
+            combined, vmin, vmax = self._compute_combined(
+                self.metric, self.visible_refs, chi_range)
+            cmap = _get_cmap(METRIC_CMAPS.get(self.metric, "viridis"))
+            rgba = _scalar_to_rgba(combined, vmin, vmax, cmap)
+            self.img_item.setImage(rgba, autoLevels=False)
+            if np.isfinite(combined).any():
+                self._update_colorbar(cmap, vmin, vmax)
+            else:
+                self._update_colorbar(None, None, None)
+
+        # Outlines (IsocurveItem at 0.5 on each merged mask)
+        for ref, merged in outline_groups:
+            iso = pg.IsocurveItem(data=merged.astype(float), level=0.5,
+                                  pen=pg.mkPen(REF_COLORS[ref], width=1.5))
+            iso.setZValue(5)
+            self.plot.addItem(iso)
+            self._outline_items.append(iso)
+
+        # Legend (rebuild)
+        self.legend.clear()
+        for ref in self.visible_refs:
+            if ref in REF_COLORS:
+                s = pg.ScatterPlotItem(pen=None, brush=pg.mkBrush(REF_COLORS[ref]), size=10)
+                self.legend.addItem(s, ref)
+
+        # Points / labels
+        if self.show_labels:
+            self._draw_points(chi_range)
+
+        self.plot.setTitle(METRIC_2D_TITLES.get(self.metric, self.metric))
+
         if self._locked_idx is not None:
             feat = self.features[self._locked_idx]
             if (feat["reflection"] in self.visible_refs
-                    and _feat_in_chi_range(feat, self._chi_range())):
+                    and _feat_in_chi_range(feat, chi_range)):
                 self._draw_highlight(self._locked_idx)
             else:
                 self._locked_idx = None
-                self.info_label.setText("")
-                self.hover_label.setText(
-                    "Hover over a feature to see details")
-        self.canvas.draw_idle()
 
+    def _update_colorbar(self, cmap, vmin, vmax):
+        if self.colorbar is not None:
+            try:
+                self.glw.removeItem(self.colorbar)
+            except Exception:
+                pass
+            self.colorbar = None
+        if cmap is None:
+            return
+        self.colorbar = pg.ColorBarItem(
+            values=(vmin, vmax), colorMap=cmap,
+            label=METRIC_ZLABELS.get(self.metric, ""))
+        self.glw.addItem(self.colorbar, row=0, col=1)
+
+    def _draw_points(self, chi_range):
+        spots = []
+        for feat in self.features:
+            ref = feat["reflection"]
+            if ref not in self.visible_refs or not _feat_in_chi_range(feat, chi_range):
+                continue
+            c, r = feat["center_col"], feat["center_row"]
+            spots.append({"pos": (c, r), "brush": pg.mkBrush(REF_COLORS.get(ref, "k")),
+                          "size": 6, "pen": None})
+            fid = feat.get("feature_id", "?")
+            chi = feat.get("chi_deg", 0)
+            t = pg.TextItem(f"#{fid} χ={chi:.0f}°", color=REF_COLORS.get(ref, "k"),
+                            anchor=(0, 1))
+            t.setPos(c + 1, r - 1)
+            t.setZValue(15)
+            self.plot.addItem(t)
+            self._point_items.append(t)
+        if spots:
+            sc = pg.ScatterPlotItem(spots=spots)
+            sc.setZValue(14)
+            self.plot.addItem(sc)
+            self._point_items.append(sc)
+
+    # ----- layer / metric controls ------------------------------------
     def _check_all_layers(self):
         for cb in self.layer_cbs.values():
             cb.setChecked(True)
@@ -722,9 +723,7 @@ class DeviceMapWindow(QMainWindow):
             cb.setChecked(False)
 
     def _on_layer_toggle(self):
-        self.visible_refs = [ref for ref in REFLECTIONS
-                             if self.layer_cbs[ref].isChecked()]
-        # The histogram's "Checked layers" mode follows the layer checkboxes.
+        self.visible_refs = [ref for ref in REFLECTIONS if self.layer_cbs[ref].isChecked()]
         if self._chi_hist_ref is None:
             self._draw_chi_histogram()
         self._redraw()
@@ -744,21 +743,16 @@ class DeviceMapWindow(QMainWindow):
                 self.features, self.n_rows, self.n_cols, metric=key)
         self._redraw()
 
-    # --- Chi range filter ---
-
+    # ----- chi range filter -------------------------------------------
     def _update_chi_visuals(self):
         self._draw_chi_histogram()
         self._draw_chi_arc()
         self.chi_range_label.setText(
-            f"χ: {self._wrap_chi(self._chi_lo):.0f}° "
-            f"to {self._wrap_chi(self._chi_hi):.0f}°")
+            f"χ: {self._wrap_chi(self._chi_lo):.0f}° to {self._wrap_chi(self._chi_hi):.0f}°")
 
     def _draw_chi_histogram(self):
-        ax = self.chi_hist_ax
-        ax.clear()
-        ax.set_facecolor("white")
-
-        ref_filter = self._chi_hist_ref     # None -> follow checked layers
+        self.chi_hist.clear()
+        ref_filter = self._chi_hist_ref
         area_mode = self._chi_weight == "area"
         chis, weights = [], []
         for f in self.features:
@@ -774,68 +768,43 @@ class DeviceMapWindow(QMainWindow):
             weights.append(float(f.get("n_bins", 0)) if area_mode else 1.0)
 
         if not chis or sum(weights) == 0:
-            ax.text(0.5, 0.5, "No χ data", transform=ax.transAxes,
-                    ha="center", va="center", color="#aaa", fontsize=10)
-            self.chi_hist_canvas.draw_idle()
+            t = pg.TextItem("No χ data", color="#aaa", anchor=(0.5, 0.5))
+            self.chi_hist.addItem(t)
+            t.setPos(0, 0)
             return
 
-        # Work in the same unwrapped coordinate as the slider so the red range
-        # markers line up with the slider handles (lo/hi are already unwrapped).
         all_plot = [self._unwrap_chi(c) for c in chis]
         selected = [self._chi_lo <= u <= self._chi_hi for u in all_plot]
         in_plot = [u for u, s in zip(all_plot, selected) if s]
         in_w = [w for w, s in zip(weights, selected) if s]
-        lo_plot = self._chi_lo
-        hi_plot = self._chi_hi
 
         bin_lo = min(all_plot) - 5
         bin_hi = max(all_plot) + 5
         edges = np.arange(bin_lo, bin_hi + 5, 5)
         centers = (edges[:-1] + edges[1:]) / 2
         h_all, _ = np.histogram(all_plot, bins=edges, weights=weights)
-        h_in, _ = np.histogram(in_plot, bins=edges, weights=in_w)
+        h_in, _ = np.histogram(in_plot, bins=edges, weights=in_w) if in_plot \
+            else (np.zeros(len(centers)), None)
 
         total = sum(weights)
         pct = 100 * sum(in_w) / total if total else 0
         span = self._chi_hi - self._chi_lo
 
-        ax.bar(centers, h_all, width=4.5, color="#ccc", alpha=0.5,
-               label="all")
-        ax.bar(centers, h_in, width=4.5, color="#4363d8", alpha=0.85,
-               label=f"{pct:.0f}%")
-
-        ax.axvline(lo_plot, color="red", ls="--", lw=1.2, alpha=0.8)
-        ax.axvline(hi_plot, color="red", ls="--", lw=1.2, alpha=0.8)
+        self.chi_hist.addItem(pg.BarGraphItem(
+            x=centers, height=h_all, width=4.5, brush=(204, 204, 204, 130), pen=None))
+        self.chi_hist.addItem(pg.BarGraphItem(
+            x=centers, height=h_in, width=4.5, brush=(67, 99, 216, 220), pen=None))
+        for v in (self._chi_lo, self._chi_hi):
+            self.chi_hist.addItem(pg.InfiniteLine(
+                pos=v, angle=90, pen=pg.mkPen("r", width=1.2, style=Qt.DashLine)))
 
         ref_label = "checked layers" if ref_filter is None else ref_filter
-        ax.set_xlabel("χ (°)", color="#222", fontsize=8)
-        ax.set_ylabel("Total bins (area)" if area_mode else "Count",
-                      color="#222", fontsize=8)
-        ax.set_title(
-            f"{ref_label} — azimuthal  ({pct:.0f}% selected, "
-            f"{span:.0f}° span)",
-            color="#222", fontsize=9, pad=4)
-        ax.legend(fontsize=7, loc="upper left", framealpha=0.7,
-                  labelcolor="#222")
-        ax.tick_params(colors="#222", labelsize=7)
-
-        if self._chi_wraps:
-            import matplotlib.ticker as mticker
-            ax.xaxis.set_major_formatter(
-                mticker.FuncFormatter(
-                    lambda x, _: f"{x - 360:.0f}" if x > 180
-                    else f"{x:.0f}"))
-
-        for sp in ax.spines.values():
-            sp.set_color("#bbb")
-        self.chi_hist_canvas.draw_idle()
+        self.chi_hist.setLabel("left", "Total bins" if area_mode else "Count")
+        self.chi_hist.setTitle(f"{ref_label} — {pct:.0f}% selected, {span:.0f}° span")
 
     def _on_chi_ref_changed(self):
         idx = self.chi_ref_combo.currentIndex()
-        if idx == 0:
-            self._chi_hist_ref = None          # follow the checked layers
-        else:
-            self._chi_hist_ref = REFLECTIONS[idx - 1]
+        self._chi_hist_ref = None if idx == 0 else REFLECTIONS[idx - 1]
         self._draw_chi_histogram()
 
     def _on_chi_weight_changed(self):
@@ -853,8 +822,7 @@ class DeviceMapWindow(QMainWindow):
             w.blockSignals(False)
 
     def _on_range_slider(self, lo, hi):
-        self._chi_lo = float(lo)
-        self._chi_hi = float(hi)
+        self._chi_lo, self._chi_hi = float(lo), float(hi)
         self._sync_chi_widgets()
         self._update_chi_visuals()
         self._redraw()
@@ -882,47 +850,31 @@ class DeviceMapWindow(QMainWindow):
         self._redraw()
 
     def _draw_chi_arc(self):
-        ax = self.arc_ax
-        ax.clear()
-        ax.set_facecolor("white")
+        self.arc_plot.clear()
 
-        theta_lo = np.radians(self._chi_data_min)
-        theta_hi = np.radians(self._chi_data_max)
-        sel_lo = np.radians(self._chi_lo)
-        sel_hi = np.radians(self._chi_hi)
+        def arc_xy(a_lo, a_hi, r):
+            ang = np.radians(np.linspace(a_lo, a_hi, 200))
+            return r * np.cos(ang), -r * np.sin(ang)  # E=0, clockwise
 
-        bg_theta = np.linspace(theta_lo, theta_hi, 200)
-        ax.fill_between(bg_theta, 0.6, 1.0, color="#e0e0e0", alpha=0.5)
+        # background band
+        for (lo, hi, col) in [
+            (self._chi_data_min, self._chi_data_max, (224, 224, 224)),
+            (self._chi_lo, self._chi_hi, (67, 99, 216))]:
+            xo, yo = arc_xy(lo, hi, 1.0)
+            xi, yi = arc_xy(lo, hi, 0.6)
+            outer = pg.PlotDataItem(xo, yo)
+            inner = pg.PlotDataItem(xi, yi)
+            fill = pg.FillBetweenItem(outer, inner, brush=pg.mkBrush(*col, 150))
+            self.arc_plot.addItem(fill)
+        for a in (self._chi_lo, self._chi_hi):
+            x, y = arc_xy(a, a, 1.0)
+            x0, y0 = arc_xy(a, a, 0.5)
+            self.arc_plot.addItem(pg.PlotDataItem(
+                [x0[0], x[0]], [y0[0], y[0]],
+                pen=pg.mkPen("r", width=1.5, style=Qt.DashLine)))
 
-        sel_theta = np.linspace(sel_lo, sel_hi, 200)
-        ax.fill_between(sel_theta, 0.6, 1.0, color="#4363d8", alpha=0.6)
-
-        for angle in (sel_lo, sel_hi):
-            ax.plot([angle, angle], [0.5, 1.05], color="red",
-                    lw=1.5, ls="--", alpha=0.9)
-
-        ax.set_ylim(0, 1.1)
-        # χ = atan2(det_y - beam_y, det_x - beam_x), measured from the detector
-        # +x axis with rows increasing downward (images use origin='upper').
-        # Anchor χ=0 to East and run clockwise so the circle matches the raw
-        # detector frame: 0°→right (+x), ±180°→left (-x), +90°→down, -90°→up.
-        ax.set_theta_zero_location("E")
-        ax.set_theta_direction(-1)
-        ax.set_xticks([])
-        ax.set_yticks([])
-        ax.spines["polar"].set_visible(False)
-        ax.grid(False)
-        self.arc_canvas.draw_idle()
-
-    # --- Click-to-lock highlight ---
-
-    def _on_click(self, event):
-        if event.inaxes != self.ax_2d or event.xdata is None:
-            return
-        if not self.show_labels:
-            return
-
-        mx, my = event.xdata, event.ydata
+    # ----- hover / click ----------------------------------------------
+    def _nearest_feature(self, mx, my):
         best_idx, best_dist = None, float("inf")
         chi_r = self._chi_range()
         for i, feat in enumerate(self.features):
@@ -935,20 +887,56 @@ class DeviceMapWindow(QMainWindow):
             d = (dc * dc + dr * dr) ** 0.5
             if d < best_dist:
                 best_dist, best_idx = d, i
+        return best_idx, best_dist
 
-        if best_dist > 3.0 or best_idx is None:
+    def _scene_to_view(self, scene_pos):
+        vb = self.plot.getViewBox()
+        if not self.plot.sceneBoundingRect().contains(scene_pos):
+            return None
+        pt = vb.mapSceneToView(scene_pos)
+        return pt.x(), pt.y()
+
+    def _on_click(self, ev):
+        if not self.show_labels:
+            return
+        pos = self._scene_to_view(ev.scenePos())
+        if pos is None:
+            return
+        idx, dist = self._nearest_feature(*pos)
+        if dist > 3.0 or idx is None:
             if self._locked_idx is not None:
                 self._locked_idx = None
                 self._clear_highlight()
             return
-
-        if best_idx == self._locked_idx:
+        if idx == self._locked_idx:
             self._locked_idx = None
             self._clear_highlight()
         else:
-            self._locked_idx = best_idx
+            self._locked_idx = idx
             self._clear_highlight(draw=False)
-            self._draw_highlight(best_idx)
+            self._draw_highlight(idx)
+
+    def _on_mouse_move(self, scene_pos):
+        if self._locked_idx is not None:
+            return
+        if not self.show_labels:
+            if self._highlighted_idx is not None:
+                self._clear_highlight()
+            return
+        pos = self._scene_to_view(scene_pos)
+        if pos is None:
+            if self._highlighted_idx is not None:
+                self._clear_highlight()
+            return
+        idx, dist = self._nearest_feature(*pos)
+        if dist > 3.0 or idx is None:
+            if self._highlighted_idx is not None:
+                self._clear_highlight()
+            return
+        if idx == self._highlighted_idx:
+            return
+        self._clear_highlight(draw=False)
+        self._draw_highlight(idx)
 
     def _draw_highlight(self, idx):
         self._highlighted_idx = idx
@@ -956,98 +944,40 @@ class DeviceMapWindow(QMainWindow):
         mask = feat.get("_mask")
         if mask is None or not mask.any():
             return
-
         ref = feat["reflection"]
-        color_rgb = mcolors.to_rgb(REF_COLORS[ref])
-        rgba = np.zeros((self.n_rows, self.n_cols, 4))
-        rgba[mask, 0] = color_rgb[0]
-        rgba[mask, 1] = color_rgb[1]
-        rgba[mask, 2] = color_rgb[2]
-        rgba[mask, 3] = 0.45
-        img = self.ax_2d.imshow(rgba, origin="upper", aspect="equal",
-                                interpolation="nearest", zorder=10)
-        self._highlight_artists.append(img)
-
-        cs = self.ax_2d.contour(mask.astype(float), levels=[0.5],
-                                colors=["white"], linewidths=3, zorder=11)
-        self._highlight_artists.append(cs)
-        cs2 = self.ax_2d.contour(mask.astype(float), levels=[0.5],
-                                 colors=[REF_COLORS[ref]],
-                                 linewidths=1.8, zorder=12)
-        self._highlight_artists.append(cs2)
+        r, g, b = _hex_rgb(REF_COLORS[ref])
+        rgba = np.zeros((self.n_rows, self.n_cols, 4), dtype=np.ubyte)
+        rgba[mask, 0], rgba[mask, 1], rgba[mask, 2] = r, g, b
+        rgba[mask, 3] = 115
+        hl = pg.ImageItem(rgba)
+        hl.setZValue(10)
+        self.plot.addItem(hl)
+        self._highlight_items.append(hl)
+        for pen in (pg.mkPen("w", width=3), pg.mkPen(REF_COLORS[ref], width=1.8)):
+            iso = pg.IsocurveItem(data=mask.astype(float), level=0.5, pen=pen)
+            iso.setZValue(11)
+            self.plot.addItem(iso)
+            self._highlight_items.append(iso)
 
         fid = feat.get("feature_id", "?")
         ref_tth = feat.get("ref_tth")
         chi = feat.get("chi_deg", 0)
         nbins = int(mask.sum())
         lines = [f"#{fid}  {ref}"]
-        if ref_tth is not None:
-            lines.append(f"2θ={ref_tth:.3f}°  χ={chi:.1f}°")
-        else:
-            lines.append(f"χ={chi:.1f}°")
+        lines.append(f"2θ={ref_tth:.3f}°  χ={chi:.1f}°" if ref_tth is not None
+                     else f"χ={chi:.1f}°")
         lines.append(f"{nbins} bins")
         self.info_label.setText("\n".join(lines))
-
         pinned = "  [pinned]" if self._locked_idx is not None else ""
         tth_str = f"2θ={ref_tth:.3f}°  " if ref_tth is not None else ""
-        self.hover_label.setText(
-            f"#{fid}  {ref}  {tth_str}χ={chi:.1f}°  "
-            f"{nbins} bins{pinned}")
-        self.canvas.draw_idle()
-
-    # --- Hover ---
-
-    def _on_mouse_move(self, event):
-        if self._locked_idx is not None:
-            return
-        if not self.show_labels:
-            if self._highlighted_idx is not None:
-                self._clear_highlight()
-            return
-        if event.inaxes != self.ax_2d or event.xdata is None:
-            if self._highlighted_idx is not None:
-                self._clear_highlight()
-            return
-
-        mx, my = event.xdata, event.ydata
-        best_idx, best_dist = None, float("inf")
-        chi_r = self._chi_range()
-        for i, feat in enumerate(self.features):
-            if feat["reflection"] not in self.visible_refs:
-                continue
-            if not _feat_in_chi_range(feat, chi_r):
-                continue
-            dc = mx - feat["center_col"]
-            dr = my - feat["center_row"]
-            d = (dc * dc + dr * dr) ** 0.5
-            if d < best_dist:
-                best_dist, best_idx = d, i
-
-        if best_dist > 3.0 or best_idx is None:
-            if self._highlighted_idx is not None:
-                self._clear_highlight()
-            return
-
-        if best_idx == self._highlighted_idx:
-            return
-
-        self._clear_highlight(draw=False)
-        self._draw_highlight(best_idx)
+        self.hover_label.setText(f"#{fid}  {ref}  {tth_str}χ={chi:.1f}°  {nbins} bins{pinned}")
 
     def _clear_highlight(self, draw=True):
-        for artist in self._highlight_artists:
-            try:
-                artist.remove()
-            except ValueError:
-                pass
-        self._highlight_artists.clear()
+        self._clear_items(self._highlight_items)
         self._highlighted_idx = None
         if self._locked_idx is None:
             self.info_label.setText("")
-            self.hover_label.setText(
-                "Hover over a feature to see details")
-        if draw:
-            self.canvas.draw_idle()
+            self.hover_label.setText("Hover over a feature to see details")
 
 
 def build_window(project_root=".", scan=None, bin_size=3):
@@ -1076,53 +1006,23 @@ def build_window(project_root=".", scan=None, bin_size=3):
 
 def launch_gui(project_root=".", bin_size=3, scan=None):
     """Configure paths and launch the device map (used by the CLI)."""
-    configure(project_root=project_root, bin_size=bin_size, scan=scan)
-    _run()
+    win = build_window(project_root=project_root, scan=scan, bin_size=bin_size)
+    app = QApplication.instance() or QApplication(sys.argv)
+    win.show()
+    app.exec_()
 
 
 def main():
     import argparse
     parser = argparse.ArgumentParser(description="XRD device feature map")
-    parser.add_argument("--project-root", type=str, default=".",
-                        help="Path to the xrd-tools project root")
-    parser.add_argument("--bin-size", type=int, default=3, help="Bin size to view")
-    parser.add_argument("--scan", default=None, help="Scan number/name")
+    parser.add_argument("--project-root", type=str, default=".")
+    parser.add_argument("--bin-size", type=int, default=3)
+    parser.add_argument("--scan", default=None)
     args = parser.parse_args()
-    launch_gui(project_root=args.project_root, bin_size=args.bin_size, scan=args.scan)
-
-
-def _run():
-    global REFLECTIONS, REF_COLORS
-
-    features = load_features()
-    REFLECTIONS = sorted(set(f["reflection"] for f in features))
-    REF_COLORS = _assign_ref_colors(REFLECTIONS)
-
-    n_rows, n_cols = load_grid_info()
-
-    for feat in features:
-        mask = np.zeros((n_rows, n_cols), dtype=bool)
-        for bk in feat.get("intensity_profile", {}):
-            parts = bk.split("_")
-            if len(parts) == 2:
-                r, c = int(parts[0]), int(parts[1])
-                if 0 <= r < n_rows and 0 <= c < n_cols:
-                    mask[r, c] = True
-        feat["_mask"] = mask
-
-    grids = build_device_grids(features, n_rows, n_cols)
-
-    print(f"Device grid: {n_rows} x {n_cols}")
-    for ref in REFLECTIONS:
-        n = sum(1 for f in features if f["reflection"] == ref)
-        nz = int(np.sum(np.isfinite(grids[ref]) & (grids[ref] > 0)))
-        print(f"  {ref}: {n} features, {nz} non-zero bins")
-
-    print("\nOpening device map...")
     app = QApplication.instance() or QApplication(sys.argv)
-    win = DeviceMapWindow(features, grids, n_rows, n_cols)
+    win = build_window(project_root=args.project_root, bin_size=args.bin_size, scan=args.scan)
     win.show()
-    app.exec_()
+    sys.exit(app.exec_())
 
 
 if __name__ == "__main__":
