@@ -171,5 +171,12 @@ Run CVEvolve (algorithm evolution), by default inside a Podman container.
 - **Creates:** CVEvolve session outputs (under the paths in its own config).
 
 ### `xrd-tools label` / `view` / `device-map` / `orientation`
-Launch the interactive GUIs (`--scan`, `--bin-size`). Read-only viewers/editors
-over the files above.
+Launch one interactive GUI (`--scan`, `--bin-size`). Each opens a single scan:
+the `--scan` flag, else the project's configured scan, else (if unset) the only
+processed scan, else a prompt to choose one. Read-only viewers/editors over the
+files above.
+
+### `xrd-tools gui`
+Launch all four GUIs at once, each in its own window/subprocess.
+- `--scan <id>`, `--bin-size <N>`, `--only "view,device-map"` (subset).
+- Same scan-resolution rules as the single-GUI commands.

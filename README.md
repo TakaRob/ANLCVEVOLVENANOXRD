@@ -92,6 +92,24 @@ xrd-tools aggregate            # -> results/summary/features.csv, device_map.csv
   FROM features GROUP BY reflection;
   ```
 
+### Viewing scans in the GUIs
+
+Each GUI opens **one scan at a time**. Which scan?
+
+- If the project was created with a default scan (`init --scan-number 203`), the
+  GUIs open that scan automatically — no `--scan` needed.
+- To look at another scan, pass it: `xrd-tools view --scan 204`.
+- If the project has **no** default scan and you've processed several, the GUI
+  lists them and asks you to pick (`--scan`); if only one scan exists, it's
+  chosen automatically.
+
+Open all four GUIs for a scan at once:
+
+```bash
+xrd-tools gui --scan 204 --bin-size 3        # all four windows
+xrd-tools gui --only view,device-map         # just a subset
+```
+
 ### No position CSV?
 
 `grid` uses the scan's position CSV when present (auto-found under
@@ -195,7 +213,8 @@ Each GUI also runs standalone, e.g. `python -m xrd_tools.gui.viewer --project-ro
 | `process` | Detect → link → filter → write the feature catalog + CSVs. |
 | `batch` | Run `grid → bin → process` over many scans (`--scans` or `--all`). |
 | `aggregate` | Combine all scans' catalogs into `results/summary/` — `features.csv`, `device_map.csv`, `analysis.db` (SQLite). |
-| `label` / `view` / `device-map` / `orientation` | Launch the interactive GUIs. |
+| `label` / `view` / `device-map` / `orientation` | Launch one interactive GUI. |
+| `gui` | Launch all four GUIs at once, each in its own window (`--only` for a subset). |
 | `run-cvevolve` | Run CVEvolve, by default inside a Podman container. |
 
 All commands take `--root` (project directory, default `.`); the per-scan

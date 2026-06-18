@@ -17,6 +17,7 @@ module needs hard-coded absolute paths.
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 from typing import Any, Optional
 
@@ -227,6 +228,23 @@ class DataManager:
         """Per-scan holdout dir for the grid mapping (tth/reflections are shared)."""
         name = self._scan(scan)
         return (self.holdout_dir / name) if name else self.holdout_dir
+
+    def discover_scans(self) -> list:
+        """List ``Scan_NNNN`` names that have output in this project.
+
+        Scans the per-scan subdirectories under ``results/`` and ``data/bins/``
+        (a scan counts if it appears in either), returning canonical names
+        sorted by scan number. Used to auto-select or enumerate scans when no
+        ``--scan`` is given.
+        """
+        found = set()
+        for base in (self._abs(self.config.get("paths", "results_dir", default="results")),
+                     self.data_dir / "bins"):
+            if base.is_dir():
+                for p in base.iterdir():
+                    if p.is_dir() and re.fullmatch(r"Scan_\d+", p.name):
+                        found.add(p.name)
+        return sorted(found, key=lambda n: self.scan_number_of(n) or 0)
 
     # ----- resolved input files ---------------------------------------
     def raw_scan_dir(self, override: Optional[str] = None, scan: object = None) -> Path:

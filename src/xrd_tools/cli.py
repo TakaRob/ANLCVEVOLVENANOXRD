@@ -282,9 +282,82 @@ def process(bin_size, scan, snr, link_tolerance, h5_path, tth_path, detector_scr
 # ─────────────────────────────────────────────────────────────────────
 # GUIs — one command each
 # ─────────────────────────────────────────────────────────────────────
+def _resolve_gui_scan(root, scan):
+    """Resolve which scan a GUI should open.
+
+    Returns the scan to use (or None to accept the GUI's own default). When no
+    ``--scan`` is given and the project has no configured scan, auto-pick the
+    only processed scan, or exit with the list when several exist.
+    """
+    if scan is not None:
+        return scan
+    dm = DataManager(root)
+    if dm.config.get("scan", "name"):   # project has a default scan configured
+        return None
+    scans = dm.discover_scans()
+    if len(scans) == 1:
+        click.echo(f"[gui] no --scan given; using the only scan found: {scans[0]}")
+        return scans[0]
+    if len(scans) > 1:
+        click.echo("Multiple scans in this project — pick one with --scan:")
+        for s in scans:
+            click.echo(f"  {s}  (--scan {dm.scan_number_of(s)})")
+        raise SystemExit(2)
+    return None   # nothing discovered; let the GUI surface the missing data
+
+
 def _launch_gui(tool, root, scan=None, bin_size=3):
     from .gui import launch
-    return launch(tool, root, scan=scan, bin_size=bin_size)
+    return launch(tool, root, scan=_resolve_gui_scan(root, scan), bin_size=bin_size)
+
+
+# tool name -> (gui module, accepts --bin-size)
+_ALL_GUIS = [
+    ('view', 'xrd_tools.gui.viewer', True),
+    ('label', 'xrd_tools.gui.labeling', False),
+    ('device-map', 'xrd_tools.gui.device_map', True),
+    ('orientation', 'xrd_tools.gui.orientation', True),
+]
+
+
+@main.command()
+@click.option('--root', default='.', help='Project root directory')
+@click.option('--scan', default=None, help='Scan number/name (defaults to config scan)')
+@click.option('--bin-size', type=int, default=3, help='Bin size to view')
+@click.option('--only', default=None,
+              help='Comma-separated subset, e.g. "view,device-map" (default: all four)')
+def gui(root, scan, bin_size, only):
+    """Launch all four GUIs at once, each in its own window."""
+    import subprocess
+    import sys
+
+    root = str(Path(root).resolve())
+    scan = _resolve_gui_scan(root, scan)
+    wanted = {t.strip() for t in only.split(',')} if only else None
+
+    procs = []
+    for name, module, takes_bin in _ALL_GUIS:
+        if wanted and name not in wanted:
+            continue
+        cmd = [sys.executable, '-m', module, '--project-root', root]
+        if scan is not None:
+            cmd += ['--scan', str(scan)]
+        if takes_bin:
+            cmd += ['--bin-size', str(bin_size)]
+        click.echo(f"[gui] launching {name}: {' '.join(cmd)}")
+        procs.append((name, subprocess.Popen(cmd)))
+
+    if not procs:
+        click.echo("No GUIs selected. Check --only.")
+        raise SystemExit(1)
+
+    click.echo(f"\nLaunched {len(procs)} GUI(s). Close the windows (or Ctrl-C here) to exit.")
+    try:
+        for _, p in procs:
+            p.wait()
+    except KeyboardInterrupt:
+        for _, p in procs:
+            p.terminate()
 
 
 @main.command()
