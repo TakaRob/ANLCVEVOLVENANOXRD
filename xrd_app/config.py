@@ -1,0 +1,500 @@
+"""
+Project configuration and path resolution for xrd-app.
+
+A project is a directory containing a ``config.yaml`` plus a standard set of
+sub-directories created by ``xrd-app init``:
+
+    <project>/
+      Raw/        scan registry (scans.json) + links to external scan dirs
+      Binned/     pre-binned xrd_NxN_bins.h5 (per scan)
+      Metadata/   tth.tiff, reflections.json (+ loader), grid mappings, gui_state
+      Labels/     per-scan peak/shape algorithm outputs + manual labels
+      Figures/    saved PNGs (setup histogram, etc.)
+      CVEvolve/   CVEvolve session outputs created from the GUI
+
+Every path used by the CLI and GUI resolves through :class:`DataManager`, which
+applies a consistent precedence:
+
+    1. An explicit override (CLI argument / GUI selection).
+    2. The ``data_sources`` entry in ``config.yaml``.
+    3. A conventional default location inside the project tree.
+
+For ``tth.tiff`` / ``reflections`` a 4th fallback is the bundled package asset.
+Algorithms live in the package's ``PeakAlgorithms/`` / ``ShapeAlgorithms/`` /
+``CombinedAlgorithms/`` libraries (not per project).
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+from pathlib import Path
+from typing import Any, Optional
+
+import yaml
+
+CONFIG_FILENAME = "config.yaml"
+
+# Standard project sub-directories created by ``xrd-app init``.
+PROJECT_DIRS = [
+    "Raw",        # scans.json registry + links to external scan dirs
+    "Binned",     # pre-binned xrd_NxN_bins.h5 (per scan)
+    "Metadata",   # tth.tiff, reflections.json, grid mappings, gui_state.json
+    "Labels",     # per-scan algorithm outputs + manual labels
+    "Figures",    # saved PNGs
+    "CVEvolve",   # CVEvolve sessions created from the GUI
+]
+
+
+def default_config(name: str, root: Path, scan_number: Optional[int] = None) -> dict:
+    """Return a fresh config dict for a newly initialized project."""
+    root = Path(root).resolve()
+    cfg: dict[str, Any] = {
+        "name": name,
+        "scan": {
+            "number": scan_number,
+            "name": f"Scan_{scan_number:04d}" if scan_number is not None else None,
+        },
+        # Filled adaptively from the data by `scan-detect` — never hard-coded.
+        "detector": {"shape": None},
+        # Registry of scans in this project: name -> {dir, n_frames, shape}.
+        # Mirrors Raw/scans.json; kept here for quick access.
+        "scans": {},
+        "paths": {
+            "raw_dir": "Raw",
+            "binned_dir": "Binned",
+            "metadata_dir": "Metadata",
+            "labels_dir": "Labels",
+            "figures_dir": "Figures",
+            "cvevolve_dir": "CVEvolve",
+        },
+        # Absolute paths to external inputs; populated by ``xrd-app link``.
+        "data_sources": {
+            "raw_root": None,        # parent dir holding many Scan_NNNN/ dirs
+            "position_root": None,   # dir holding scan_NNNN_position.csv files
+            "raw_scan_dir": None,    # single-scan raw dir (this project's scan)
+            "position_csv": None,    # single-scan position CSV
+            "tth_map": None,
+            "reflections": None,
+            "grid_mapping": None,
+            "detector_script": None,
+        },
+        # Map of bin_size (int) -> path to the pre-binned HDF5 file.
+        "bins": {},
+        "tracking": {
+            "enabled": True,
+            "mlflow_tracking_uri": f"file://{root / 'CVEvolve' / 'mlruns'}",
+        },
+    }
+    return cfg
+
+
+class ProjectConfig:
+    """Load / save a project's ``config.yaml`` and create its directory tree."""
+
+    def __init__(self, root: os.PathLike | str = ".", data: Optional[dict] = None):
+        self.root = Path(root).resolve()
+        self.data: dict = data if data is not None else {}
+
+    # ----- persistence -------------------------------------------------
+    @property
+    def config_path(self) -> Path:
+        return self.root / CONFIG_FILENAME
+
+    @classmethod
+    def load(cls, root: os.PathLike | str = ".") -> "ProjectConfig":
+        """Load the nearest project config at or above ``root``.
+
+        Walks up from ``root`` looking for the first directory containing
+        ``config.yaml`` (like ``git`` locating ``.git``), so commands and the GUI
+        work from any subdirectory of the project. Falls back to ``root`` itself.
+        """
+        start = Path(root).resolve()
+        project_root = start
+        for d in (start, *start.parents):
+            if (d / CONFIG_FILENAME).exists():
+                project_root = d
+                break
+        cfg = cls(project_root)
+        if cfg.config_path.exists():
+            with open(cfg.config_path) as f:
+                cfg.data = yaml.safe_load(f) or {}
+        return cfg
+
+    def save(self) -> None:
+        with open(self.config_path, "w") as f:
+            yaml.safe_dump(self.data, f, sort_keys=False)
+
+    def exists(self) -> bool:
+        return self.config_path.exists()
+
+    def create_tree(self) -> None:
+        """Create the standard project sub-directories."""
+        for d in PROJECT_DIRS:
+            (self.root / d).mkdir(parents=True, exist_ok=True)
+
+    # ----- convenience accessors --------------------------------------
+    def get(self, *keys, default=None):
+        """Nested get: ``cfg.get('data_sources', 'tth_map')``."""
+        node: Any = self.data
+        for k in keys:
+            if not isinstance(node, dict) or k not in node:
+                return default
+            node = node[k]
+        return node
+
+
+class DataManager:
+    """Resolve project file paths with override -> config -> default precedence.
+
+    The GUI and CLI commands construct one of these from the project root and ask
+    it for paths, e.g. ``dm.tth_map()`` or ``dm.binned_h5(3)``.
+    """
+
+    def __init__(self, root: os.PathLike | str = ".",
+                 config: Optional[ProjectConfig] = None,
+                 scan: Optional[object] = None):
+        self.config = config or ProjectConfig.load(root)
+        self.root = self.config.root
+        # An explicit scan (number or name) overrides config["scan"] for this
+        # instance, so one project can be driven across many scans.
+        self._scan_override = scan
+
+    # ----- internal helpers -------------------------------------------
+    def _abs(self, value: Optional[str]) -> Optional[Path]:
+        if value is None:
+            return None
+        p = Path(value)
+        return p if p.is_absolute() else (self.root / p)
+
+    def _resolve(self, source_key: str, override: Optional[str], default: Path) -> Path:
+        """Apply override -> config[data_sources][key] -> default."""
+        if override:
+            return self._abs(override)
+        configured = self.config.get("data_sources", source_key)
+        if configured:
+            return self._abs(configured)
+        return default
+
+    def _path(self, paths_key: str, default: str) -> Path:
+        return self._abs(self.config.get("paths", paths_key, default=default))
+
+    # ----- standard directories ---------------------------------------
+    @property
+    def raw_dir(self) -> Path:
+        return self._path("raw_dir", "Raw")
+
+    @property
+    def binned_dir_root(self) -> Path:
+        return self._path("binned_dir", "Binned")
+
+    @property
+    def metadata_dir(self) -> Path:
+        return self._path("metadata_dir", "Metadata")
+
+    @property
+    def labels_dir_root(self) -> Path:
+        return self._path("labels_dir", "Labels")
+
+    @property
+    def figures_dir(self) -> Path:
+        return self._path("figures_dir", "Figures")
+
+    @property
+    def cvevolve_dir(self) -> Path:
+        return self._path("cvevolve_dir", "CVEvolve")
+
+    # ----- scan identity ----------------------------------------------
+    @staticmethod
+    def scan_name_of(scan: object) -> Optional[str]:
+        """Normalize a scan identifier to the canonical ``Scan_NNNN`` name."""
+        if scan is None:
+            return None
+        if isinstance(scan, int):
+            return f"Scan_{scan:04d}"
+        s = str(scan).strip()
+        if s.isdigit():
+            return f"Scan_{int(s):04d}"
+        return s  # already a name like "Scan_0203"
+
+    @staticmethod
+    def scan_number_of(scan: object) -> Optional[int]:
+        """Extract the integer scan number from a name or number."""
+        if scan is None:
+            return None
+        if isinstance(scan, int):
+            return scan
+        digits = "".join(ch for ch in str(scan) if ch.isdigit())
+        return int(digits) if digits else None
+
+    def _scan(self, scan: object = None) -> Optional[str]:
+        """Resolve the scan name to use: arg -> instance override -> config."""
+        for candidate in (scan, self._scan_override, self.config.get("scan", "name")):
+            name = self.scan_name_of(candidate)
+            if name:
+                return name
+        return None
+
+    @property
+    def scan_name(self) -> Optional[str]:
+        return self._scan()
+
+    def scan_number(self, scan: object = None) -> Optional[int]:
+        return self.scan_number_of(self._scan(scan)) or self.config.get("scan", "number")
+
+    # ----- scan registry (Raw/scans.json) -----------------------------
+    def scans_registry_path(self) -> Path:
+        return self.raw_dir / "scans.json"
+
+    def scans_registry(self) -> dict:
+        """Read Raw/scans.json: {scan_name: {dir, n_frames, shape}}."""
+        p = self.scans_registry_path()
+        if p.exists():
+            with open(p) as f:
+                return json.load(f) or {}
+        return {}
+
+    def write_scans_registry(self, registry: dict) -> Path:
+        p = self.scans_registry_path()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        with open(p, "w") as f:
+            json.dump(registry, f, indent=2)
+        return p
+
+    def discover_scans(self) -> list:
+        """List ``Scan_NNNN`` names known to this project.
+
+        Prefers the Raw/scans.json registry; falls back to scanning the per-scan
+        subdirectories under ``Binned/`` and ``Labels/``.
+        """
+        reg = self.scans_registry()
+        if reg:
+            return sorted(reg.keys(), key=lambda n: self.scan_number_of(n) or 0)
+        found = set()
+        for base in (self.binned_dir_root, self.labels_dir_root):
+            if base.is_dir():
+                for p in base.iterdir():
+                    if p.is_dir() and re.fullmatch(r"Scan_\d+", p.name):
+                        found.add(p.name)
+        return sorted(found, key=lambda n: self.scan_number_of(n) or 0)
+
+    # ----- per-scan directories ---------------------------------------
+    def labels_dir(self, scan: object = None) -> Path:
+        name = self._scan(scan)
+        return self.labels_dir_root / name if name else self.labels_dir_root
+
+    def binned_dir(self, scan: object = None) -> Path:
+        name = self._scan(scan)
+        return self.binned_dir_root / name if name else self.binned_dir_root
+
+    def metadata_scan_dir(self, scan: object = None) -> Path:
+        """Per-scan metadata dir (grid mapping, per-scan reflections/tth)."""
+        name = self._scan(scan)
+        return (self.metadata_dir / name) if name else self.metadata_dir
+
+    # ----- algorithm output files -------------------------------------
+    def peaks_json(self, algo: str, bin_size: int, scan: object = None) -> Path:
+        return self.labels_dir(scan) / f"{algo}_peaks_{bin_size}x{bin_size}.json"
+
+    def shapes_json(self, algo: str, bin_size: int, scan: object = None) -> Path:
+        return self.labels_dir(scan) / f"{algo}_shapes_{bin_size}x{bin_size}.json"
+
+    def manual_labels_json(self, scan: object = None) -> Path:
+        return self.labels_dir(scan) / "manual_labels.json"
+
+    # ----- resolved input files ---------------------------------------
+    def raw_scan_dir(self, override: Optional[str] = None, scan: object = None) -> Path:
+        """Directory holding a scan's raw per-frame H5 files.
+
+        Resolution: override -> Raw/scans.json registry -> single linked
+        raw_scan_dir (config's own scan) -> raw_root/<scan> -> Raw/<scan>.
+        """
+        if override:
+            return self._abs(override)
+        name = self._scan(scan) or ""
+        reg = self.scans_registry()
+        if name and name in reg and reg[name].get("dir"):
+            return self._abs(reg[name]["dir"])
+        # A single linked raw_scan_dir only applies to the config's own scan.
+        if name == self.scan_name_of(self.config.get("scan", "name")):
+            single = self.config.get("data_sources", "raw_scan_dir")
+            if single:
+                return self._abs(single)
+        raw_root = self.config.get("data_sources", "raw_root")
+        if raw_root:
+            return self._abs(raw_root) / name if name else self._abs(raw_root)
+        return self.raw_dir / name if name else self.raw_dir
+
+    def xrd_frames_dir(self, override: Optional[str] = None, scan: object = None) -> Path:
+        """Directory of raw per-frame H5 files (the ``XRD/`` subdir if present)."""
+        base = self.raw_scan_dir(override, scan)
+        sub = base / "XRD"
+        return sub if sub.is_dir() else base
+
+    def position_csv(self, override: Optional[str] = None, scan: object = None) -> Path:
+        if override:
+            return self._abs(override)
+        name = self._scan(scan)
+        num = self.scan_number_of(name)
+        pos_root = self.config.get("data_sources", "position_root")
+        if pos_root and num is not None:
+            cand = self._abs(pos_root) / f"scan_{num:04d}_position.csv"
+            if cand.exists():
+                return cand
+        if name == self.scan_name_of(self.config.get("scan", "name")):
+            single = self.config.get("data_sources", "position_csv")
+            if single:
+                return self._abs(single)
+        if name:
+            local = self.metadata_scan_dir(scan) / "positions.csv"
+            if local.exists():
+                return local
+        return self.metadata_dir / "positions.csv"
+
+    def _asset(self, name: str) -> Path:
+        """Path to a file bundled with the package (shared defaults)."""
+        return Path(__file__).parent / "assets" / name
+
+    def tth_map(self, override: Optional[str] = None, scan: object = None) -> Path:
+        """2θ-per-pixel map: override -> config -> per-scan -> project -> bundled."""
+        if override:
+            return self._abs(override)
+        configured = self.config.get("data_sources", "tth_map")
+        if configured:
+            return self._abs(configured)
+        per_scan = self.metadata_scan_dir(scan) / "tth.tiff"
+        if per_scan.exists():
+            return per_scan
+        proj = self.metadata_dir / "tth.tiff"
+        return proj if proj.exists() else self._asset("tth.tiff")
+
+    def reflections_json(self, scan: object = None) -> Path:
+        """Reflection data (JSON): per-scan -> project."""
+        per_scan = self.metadata_scan_dir(scan) / "reflections.json"
+        if per_scan.exists():
+            return per_scan
+        return self.metadata_dir / "reflections.json"
+
+    def reflections(self, override: Optional[str] = None, scan: object = None) -> Path:
+        """Reflections module (.py loader) the pipeline imports.
+
+        override -> config -> per-scan Metadata/<scan>/reflections.py ->
+        project Metadata/reflections.py -> bundled asset.
+        """
+        if override:
+            return self._abs(override)
+        configured = self.config.get("data_sources", "reflections")
+        if configured:
+            return self._abs(configured)
+        per_scan = self.metadata_scan_dir(scan) / "reflections.py"
+        if per_scan.exists():
+            return per_scan
+        proj = self.metadata_dir / "reflections.py"
+        return proj if proj.exists() else self._asset("reflections.py")
+
+    def grid_mapping(self, override: Optional[str] = None, bin_size: Optional[int] = None,
+                     scan: object = None) -> Path:
+        if override:
+            return self._abs(override)
+        configured = self.config.get("data_sources", "grid_mapping")
+        if configured:
+            return self._abs(configured)
+        sdir = self.metadata_scan_dir(scan)
+        if bin_size is not None:
+            return sdir / f"grid_mapping_{bin_size}x{bin_size}.json"
+        return sdir / "grid_mapping.json"
+
+    def binned_h5(self, bin_size: int, override: Optional[str] = None,
+                  scan: object = None) -> Path:
+        if override:
+            return self._abs(override)
+        return self.binned_dir(scan) / f"xrd_{bin_size}x{bin_size}_bins.h5"
+
+    # ----- compatibility shims for the embedded legacy GUIs -----------
+    # The viewer/device_map/orientation modules were written against the old
+    # DataManager API (results_dir / holdout_dir / bins_h5). Keep thin aliases
+    # so they resolve correctly against the new project tree unchanged.
+    def results_dir(self, scan: object = None) -> Path:
+        return self.labels_dir(scan)
+
+    @property
+    def holdout_dir(self) -> Path:
+        return self.metadata_dir
+
+    def bins_h5(self, bin_size: int, override: Optional[str] = None,
+                scan: object = None) -> Path:
+        return self.binned_h5(bin_size, override, scan)
+
+    # ----- detector / algorithm libraries -----------------------------
+    def algorithms_dir(self, kind: str = "peak") -> Path:
+        """Directory of a bundled algorithm library shipped with the package."""
+        sub = {"peak": "PeakAlgorithms", "shape": "ShapeAlgorithms",
+               "combined": "CombinedAlgorithms"}.get(kind, "PeakAlgorithms")
+        return Path(__file__).parent / sub
+
+    def detectors_dir(self) -> Path:
+        """The peak-algorithm library directory (holds catalog.json)."""
+        return self.algorithms_dir("peak")
+
+    def load_detector_catalog(self) -> dict:
+        cat = self.detectors_dir() / "catalog.json"
+        if cat.exists():
+            with open(cat) as f:
+                return json.load(f)
+        return {"detectors": []}
+
+    def list_detectors(self, bin_size: Optional[int] = None) -> list:
+        """List bundled *detector* entries (excludes support modules)."""
+        size = f"{bin_size}x{bin_size}" if bin_size else None
+        out = []
+        for d in self.load_detector_catalog().get("detectors", []):
+            if d.get("role") != "detector":
+                continue
+            if size and d.get("bin_size") != size:
+                continue
+            out.append(d)
+        return out
+
+    def best_detector(self, bin_size: int) -> Optional[Path]:
+        """Path to the highest-scoring bundled detector for ``bin_size``."""
+        candidates = self.list_detectors(bin_size) or self.list_detectors(3) \
+            or self.list_detectors()
+        if not candidates:
+            return None
+        candidates.sort(
+            key=lambda d: (d.get("holdout_f1") if d.get("holdout_f1") is not None else -1,
+                           d.get("name") == "tophat_band_adaptive_snr"),
+            reverse=True)
+        return self.detectors_dir() / candidates[0]["file"]
+
+    def resolve_detector_name(self, name: str, bin_size: Optional[int] = None) -> Optional[Path]:
+        """Resolve a bare detector name from the library."""
+        stem = name[:-3] if name.endswith(".py") else name
+        matches = [d for d in self.list_detectors() if d["name"] == stem]
+        if bin_size:
+            sized = [d for d in matches if d.get("bin_size") == f"{bin_size}x{bin_size}"]
+            matches = sized or matches
+        if matches:
+            return self.detectors_dir() / matches[0]["file"]
+        return None
+
+    def detector_script(self, override: Optional[str] = None,
+                        bin_size: Optional[int] = None) -> Path:
+        """Resolve the detector script.
+
+        Precedence: explicit path/name -> config -> best bundled detector.
+        """
+        if override:
+            p = Path(override)
+            if p.exists():
+                return self._abs(override)
+            byname = self.resolve_detector_name(override, bin_size)
+            if byname:
+                return byname
+            return self._abs(override)
+        configured = self.config.get("data_sources", "detector_script")
+        if configured:
+            return self._abs(configured)
+        bundled = self.best_detector(bin_size or 3)
+        return bundled if bundled else (self.detectors_dir() / "detector.py")

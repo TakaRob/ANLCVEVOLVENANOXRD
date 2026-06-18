@@ -3,10 +3,9 @@ requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "xrd-tools"
+name = "xrd-app"
 version = "0.1.0"
-description = "CLI and GUI tools for XRD data analysis and CVEvolve integration"
-readme = "README.md"
+description = "Single-GUI XRD analysis workflow (peak/shape finding, labeling, CVEvolve) over a scriptable CLI"
 requires-python = ">=3.9"
 dependencies = [
     "numpy",
@@ -22,14 +21,26 @@ dependencies = [
     "pyyaml",
 ]
 
+# pyFAI is only needed for the (deferred) .poni -> tth conversion. Keep it
+# optional so the core app installs light; the Convert-.poni button degrades
+# gracefully when it is absent.
 [project.optional-dependencies]
+poni = ["pyFAI"]            # .poni → tth conversion (core/geometry.py)
+viz = ["pyqtgraph"]         # reserved: pyqtgraph GUI rewrite (deferred to final phase)
 notebook = ["ipykernel", "jupyter"]
 
 [project.scripts]
-xrd-tools = "xrd_tools.cli:main"
+xrd-app = "xrd_app.cli:main"
 
 [tool.setuptools.packages.find]
-where = ["src"]
+where = ["."]
+include = ["xrd_app*"]
 
 [tool.setuptools.package-data]
-"xrd_tools" = ["assets/*", "detectors/catalog.json", "detectors/**/*.py"]
+"xrd_app" = [
+    "assets/*",
+    "PeakAlgorithms/catalog.json",
+    "PeakAlgorithms/**/*.py",
+    "ShapeAlgorithms/**/*",
+    "CombinedAlgorithms/**/*",
+]

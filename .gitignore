@@ -47,8 +47,8 @@ data/bins/
 *.npz
 
 # Exception: shared physics-input assets bundled with the package
-!src/xrd_tools/assets/
-!src/xrd_tools/assets/tth.tiff
+!xrd_app/assets/
+!xrd_app/assets/tth.tiff
 
 # ── Notebooks (large; force-add a specific one with `git add -f` if needed) ──
 *.ipynb

@@ -1,8 +1,0 @@
-I am trying to create a package for this python project, the file system for all the data is as follows
-
-
-I will need to change multiple analysis scripts and create a cli tool that allows us to easily control everything
-
-I will also need to alter the guis to be able to take in directories and files that aren't hard coded
-
-The cli tool should create its own directory setup 
