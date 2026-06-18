@@ -17,6 +17,7 @@ dependencies = [
     "pandas",
     "Pillow",
     "PyQt5",
+    "pyqtgraph",
     "click",
     "pyyaml",
 ]
@@ -26,7 +27,6 @@ dependencies = [
 # gracefully when it is absent.
 [project.optional-dependencies]
 poni = ["pyFAI"]            # .poni → tth conversion (core/geometry.py)
-viz = ["pyqtgraph"]         # reserved: pyqtgraph GUI rewrite (deferred to final phase)
 notebook = ["ipykernel", "jupyter"]
 
 [project.scripts]

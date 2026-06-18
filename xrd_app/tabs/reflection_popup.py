@@ -1,12 +1,12 @@
-"""Manual reflection popup.
+"""Manual reflection popup (pyqtgraph).
 
 Computes a radial (2θ) histogram on the fully-summed #x# binned image, shows the
-summed image with 2θ ring overlays and the histogram with reflection bands, lets
-the user enter [Name, Bragg angle, Width], and on Create writes the reflection
-set (per-scan reflections.json + generated reflections.py) and saves PNGs.
+summed image with interactive 2θ ring overlays and the histogram with reflection
+bands, lets the user enter [Name, Bragg angle, Width], and on Create writes the
+reflection set (per-scan reflections.json + generated reflections.py) and a PNG.
 
-Uses matplotlib for now (consistent with the other tabs); a pyqtgraph rewrite is
-deferred to the final phase.
+First component of the pyqtgraph GUI rewrite: pyqtgraph gives fast image
+display, draggable band regions, and click-on-histogram-to-set-2θ.
 """
 
 from __future__ import annotations
@@ -14,21 +14,23 @@ from __future__ import annotations
 from pathlib import Path
 
 import numpy as np
-import matplotlib
-matplotlib.use("Qt5Agg")
-from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg
-from matplotlib.figure import Figure
-import matplotlib.colors as mcolors
+import pyqtgraph as pg
+import pyqtgraph.exporters
 
-from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import (
     QDialog, QDoubleSpinBox, QHBoxLayout, QLabel, QLineEdit, QListWidget,
-    QMessageBox, QPushButton, QSpinBox, QVBoxLayout, QWidget,
+    QMessageBox, QPushButton, QSpinBox, QVBoxLayout,
 )
 
 from ..config import DataManager
 from ..core import io
 from ..core import reflections as refl_io
+
+pg.setConfigOptions(imageAxisOrder="row-major", antialias=True)
+
+_RING_PEN = pg.mkPen((255, 255, 255, 180), width=1)
+_BAND_BRUSH = pg.mkBrush(255, 165, 0, 60)
+_LINE_PEN = pg.mkPen((255, 80, 80), width=1)
 
 
 class ReflectionDialog(QDialog):
@@ -39,29 +41,32 @@ class ReflectionDialog(QDialog):
         self.bin_size = bin_size
         self.reflections = list(refl_io.read_json(self.dm.reflections_json(scan)))
         self._image = None
+        self._tth = None
         self._centers = None
         self._profile = None
+        self._rings = []
 
         self.setWindowTitle(f"Reflections — {self.dm.scan_name or project_root}")
         self.resize(1200, 720)
-
         lay = QVBoxLayout(self)
 
-        # ---- figures ----------------------------------------------------
+        # ---- figures (pyqtgraph) ---------------------------------------
         figs = QHBoxLayout()
-        self.img_fig = Figure(figsize=(5, 5))
-        self.img_canvas = FigureCanvasQTAgg(self.img_fig)
-        self.img_ax = self.img_fig.add_subplot(111)
-        self.img_ax.set_title("Fully-summed image — click 'Compute'")
-        figs.addWidget(self.img_canvas, 1)
+        self.img_view = pg.ImageView()
+        self.img_view.ui.roiBtn.hide()
+        self.img_view.ui.menuBtn.hide()
+        try:
+            self.img_view.setColorMap(pg.colormap.get("viridis"))
+        except Exception:
+            pass
+        figs.addWidget(self.img_view, 1)
 
-        self.hist_fig = Figure(figsize=(5, 5))
-        self.hist_canvas = FigureCanvasQTAgg(self.hist_fig)
-        self.hist_ax = self.hist_fig.add_subplot(111)
-        self.hist_ax.set_title("Radial 2θ histogram")
-        self.hist_ax.set_xlabel("2θ (degrees)")
-        self.hist_ax.set_ylabel("mean intensity")
-        figs.addWidget(self.hist_canvas, 1)
+        self.hist = pg.PlotWidget()
+        self.hist.setLabel("bottom", "2θ", units="deg")
+        self.hist.setLabel("left", "mean intensity")
+        self.hist.showGrid(x=True, y=True, alpha=0.3)
+        self.hist.scene().sigMouseClicked.connect(self._on_hist_click)
+        figs.addWidget(self.hist, 1)
         lay.addLayout(figs, 1)
 
         # ---- compute controls ------------------------------------------
@@ -69,12 +74,11 @@ class ReflectionDialog(QDialog):
         crow.addWidget(QLabel("Max bins to sum (0 = all):"))
         self.max_bins = QSpinBox()
         self.max_bins.setRange(0, 1_000_000)
-        self.max_bins.setValue(0)
         crow.addWidget(self.max_bins)
         compute_btn = QPushButton("Compute histogram")
         compute_btn.clicked.connect(self._compute)
         crow.addWidget(compute_btn)
-        self.status = QLabel("")
+        self.status = QLabel("click 'Compute' (then click the histogram to set 2θ)")
         crow.addWidget(self.status, 1)
         lay.addLayout(crow)
 
@@ -121,6 +125,7 @@ class ReflectionDialog(QDialog):
         lay.addLayout(brow)
 
         self._refresh_list()
+        self._redraw_hist()
 
     # ----- compute ----------------------------------------------------
     def _compute(self):
@@ -136,44 +141,48 @@ class ReflectionDialog(QDialog):
         self.status.repaint()
         mb = self.max_bins.value() or None
         self._image = io.sum_binned_image(h5, max_bins=mb)
-        tth = io.load_tth_map(tth_path)
-        self._tth = tth
-        self._centers, self._profile = io.radial_profile(self._image, tth)
-        self.status.setText(f"summed {self._image.shape} image; tth {tth.shape}")
-        self._redraw()
+        self._tth = io.load_tth_map(tth_path)
+        self._centers, self._profile = io.radial_profile(self._image, self._tth)
+        self.status.setText(f"summed {self._image.shape}; tth {self._tth.shape}")
+        self._redraw_image()
+        self._redraw_hist()
 
-    def _redraw(self):
-        # image
-        self.img_ax.clear()
-        if self._image is not None:
-            vmax = np.percentile(self._image[self._image > 0], 99) if np.any(self._image > 0) else 1
-            self.img_ax.imshow(self._image, origin="lower", cmap="viridis",
-                               norm=mcolors.LogNorm(vmin=1, vmax=max(vmax, 2)))
-            # 2θ ring overlays at each reflection (contour of the tth map)
-            if getattr(self, "_tth", None) is not None and self.reflections:
-                levels = sorted(float(r["two_theta"]) for r in self.reflections)
-                try:
-                    self.img_ax.contour(self._tth, levels=levels, colors="white",
-                                        linewidths=0.6, alpha=0.7)
-                except Exception:
-                    pass
-        self.img_ax.set_title("Fully-summed image (log) with 2θ rings")
-        self.img_canvas.draw_idle()
+    def _redraw_image(self):
+        if self._image is None:
+            return
+        disp = np.log1p(np.clip(self._image, 0, None))
+        self.img_view.setImage(disp, autoLevels=True)
+        vb = self.img_view.getView()
+        for r in self._rings:
+            vb.removeItem(r)
+        self._rings = []
+        if self._tth is not None:
+            for r in self.reflections:
+                iso = pg.IsocurveItem(data=self._tth, level=float(r["two_theta"]), pen=_RING_PEN)
+                vb.addItem(iso)
+                self._rings.append(iso)
 
-        # histogram
-        self.hist_ax.clear()
+    def _redraw_hist(self):
+        self.hist.clear()
         if self._profile is not None:
-            self.hist_ax.plot(self._centers, self._profile, lw=1.0, color="#1f77b4")
+            self.hist.plot(self._centers, self._profile, pen=pg.mkPen((70, 130, 220), width=1))
         for r in self.reflections:
             t, w = float(r["two_theta"]), float(r.get("width", refl_io.DEFAULT_WIDTH))
-            self.hist_ax.axvspan(t - w, t + w, color="orange", alpha=0.2)
-            self.hist_ax.axvline(t, color="red", lw=0.8)
-            top = self.hist_ax.get_ylim()[1]
-            self.hist_ax.text(t, top, r["name"], rotation=90, va="top", ha="right", fontsize=7)
-        self.hist_ax.set_xlabel("2θ (degrees)")
-        self.hist_ax.set_ylabel("mean intensity")
-        self.hist_ax.set_title("Radial 2θ histogram")
-        self.hist_canvas.draw_idle()
+            region = pg.LinearRegionItem(values=[t - w, t + w], movable=False, brush=_BAND_BRUSH)
+            region.setZValue(-10)
+            self.hist.addItem(region)
+            line = pg.InfiniteLine(pos=t, angle=90, pen=_LINE_PEN,
+                                   label=r["name"], labelOpts={"position": 0.9})
+            self.hist.addItem(line)
+
+    # ----- interactivity ----------------------------------------------
+    def _on_hist_click(self, ev):
+        vb = self.hist.getViewBox()
+        if vb is None:
+            return
+        pt = vb.mapSceneToView(ev.scenePos())
+        self.tth_spin.setValue(float(pt.x()))
+        self.status.setText(f"2θ set to {pt.x():.4f} (enter a name and Add)")
 
     # ----- list mgmt --------------------------------------------------
     def _add(self):
@@ -188,20 +197,23 @@ class ReflectionDialog(QDialog):
         })
         self.name_edit.clear()
         self._refresh_list()
-        self._redraw()
+        self._redraw_image()
+        self._redraw_hist()
 
     def _remove(self):
         i = self.list.currentRow()
         if 0 <= i < len(self.reflections):
             self.reflections.pop(i)
             self._refresh_list()
-            self._redraw()
+            self._redraw_image()
+            self._redraw_hist()
 
     def _refresh_list(self):
         self.list.clear()
         for r in self.reflections:
             self.list.addItem(
-                f"{r['name']:<10}  2θ={float(r['two_theta']):.4f}  ±{float(r.get('width', refl_io.DEFAULT_WIDTH)):.3f}")
+                f"{r['name']:<10}  2θ={float(r['two_theta']):.4f}  "
+                f"±{float(r.get('width', refl_io.DEFAULT_WIDTH)):.3f}")
 
     # ----- save -------------------------------------------------------
     def _create(self):
@@ -213,11 +225,15 @@ class ReflectionDialog(QDialog):
         refl_io.save(self.reflections, json_path, mdir / "reflections.py")
 
         fig_path = None
-        if self._image is not None:
+        if self._profile is not None:
             fdir = self.dm.figures_dir
             fdir.mkdir(parents=True, exist_ok=True)
             fig_path = fdir / f"{self.dm.scan_name or 'project'}_reflections.png"
-            self.hist_fig.savefig(fig_path, dpi=120, bbox_inches="tight")
+            try:
+                exporter = pg.exporters.ImageExporter(self.hist.plotItem)
+                exporter.export(str(fig_path))
+            except Exception:
+                fig_path = None
         QMessageBox.information(
             self, "Saved",
             f"Wrote {len(self.reflections)} reflections:\n{json_path}\n"
@@ -226,5 +242,4 @@ class ReflectionDialog(QDialog):
 
 
 def open_reflection_dialog(project_root, scan=None, bin_size=3, parent=None):
-    dlg = ReflectionDialog(project_root, scan=scan, bin_size=bin_size, parent=parent)
-    return dlg
+    return ReflectionDialog(project_root, scan=scan, bin_size=bin_size, parent=parent)
