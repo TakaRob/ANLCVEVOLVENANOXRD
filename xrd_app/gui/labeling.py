@@ -553,7 +553,7 @@ class LabelCanvas(FigureCanvasQTAgg):
             except Exception: pass
         self._arc_patches.clear()
 
-    # --- Detection point overlay ---
+    # --- Peak detection overlay ---
 
     def show_detection_points(self, detections):
         """Show algorithm detections as X markers. detections: {label: [[x,y], ...]}"""
@@ -827,15 +827,50 @@ class LabelingTool(QMainWindow):
             key = (grid_row[gi], grid_col[gi])
             self._grid_to_frames.setdefault(key, []).append(gi)
 
+    def _warn_bins_unreadable(self, err):
+        """Show a one-time, friendly warning when the binned HDF5 can't be read.
+
+        Triggered by a missing/corrupt bins file (commonly an interrupted
+        binning run). Shown once per file path so we don't spam dialogs.
+        """
+        path = self.bins_h5_path
+        warned = getattr(self, "_bins_warned_paths", None)
+        if warned is None:
+            warned = self._bins_warned_paths = set()
+        if path in warned:
+            return
+        warned.add(path)
+        msg = (
+            f"Could not read the binned data file:\n{path}\n\n{err}\n\n"
+            "It is missing or corrupt — often the result of interrupting a "
+            "binning run (Ctrl+C). Re-run binning for this scan and bin size "
+            "(Programs tab, or `xrd-app bin --scan <scan> --bin-size <N>`).\n\n"
+            "Falling back to reading raw frames for now (slower)."
+        )
+        try:
+            QMessageBox.warning(self, "Binned data unavailable", msg)
+        except Exception:
+            print(f"[labeling] bins unreadable: {path}: {err}")
+
     def _load_bin_data_for_size(self, bin_size):
         """Load bin keys and mapping for the given bin size."""
         self.bin_size = bin_size
         resolved = self.dm.bins_h5(bin_size) if bin_size != 1 else None
         self.bins_h5_path = str(resolved) if resolved else None
 
+        raw_keys = None
         if self.bins_h5_path and os.path.exists(self.bins_h5_path):
-            with h5py.File(self.bins_h5_path, "r") as f:
-                raw_keys = list(f.keys())
+            try:
+                with h5py.File(self.bins_h5_path, "r") as f:
+                    raw_keys = list(f.keys())
+            except OSError as e:
+                # Missing/corrupt bins file (e.g. an interrupted binning run).
+                # Warn once and fall back to summing raw frames so the tab still
+                # works instead of crashing with raw OSError tracebacks.
+                self._warn_bins_unreadable(e)
+                self.bins_h5_path = None
+
+        if raw_keys is not None:
             self.bin_keys = sorted(raw_keys, key=lambda k: (int(k.split("_")[0]), int(k.split("_")[1])))
             self.n_bins = len(self.bin_keys)
             self.bin_mapping = None
@@ -1521,9 +1556,12 @@ class LabelingTool(QMainWindow):
 
         img = None
         if self.bins_h5_path and os.path.exists(self.bins_h5_path):
-            with h5py.File(self.bins_h5_path, "r") as f:
-                if bin_key_str in f:
-                    img = f[bin_key_str][:].astype(np.float64)
+            try:
+                with h5py.File(self.bins_h5_path, "r") as f:
+                    if bin_key_str in f:
+                        img = f[bin_key_str][:].astype(np.float64)
+            except OSError as e:
+                self._warn_bins_unreadable(e)
         elif self.bin_mapping is not None:
             frames = self.bin_mapping[bk]
             img = load_and_sum_frames(frames, self.xrd_files, self.xrd_file_map)

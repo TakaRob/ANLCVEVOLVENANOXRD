@@ -74,23 +74,35 @@ def load_module(path: Union[str, Path]):
     """Dynamically import a .py file as a module (detector / reflections).
 
     The file's own directory is placed on ``sys.path`` during import so a
-    detector can import sibling modules (e.g. ``noise_reduction_algorithms``).
+    detector can import sibling modules. The shared ``NoiseReduction/`` library
+    (``xrd_app/NoiseReduction``) is also added, so any detector — wherever it
+    lives in the flattened algorithm library — can still
+    ``from noise_reduction_algorithms import ...``.
     """
     import sys
     path = Path(path)
-    parent = str(path.resolve().parent)
-    added = parent not in sys.path
-    if added:
-        sys.path.insert(0, parent)
+    # Shared library dirs so a detector can import sibling/library modules no
+    # matter where it lives: its own dir, the flat PeakAlgorithms/ root (so an
+    # automated algo in its own sub-folder can import a base detector), and the
+    # NoiseReduction/ library.
+    pkg = Path(__file__).resolve().parent.parent
+    dirs = [str(path.resolve().parent)]
+    for extra in (pkg / "PeakAlgorithms", pkg / "CombinedAlgorithms",
+                  pkg / "NoiseReduction"):
+        if extra.is_dir():
+            dirs.append(str(extra))
+    added = [d for d in dirs if d not in sys.path]
+    for d in added:
+        sys.path.insert(0, d)
     try:
         spec = importlib.util.spec_from_file_location(path.stem, str(path))
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
         return mod
     finally:
-        if added:
+        for d in added:
             try:
-                sys.path.remove(parent)
+                sys.path.remove(d)
             except ValueError:
                 pass
 
@@ -436,8 +448,9 @@ def generate_grid_mapping(
     }
 
     if output is not None:
-        with open(output, "w") as f:
-            json.dump(result, f)
+        # Atomic write so a ctrl+C / crash can't leave a truncated grid mapping
+        # (which `build_bins` later reads) behind.
+        atomic_write_json(output, result, indent=None)
         size_kb = Path(output).stat().st_size / 1024
         log(f"Wrote {output} ({size_kb:.0f} KB)")
 
@@ -487,8 +500,13 @@ def build_bins(
     log(f"Building {n_bins} bin images ({bin_size}x{bin_size}) -> {output}")
     log(f"  Compression: {compression}")
 
+    # Write to a temporary file and atomically rename it onto `output` only
+    # after a fully successful build. A ctrl+C / crash mid-build then leaves the
+    # (discarded) .tmp file corrupt instead of the real output, so any previous
+    # good bins file survives and the GUI never reads a half-written file.
+    tmp = output.with_name(output.name + ".tmp")
     h5_handles: dict = {}
-    out = h5py.File(str(output), "w")
+    out = h5py.File(str(tmp), "w")
     out.attrs["bin_size"] = bin_size
     out.attrs["n_bin_rows"] = gm["n_bin_rows"]
     out.attrs["n_bin_cols"] = gm["n_bin_cols"]
@@ -522,10 +540,20 @@ def build_bins(
                 rate = (i + 1) / elapsed if elapsed > 0 else 0
                 eta = (n_bins - i - 1) / rate if rate > 0 else 0
                 log(f"  [{i+1}/{n_bins}] {elapsed:.0f}s elapsed, ~{eta:.0f}s remaining")
+        out.close()
+        out = None
+        # Atomic publish: rename the completed temp file onto the real path.
+        os.replace(tmp, output)
     finally:
         for fh in h5_handles.values():
             fh.close()
-        out.close()
+        if out is not None:
+            # Build was interrupted (ctrl+C, exception): drop the partial file.
+            out.close()
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
 
     size_mb = os.path.getsize(output) / 1024 / 1024
     log(f"Done! {output}: {size_mb:.0f} MB ({size_mb/1024:.1f} GB)")
