@@ -5,10 +5,11 @@ from __future__ import annotations
 from pathlib import Path
 
 from PyQt5.QtWidgets import (
-    QComboBox, QGroupBox, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget,
+    QComboBox, QGroupBox, QHBoxLayout, QLabel, QPushButton, QSpinBox,
+    QVBoxLayout, QWidget,
 )
 
-from ..config import DataManager
+from ..config import DataManager, format_detector_label
 from ._console import JobConsole
 
 TAB_META = {
@@ -17,13 +18,18 @@ TAB_META = {
     "takes_bin_size": True,
     "scan_dependent": False,
     "general": (
-        "Run the two-stage pipeline. Peak Finding runs a detector over every bin "
-        "(Phase 1). Shape Finding links peaks across bins and keeps gaussian-like "
-        "features (Phase 2). Each Run shells out to the CLI; output streams below."
+        "Run the two-stage pipeline. Data Prep builds the binned HDF5 from raw "
+        "frames (grid mapping → bins). Peak Finding runs a detector over every "
+        "bin (Phase 1). Shape Finding links peaks across bins and keeps "
+        "gaussian-like features (Phase 2); pick “run peak algorithm above first” "
+        "to chain peaks→shapes in one process. Combined runs a per-frame (1×1) "
+        "algorithm that does peak+shape in one pass. Each Run shells out to the "
+        "CLI; output streams below."
     ),
 }
 
-_BIN_SIZES = [1, 3, 4, 5]
+# Sentinel shown in the Shape "Peaks:" dropdown to chain peak→shape in one run.
+_CHAIN_OPTION = "⟵ run peak algorithm above first"
 
 
 class ProgramsTab(QWidget):
@@ -35,16 +41,50 @@ class ProgramsTab(QWidget):
 
         lay = QVBoxLayout(self)
 
+        # ---- existing bins (drives every step below) --------------------
+        # The top dropdown lists only the bins that already exist for this scan;
+        # it selects which one Peak/Shape/Combined operate on. New bins are made
+        # in the Data Prep box below and then appear here automatically.
+        top = QHBoxLayout()
+        top.addWidget(QLabel("<b>Existing bins:</b>"))
+        self.bin_combo = QComboBox()
+        self.bin_combo.setToolTip(
+            "Bins already built for this scan. Selecting one drives Peak Finding, "
+            "Shape Finding and the per-bin context below.")
+        self.bin_combo.currentTextChanged.connect(self._on_bin_changed)
+        top.addWidget(self.bin_combo)
+        self.bins_status = QLabel("")
+        self.bins_status.setStyleSheet("color:#888; font-size:11px; padding-left:8px;")
+        top.addWidget(self.bins_status)
+        top.addStretch()
+        lay.addLayout(top)
+
+        # ---- Data prep: build bins --------------------------------------
+        # The "Create bins" button depends only on the spin box here (not the
+        # Existing-bins dropdown above): type any size — e.g. 2, 4, 7 — build it,
+        # and it shows up in the dropdown once detected.
+        bins_box = QGroupBox("Data Prep  (build binned HDF5 from raw frames)")
+        bl = QHBoxLayout(bins_box)
+        bl.addWidget(QLabel("New bin size (N×N):"))
+        self.make_bin_spin = QSpinBox()
+        self.make_bin_spin.setRange(1, 99)
+        self.make_bin_spin.setValue(bin_size if bin_size else 3)
+        self.make_bin_spin.setToolTip(
+            "Bin size to build (NxN). Type any value; after building it appears "
+            "in “Existing bins” above.")
+        bl.addWidget(self.make_bin_spin)
+        make_bins_btn = QPushButton("Create bins")
+        make_bins_btn.clicked.connect(self._make_bins)
+        bl.addWidget(make_bins_btn)
+        bl.addStretch()
+        lay.addWidget(bins_box)
+
         # ---- Peak Finding ------------------------------------------------
         peak_box = QGroupBox("Peak Finding  (Phase 1: per-bin detection)")
         pl = QHBoxLayout(peak_box)
         pl.addWidget(QLabel("Algorithm:"))
         self.peak_algo = QComboBox()
         pl.addWidget(self.peak_algo, 1)
-        pl.addWidget(QLabel("Bin:"))
-        self.peak_bin = QComboBox()
-        self.peak_bin.addItems([f"{b}x{b}" for b in _BIN_SIZES])
-        pl.addWidget(self.peak_bin)
         run_peaks = QPushButton("Run")
         run_peaks.clicked.connect(self._run_peaks)
         pl.addWidget(run_peaks)
@@ -56,20 +96,32 @@ class ProgramsTab(QWidget):
         sl.addWidget(QLabel("Peaks:"))
         self.shape_src = QComboBox()
         sl.addWidget(self.shape_src, 1)
-        sl.addWidget(QLabel("Bin:"))
-        self.shape_bin = QComboBox()
-        self.shape_bin.addItems([f"{b}x{b}" for b in _BIN_SIZES])
-        sl.addWidget(self.shape_bin)
         run_shapes = QPushButton("Run")
         run_shapes.clicked.connect(self._run_shapes)
         sl.addWidget(run_shapes)
         lay.addWidget(shape_box)
 
-        # ---- CVEvolve ----------------------------------------------------
+        # ---- Combined (peak + shape in one pass) ------------------------
+        comb_box = QGroupBox("Combined  (peak + shape in one per-frame pass · 1×1)")
+        cb = QHBoxLayout(comb_box)
+        cb.addWidget(QLabel("Algorithm:"))
+        self.combined_algo = QComboBox()
+        cb.addWidget(self.combined_algo, 1)
+        run_combined = QPushButton("Run")
+        run_combined.clicked.connect(self._run_combined)
+        cb.addWidget(run_combined)
+        lay.addWidget(comb_box)
+
+        # ---- CVEvolve + lineage -----------------------------------------
         cve_row = QHBoxLayout()
         cve_btn = QPushButton("Use CVEvolve…")
         cve_btn.clicked.connect(self._open_cvevolve)
         cve_row.addWidget(cve_btn)
+        lin_btn = QPushButton("Show lineage")
+        lin_btn.setToolTip("Print the provenance (bin → algorithm chain) of every "
+                           "result JSON for the active scan.")
+        lin_btn.clicked.connect(self._show_lineage)
+        cve_row.addWidget(lin_btn)
         cve_row.addStretch()
         lay.addLayout(cve_row)
 
@@ -83,62 +135,191 @@ class ProgramsTab(QWidget):
     def update_context(self, scan, bin_size):
         self.scan = scan
         self.bin_size = bin_size
-        if bin_size in _BIN_SIZES:
-            self.peak_bin.setCurrentText(f"{bin_size}x{bin_size}")
-            self.shape_bin.setCurrentText(f"{bin_size}x{bin_size}")
+        self._populate_bins(select=bin_size)
         self._refresh_algos()
         self._refresh_peak_sources()
+        self._refresh_bins_status()
 
-    def _bin(self, combo):
-        return int(combo.currentText().split("x")[0])
+    def _populate_bins(self, select=None):
+        """Fill the Existing-bins dropdown from the bins built for this scan.
+
+        Selects ``select`` if present, else the last context bin, else the first.
+        """
+        from ._embed import existing_bins
+        dm = DataManager(self.project_root, scan=self.scan)
+        bins = existing_bins(dm, self.scan)
+        self.bin_combo.blockSignals(True)
+        self.bin_combo.clear()
+        if bins:
+            self.bin_combo.addItems([f"{b}x{b}" for b in bins])
+            target = next((b for b in (select, self.bin_size) if b in bins),
+                          bins[0])
+            self.bin_combo.setCurrentText(f"{target}x{target}")
+            self.bin_size = target
+        else:
+            self.bin_combo.addItem("(no bins — create one)")
+        self.bin_combo.blockSignals(False)
+
+    def _cur_bin(self):
+        try:
+            return int(self.bin_combo.currentText().split("x")[0])
+        except (ValueError, AttributeError):
+            return None
+
+    def _on_bin_changed(self, *_):
+        bs = self._cur_bin()
+        if bs is not None:
+            self.bin_size = bs
+        self._refresh_algos()
+        self._refresh_peak_sources()
+        self._refresh_bins_status()
+
+    def _refresh_bins_status(self, *_):
+        from ._embed import bins_status_text
+        bs = self._cur_bin()
+        if bs is None:
+            self.bins_status.setText("no bins built — create one in Data Prep")
+            return
+        dm = DataManager(self.project_root, scan=self.scan)
+        self.bins_status.setText(bins_status_text(dm, bs, self.scan))
 
     def _refresh_algos(self):
         dm = DataManager(self.project_root, scan=self.scan)
-        bs = self._bin(self.peak_bin)
-        names = [d["name"] for d in dm.list_detectors(bs)] or \
-                [d["name"] for d in dm.list_detectors()]
+        bs = self._cur_bin()
+        dets = dm.list_detectors(bs) or dm.list_detectors()
         self.peak_algo.clear()
-        self.peak_algo.addItems(names or ["(none found)"])
+        if not dets:
+            self.peak_algo.addItem("(none found)")
+            return
+        for d in dets:
+            # Show "name (F1 0.79)"; keep the bare name + perframe flag as data.
+            self.peak_algo.addItem(format_detector_label(d),
+                                   (d["name"], d.get("pipeline") == "perframe"))
+        # Combined (peak+shape) library — names carry scores, data = bare name.
+        self.combined_algo.clear()
+        combined = dm.list_combined()
+        if combined:
+            for d in combined:
+                self.combined_algo.addItem(format_detector_label(d), d["name"])
+        else:
+            self.combined_algo.addItem("(none found)")
+
+    def _selected_peak_algo(self):
+        """(name, is_unbinned) for the selected peak detector, or (None, False)."""
+        data = self.peak_algo.currentData()
+        if isinstance(data, tuple):
+            return data
+        text = self.peak_algo.currentText()
+        return (None if text.startswith("(") else text, False)
 
     def _refresh_peak_sources(self):
-        """List saved *_peaks.json in Labels/<scan>/ as shape-finding inputs."""
+        """List saved *_peaks.json in Labels/<scan>/ as shape-finding inputs.
+
+        The first option chains peak→shape: it runs the peak algorithm selected
+        above, then shape-finds its output, all in one process.
+        """
         self.shape_src.clear()
         dm = DataManager(self.project_root, scan=self.scan)
         ldir = dm.labels_dir(self.scan)
-        bs = self._bin(self.shape_bin)
-        found = []
+        bs = self._cur_bin()
+        found = [_CHAIN_OPTION]
         if ldir.is_dir():
             for p in sorted(ldir.glob(f"*_peaks_{bs}x{bs}.json")):
                 found.append(p.stem.replace(f"_peaks_{bs}x{bs}", ""))
-        self.shape_src.addItems(found or ["(run peak finding first)"])
+        self.shape_src.addItems(found)
 
     # ----- actions ----------------------------------------------------
     def _run_peaks(self):
         if not self.scan:
             self.console._append("[no active scan — load data in Setup first]\n")
             return
-        algo = self.peak_algo.currentText()
+        if self._cur_bin() is None:
+            self.console._append("[no bins — create one in Data Prep first]\n")
+            return
+        algo, unbinned = self._selected_peak_algo()
+        if unbinned:
+            self.console._append(
+                f"[{algo} is a per-frame (unbinned) detector — it can't run in "
+                "the binned peak pipeline yet. Pick a binned detector.]\n")
+            return
         args = ["peaks", "--root", self.project_root, "--scan", str(self.scan),
-                "--bin-size", str(self._bin(self.peak_bin))]
-        if algo and not algo.startswith("("):
+                "--bin-size", str(self._cur_bin())]
+        if algo:
             args += ["--algorithm", algo]
         self.console.run(args)
 
+    def _make_bins(self):
+        if not self.scan:
+            self.console._append("[no active scan — load data in Setup first]\n")
+            return
+        bs = self.make_bin_spin.value()  # Create bins depends only on this spin box.
+        self.console.run(["make-bins", "--root", self.project_root,
+                          "--scan", str(self.scan),
+                          "--bin-size", str(bs)],
+                         on_finished=lambda code: self._on_bins_built(bs))
+
+    def _on_bins_built(self, bs):
+        """After a build, surface the new size in the Existing-bins dropdown."""
+        self._populate_bins(select=bs)
+        self._refresh_algos()
+        self._refresh_peak_sources()
+        self._refresh_bins_status()
+
+    def _run_combined(self):
+        if not self.scan:
+            self.console._append("[no active scan — load data in Setup first]\n")
+            return
+        algo = self.combined_algo.currentData() or self.combined_algo.currentText()
+        if not algo or algo.startswith("("):
+            self.console._append("[no combined algorithm available]\n")
+            return
+        self.console.run(["run-combined", "--root", self.project_root,
+                          "--scan", str(self.scan), "--algorithm", algo])
+
+    def _show_lineage(self):
+        if not self.scan:
+            self.console._append("[no active scan — load data in Setup first]\n")
+            return
+        self.console.run(["lineage", "--root", self.project_root,
+                          "--scan", str(self.scan)])
+
     def _open_cvevolve(self):
+        bs = self._cur_bin()
+        if bs is None:
+            self.console._append("[no bins — create one in Data Prep first]\n")
+            return
         from .cvevolve_dialog import CVEvolveDialog
         CVEvolveDialog(self.project_root, scan=self.scan,
-                       bin_size=self._bin(self.shape_bin), parent=self).exec_()
+                       bin_size=bs, parent=self).exec_()
 
     def _run_shapes(self):
         if not self.scan:
             self.console._append("[no active scan — load data in Setup first]\n")
             return
+        if self._cur_bin() is None:
+            self.console._append("[no bins — create one in Data Prep first]\n")
+            return
         src = self.shape_src.currentText()
+        # Chain option: run the peak algorithm above, then shapes, in one process.
+        if src == _CHAIN_OPTION:
+            peak_algo, unbinned = self._selected_peak_algo()
+            if unbinned:
+                self.console._append(
+                    f"[{peak_algo} is a per-frame (unbinned) detector — it can't "
+                    "run in the binned pipeline yet. Pick a binned detector.]\n")
+                return
+            args = ["run-pipeline", "--root", self.project_root,
+                    "--scan", str(self.scan),
+                    "--bin-size", str(self._cur_bin())]
+            if peak_algo:
+                args += ["--algorithm", peak_algo]
+            self.console.run(args)
+            return
         if not src or src.startswith("("):
             self.console._append("[no peak set — run Peak Finding first]\n")
             return
         args = ["shapes", "--root", self.project_root, "--scan", str(self.scan),
-                "--bin-size", str(self._bin(self.shape_bin)), "--peak-algo", src]
+                "--bin-size", str(self._cur_bin()), "--peak-algo", src]
         self.console.run(args)
 
 

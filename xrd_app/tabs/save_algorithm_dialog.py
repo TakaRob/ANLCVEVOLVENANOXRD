@@ -11,7 +11,7 @@ from PyQt5.QtWidgets import (
     QLineEdit, QMessageBox, QPushButton, QVBoxLayout,
 )
 
-from ..config import DataManager
+from ..config import DataManager, format_detector_label
 from ..core import save_algorithm
 
 _NOISE_OPTIONS = ["(none)", "gaussian"]
@@ -29,10 +29,16 @@ class SaveAlgorithmDialog(QDialog):
         form = QFormLayout()
 
         dm = DataManager(project_root)
-        names = [d["name"] for d in dm.list_detectors(bin_size)] or \
-                [d["name"] for d in dm.list_detectors()]
+        dets = dm.list_detectors(bin_size) or dm.list_detectors()
+        # A wrapper delegates to the binned detector contract, so per-frame
+        # (unbinned) detectors can't be a base.
+        dets = [d for d in dets if d.get("pipeline") != "perframe"]
         self.base = QComboBox()
-        self.base.addItems(names or ["tophat_band_adaptive_snr"])
+        for d in dets:
+            self.base.addItem(format_detector_label(d), d["name"])
+        if not dets:
+            self.base.addItem("5x5_tophat_band_adaptive_snr",
+                              "5x5_tophat_band_adaptive_snr")
         form.addRow("Base detector:", self.base)
 
         self.sens = QDoubleSpinBox()
@@ -76,7 +82,8 @@ class SaveAlgorithmDialog(QDialog):
         bs = int(self.bin.currentText().split("x")[0])
         try:
             out = save_algorithm.save_algorithm(
-                self.base.currentText(), sensitivity=self.sens.value(),
+                self.base.currentData() or self.base.currentText(),
+                sensitivity=self.sens.value(),
                 bin_size=bs, noise_reduction=nr,
                 name=self.name.text().strip() or None, kind=self.kind,
                 source="manual")

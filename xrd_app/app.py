@@ -14,11 +14,13 @@ import json
 import traceback
 from pathlib import Path
 
+from PyQt5.QtCore import QTimer
 from PyQt5.QtWidgets import (
     QCheckBox, QComboBox, QHBoxLayout, QLabel, QMainWindow, QTabWidget,
     QVBoxLayout, QWidget,
 )
 
+from . import workspace
 from .config import DataManager
 from .tabs._embed import placeholder
 
@@ -27,19 +29,23 @@ _BUILTIN_TABS = ["setup", "programs", "view_label", "shape_verify", "device", "o
 _BIN_SIZES = [1, 3, 4, 5]
 
 
-def _discover_tabs():
+def _discover_tabs(only=None):
     """Return [(module, meta), ...] sorted by meta['order'].
 
     Built-ins plus any entry points in group ``xrd_app.tabs`` (plugin tabs).
+    When ``only`` is a list of module short-names, build just those built-in
+    tabs and skip plugin tabs (used by the focused standalone windows).
     """
     defs = []
-    for name in _BUILTIN_TABS:
+    for name in (only if only is not None else _BUILTIN_TABS):
         try:
             mod = importlib.import_module(f"xrd_app.tabs.{name}")
             if hasattr(mod, "make_tab") and hasattr(mod, "TAB_META"):
                 defs.append((mod, mod.TAB_META))
         except Exception:
             traceback.print_exc()
+    if only is not None:
+        return sorted(defs, key=lambda d: d[1].get("order", 100))
     try:
         from importlib.metadata import entry_points
         eps = entry_points()
@@ -58,16 +64,14 @@ def _discover_tabs():
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, project_root=".", scan=None, bin_size=3):
+    def __init__(self, project_root=None, scan=None, bin_size=3, tabs=None):
         super().__init__()
-        self.project_root = str(Path(project_root).resolve())
-        self.dm = DataManager(self.project_root)
-        self._state = self._load_state()
-
-        self.scan = scan or self._state.get("active_scan") or self.dm.scan_name
-        self.bin_size = bin_size or self._state.get("bin_size") or 3
-
-        self.setWindowTitle(f"xrd-app — {self.dm.config.get('name') or self.project_root}")
+        self._only_tabs = tabs
+        self._init_scan = scan
+        self._init_bin = bin_size
+        # Resolve the project: explicit root, else the last-opened one, else
+        # none (the Setup tab will prompt to create/open one).
+        self._load_project(project_root, scan=scan, bin_size=bin_size)
         self.resize(1500, 950)
 
         central = QWidget()
@@ -84,7 +88,7 @@ class MainWindow(QMainWindow):
         root.addWidget(self.tabs, 1)
         self.setCentralWidget(central)
 
-        self._defs = _discover_tabs()
+        self._defs = _discover_tabs(only=self._only_tabs)
         self._hosts = []
         self._content = {}
         self._built = {}
@@ -104,6 +108,52 @@ class MainWindow(QMainWindow):
             self.tabs.setCurrentIndex(last)
         self._ensure_built(self.tabs.currentIndex())
 
+    # ----- project loading / switching --------------------------------
+    def _load_project(self, project_root, scan=None, bin_size=None):
+        """Point the window at a project (or no project if it can't resolve).
+
+        Precedence: explicit ``project_root`` → last-opened project (settings)
+        → none. With no project, ``self.dm`` is None and the Setup tab shows the
+        create/open controls while other tabs show a friendly placeholder.
+        """
+        if project_root is None:
+            last = workspace.get_last_project()
+            project_root = str(last) if last else None
+
+        if project_root is not None:
+            self.project_root = str(Path(project_root).resolve())
+            self.dm = DataManager(self.project_root)
+            if workspace.is_project(self.project_root):
+                workspace.set_last_project(self.project_root)
+            self._state = self._load_state()
+            self.scan = scan or self._state.get("active_scan") or self.dm.scan_name
+            self.bin_size = bin_size or self._state.get("bin_size") or 3
+            title = self.dm.config.get("name") or self.project_root
+        else:
+            self.project_root = None
+            self.dm = None
+            self._state = {}
+            self.scan = None
+            self.bin_size = bin_size or 3
+            title = "no project — create or open one in Setup"
+
+        self.setWindowTitle(f"xrd-app — {title}")
+
+    def switch_project(self, project_root):
+        """Open a different project at runtime and rebuild every tab.
+
+        Deferred to the next event-loop turn so it is safe to call from inside a
+        Setup-tab button handler (the Setup widget itself is rebuilt).
+        """
+        def _do():
+            self._load_project(project_root, bin_size=self.bin_size)
+            for idx in range(len(self._defs)):
+                self._built[idx] = False
+            self._populate_scans()
+            self._ensure_built(self.tabs.currentIndex())
+            self._update_general()
+        QTimer.singleShot(0, _do)
+
     # ----- header -----------------------------------------------------
     def _build_header(self):
         row = QHBoxLayout()
@@ -112,13 +162,8 @@ class MainWindow(QMainWindow):
         self.scan_combo.setMinimumWidth(160)
         self.scan_combo.currentTextChanged.connect(self._on_scan_changed)
         row.addWidget(self.scan_combo)
-
-        row.addWidget(QLabel("<b>Bin:</b>"))
-        self.bin_combo = QComboBox()
-        self.bin_combo.addItems([f"{b}x{b}" for b in _BIN_SIZES])
-        self.bin_combo.setCurrentText(f"{self.bin_size}x{self.bin_size}")
-        self.bin_combo.currentTextChanged.connect(self._on_bin_changed)
-        row.addWidget(self.bin_combo)
+        # Bin size is chosen per-tab (each bin-dependent tab has its own Bin
+        # selector); there is intentionally no global bin selector here.
 
         row.addStretch()
         self.help_toggle = QCheckBox("Show General (math & visualizations)")
@@ -127,9 +172,13 @@ class MainWindow(QMainWindow):
         return row
 
     def _populate_scans(self):
-        scans = self.dm.discover_scans()
+        scans = self.dm.discover_scans() if self.dm else []
         self.scan_combo.blockSignals(True)
         self.scan_combo.clear()
+        if self.dm is None:
+            self.scan_combo.addItems(["(no project — create one in Setup)"])
+            self.scan_combo.blockSignals(False)
+            return
         self.scan_combo.addItems(scans or ["(no scans — load in Setup)"])
         if self.scan and self.scan in scans:
             self.scan_combo.setCurrentText(self.scan)
@@ -149,11 +198,21 @@ class MainWindow(QMainWindow):
             w = item.widget()
             if w:
                 w.setParent(None)
-        try:
-            content = mod.make_tab(self.project_root, scan=self.scan, bin_size=self.bin_size)
-        except Exception as e:
-            content = placeholder(f"Could not load “{meta.get('title')}”.",
-                                  f"{type(e).__name__}: {e}")
+        # Without a project, only Setup is usable; others explain why.
+        if self.project_root is None and not getattr(mod, "WORKS_WITHOUT_PROJECT", False):
+            content = placeholder(
+                f"No project open.",
+                "Create or open a project in the Setup tab to use this view.")
+        else:
+            try:
+                content = mod.make_tab(self.project_root, scan=self.scan,
+                                       bin_size=self.bin_size)
+            except Exception as e:
+                content = placeholder(f"Could not load “{meta.get('title')}”.",
+                                      f"{type(e).__name__}: {e}")
+        # Persistent tabs (e.g. Setup) can drive project switching.
+        if hasattr(content, "set_host"):
+            content.set_host(self)
         lay.addWidget(content)
         self._content[idx] = content
         self._built[idx] = True
@@ -178,10 +237,6 @@ class MainWindow(QMainWindow):
         self.scan = text
         self._refresh_context()
 
-    def _on_bin_changed(self, text):
-        self.bin_size = int(text.split("x")[0])
-        self._refresh_context()
-
     def _refresh_context(self):
         """Rebuild scan-dependent tabs; push context to persistent ones."""
         for idx, (mod, meta) in enumerate(self._defs):
@@ -199,6 +254,8 @@ class MainWindow(QMainWindow):
         return self.dm.metadata_dir / "gui_state.json"
 
     def _load_state(self) -> dict:
+        if self.dm is None:
+            return {}
         p = self.dm.metadata_dir / "gui_state.json"
         if p.exists():
             try:
@@ -209,6 +266,8 @@ class MainWindow(QMainWindow):
         return {}
 
     def _save_state(self):
+        if self.dm is None:
+            return
         self._state.update({
             "active_scan": self.scan,
             "bin_size": self.bin_size,
@@ -227,7 +286,7 @@ class MainWindow(QMainWindow):
         super().closeEvent(event)
 
 
-def launch_app(project_root=".", scan=None, bin_size=3):
+def launch_app(project_root=None, scan=None, bin_size=3):
     """Create the QApplication and run the single-window app."""
     import sys
     from PyQt5.QtWidgets import QApplication

@@ -65,7 +65,7 @@ METRICS = [
     ("intensity", "Intensity"),
     ("chi",       "χ angle"),
     ("strain",    "Lattice strain"),
-    ("rocking",   "Rocking width"),
+    ("chi_breadth", "Azimuthal breadth (χ FWHM)"),
     ("strain_bw", "Strain breadth"),
 ]
 
@@ -73,7 +73,7 @@ METRIC_ZLABELS = {
     "intensity":  "Integrated intensity",
     "chi":        "χ (°)",
     "strain":     "Δ2θ (°)",
-    "rocking":    "FWHM χ (°)",
+    "chi_breadth": "FWHM χ (°)",
     "strain_bw":  "FWHM Δ2θ (°)",
 }
 
@@ -84,7 +84,7 @@ METRIC_DESCRIPTIONS = {
     "intensity":  "Integrated peak area (summed counts) per bin",
     "chi":        "Azimuthal angle χ around the Debye ring",
     "strain":     "Δ2θ — distance from the reference Bragg angle",
-    "rocking":    "Rocking-curve FWHM — mosaic spread / plane curvature",
+    "chi_breadth": "χ-breadth — FWHM of azimuthal angle across the feature's bins (no rocking data involved)",
     "strain_bw":  "Spread of Δ2θ across the feature (strain gradient)",
 }
 
@@ -93,7 +93,7 @@ METRIC_2D_TITLES = {
     "intensity":  "Integrated Intensity — peak area per bin",
     "chi":        "χ Angle — azimuthal orientation on Debye ring",
     "strain":     "Lattice Strain — d-spacing deviation (Δ2θ from reference)",
-    "rocking":    "Rocking Width — crystal plane curvature / mosaic spread per feature",
+    "chi_breadth": "Azimuthal Breadth — χ FWHM per feature",
     "strain_bw":  "Strain Breadth — lattice parameter gradient across feature",
 }
 
@@ -110,7 +110,7 @@ def load_grid_info():
 
 
 PER_FEATURE_METRICS = {
-    "rocking": "rocking_fwhm", "strain_bw": "strain_breadth", "chi": "chi_deg",
+    "chi_breadth": "chi_fwhm", "strain_bw": "strain_breadth", "chi": "chi_deg",
 }
 
 
@@ -141,6 +141,8 @@ def build_device_grids(features, n_rows, n_cols, metric="intensity"):
             profile = feat.get("intensity_profile", {})
             if is_per_feature:
                 val = feat.get(feat_key)
+                if val is None and feat_key == "chi_fwhm":
+                    val = feat.get("rocking_fwhm")  # accept legacy field
                 if val is None:
                     continue
                 for bk in profile:

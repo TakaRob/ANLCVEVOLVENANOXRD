@@ -1,0 +1,12 @@
+{
+  "Scan_0203": {
+    "dir": "/mnt/c/Users/trobson/OneDrive - Argonne National Laboratory/2026-1_Luo/raw_scans/Scan_0203/XRD",
+    "frames_dir": "/mnt/c/Users/trobson/OneDrive - Argonne National Laboratory/2026-1_Luo/raw_scans/Scan_0203/XRD",
+    "n_files": 151,
+    "n_frames": 25217,
+    "shape": [
+      1062,
+      1028
+    ]
+  }
+}

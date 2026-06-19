@@ -36,6 +36,25 @@ import yaml
 
 CONFIG_FILENAME = "config.yaml"
 
+
+def format_detector_label(d: dict) -> str:
+    """Dropdown label for a catalog detector: ``name (F1 0.79)``.
+
+    Prefers the holdout F1, falls back to F2 (e.g. the recall-first 1x1
+    sessions), and marks unscored detectors. Per-frame (unbinned) detectors get
+    a trailing tag so it's clear they don't run in the binned pipeline.
+    """
+    name = d.get("name", "?")
+    f1, f2 = d.get("holdout_f1"), d.get("holdout_f2")
+    if f1 is not None:
+        score = f"F1 {f1:.2f}"
+    elif f2 is not None:
+        score = f"F2 {f2:.2f}"
+    else:
+        score = "unscored"
+    tag = " · unbinned" if d.get("pipeline") == "perframe" else ""
+    return f"{name} ({score}{tag})"
+
 # Standard project sub-directories created by ``xrd-app init``.
 PROJECT_DIRS = [
     "Raw",        # scans.json registry + links to external scan dirs
@@ -437,34 +456,53 @@ class DataManager:
         """The peak-algorithm library directory (holds catalog.json)."""
         return self.algorithms_dir("peak")
 
-    def load_detector_catalog(self) -> dict:
-        cat = self.detectors_dir() / "catalog.json"
+    def combined_dir(self) -> Path:
+        """The combined-algorithm library directory (holds catalog.json)."""
+        return self.algorithms_dir("combined")
+
+    def load_catalog(self, kind: str = "peak") -> dict:
+        """Read the ``catalog.json`` of an algorithm library (peak/combined)."""
+        cat = self.algorithms_dir(kind) / "catalog.json"
         if cat.exists():
             with open(cat) as f:
                 return json.load(f)
         return {"detectors": []}
 
+    def load_detector_catalog(self) -> dict:
+        return self.load_catalog("peak")
+
     def list_detectors(self, bin_size: Optional[int] = None) -> list:
-        """List bundled *detector* entries (excludes support modules)."""
+        """List bundled *detector* entries (excludes support modules).
+
+        An entry with a null/missing ``bin_size`` applies to any bin size (the
+        flat library is bin-agnostic), so it is always included.
+        """
         size = f"{bin_size}x{bin_size}" if bin_size else None
         out = []
         for d in self.load_detector_catalog().get("detectors", []):
             if d.get("role") != "detector":
                 continue
-            if size and d.get("bin_size") != size:
+            entry_size = d.get("bin_size")
+            if size and entry_size and entry_size != size:
                 continue
             out.append(d)
         return out
 
     def best_detector(self, bin_size: int) -> Optional[Path]:
-        """Path to the highest-scoring bundled detector for ``bin_size``."""
-        candidates = self.list_detectors(bin_size) or self.list_detectors(3) \
-            or self.list_detectors()
+        """Path to the highest-scoring bundled detector for ``bin_size``.
+
+        Only binned detectors are eligible — per-frame (unbinned) detectors run
+        through a different path and would crash the binned ``peaks`` pipeline.
+        """
+        def binned(dets):
+            return [d for d in dets if d.get("pipeline") != "perframe"]
+        candidates = binned(self.list_detectors(bin_size)) or \
+            binned(self.list_detectors(3)) or binned(self.list_detectors())
         if not candidates:
             return None
         candidates.sort(
             key=lambda d: (d.get("holdout_f1") if d.get("holdout_f1") is not None else -1,
-                           d.get("name") == "tophat_band_adaptive_snr"),
+                           d.get("name") == "5x5_tophat_band_adaptive_snr"),
             reverse=True)
         return self.detectors_dir() / candidates[0]["file"]
 
@@ -498,3 +536,25 @@ class DataManager:
             return self._abs(configured)
         bundled = self.best_detector(bin_size or 3)
         return bundled if bundled else (self.detectors_dir() / "detector.py")
+
+    # ----- combined algorithm library (peak + shape in one pass) -------
+    def list_combined(self) -> list:
+        """List combined (per-frame) algorithm entries from CombinedAlgorithms."""
+        return [d for d in self.load_catalog("combined").get("detectors", [])
+                if d.get("role") == "detector"]
+
+    def resolve_combined_name(self, name: str) -> Optional[Path]:
+        """Resolve a combined-algorithm name to its script path."""
+        stem = name[:-3] if name.endswith(".py") else name
+        for d in self.list_combined():
+            if d["name"] == stem:
+                return self.combined_dir() / d["file"]
+        return None
+
+    def combined_script(self, override: str) -> Path:
+        """Resolve a combined-algorithm script: explicit path -> library name."""
+        p = Path(override)
+        if p.exists():
+            return self._abs(override)
+        byname = self.resolve_combined_name(override)
+        return byname if byname else self._abs(override)

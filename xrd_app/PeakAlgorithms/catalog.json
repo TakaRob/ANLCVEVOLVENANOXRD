@@ -1,198 +1,71 @@
 {
-  "description": "Bundled XRD Bragg-peak detector algorithms. holdout_f1 is the per-center-bin F1 on the labeled holdout set (null = unscored).",
-  "metric": "holdout_f1 (spatially-validated per-bin F1; higher is better)",
+  "description": "Bundled XRD Bragg-peak detector algorithms (flat library). These are Phase-1 (per-bin) detectors run by 'xrd-app peaks'; cross-bin linking + shape filtering is the separate 'shapes' stage. Algorithm names carry the bin size they were developed on (CVEvolve session). holdout_f1/holdout_f2 are that session's holdout scores (null = unscored). bin_size null = applies to any binned size. Per-frame combined (peak+shape) algorithms live in the CombinedAlgorithms/ library. Automated (CVEvolve) algorithms live in their own named sub-folder.",
+  "metric": "holdout_f1 / holdout_f2 (spatially-validated holdout score; higher is better)",
   "detectors": [
     {
       "name": "baseline",
-      "bin_size": "1x1",
-      "file": "1x1/baseline.py",
+      "bin_size": null,
+      "file": "baseline.py",
       "role": "detector",
       "holdout_f1": null,
-      "source": null
+      "holdout_f2": null,
+      "source": "manual",
+      "notes": "Binned baseline: radial background subtraction + percentile threshold + connected components. Generic reference, runs on any binned size."
     },
     {
-      "name": "noise_reduction_algorithms",
-      "bin_size": "1x1",
-      "file": "1x1/noise_reduction_algorithms.py",
-      "role": "support",
-      "holdout_f1": null,
-      "source": null
-    },
-    {
-      "name": "tophat_band_adaptive_snr",
-      "bin_size": "1x1",
-      "file": "1x1/tophat_band_adaptive_snr.py",
-      "role": "detector",
-      "holdout_f1": null,
-      "source": null
-    },
-    {
-      "name": "baseline",
-      "bin_size": "3x3",
-      "file": "3x3/baseline.py",
-      "role": "detector",
-      "holdout_f1": null,
-      "source": null
-    },
-    {
-      "name": "log_tophat_hybrid_detector",
-      "bin_size": "3x3",
-      "file": "3x3/log_tophat_hybrid_detector.py",
-      "role": "detector",
-      "holdout_f1": 0.768,
-      "source": "5x5"
-    },
-    {
-      "name": "noise_reduction_algorithms",
-      "bin_size": "3x3",
-      "file": "3x3/noise_reduction_algorithms.py",
-      "role": "support",
-      "holdout_f1": null,
-      "source": null
-    },
-    {
-      "name": "tophat_band_adaptive_snr",
-      "bin_size": "3x3",
-      "file": "3x3/tophat_band_adaptive_snr.py",
+      "name": "5x5_tophat_band_adaptive_snr",
+      "bin_size": null,
+      "file": "5x5_tophat_band_adaptive_snr.py",
       "role": "detector",
       "holdout_f1": 0.7905,
-      "source": "5x5"
+      "holdout_f2": null,
+      "source": "cvevolve",
+      "dev_bin": "5x5",
+      "notes": "Developed on 5x5 (CVEvolve). Kept the variant computing integrated_intensity; runs on any binned size."
     },
     {
-      "name": "tophat_dual_snr_detector",
-      "bin_size": "3x3",
-      "file": "3x3/tophat_dual_snr_detector.py",
+      "name": "5x5_tophat_dual_snr_detector",
+      "bin_size": null,
+      "file": "5x5_tophat_dual_snr_detector.py",
       "role": "detector",
       "holdout_f1": 0.7778,
-      "source": "5x5"
+      "holdout_f2": null,
+      "source": "cvevolve",
+      "dev_bin": "5x5",
+      "notes": "Developed on 5x5 (CVEvolve)."
     },
     {
-      "name": "tuned_multiscale_tophat_dual_snr",
-      "bin_size": "3x3",
-      "file": "3x3/tuned_multiscale_tophat_dual_snr.py",
-      "role": "detector",
-      "holdout_f1": 0.7691,
-      "source": "5x5"
-    },
-    {
-      "name": "tuned_multiscale_tophat_tight_bands",
-      "bin_size": "3x3",
-      "file": "3x3/tuned_multiscale_tophat_tight_bands.py",
+      "name": "5x5_tuned_multiscale_tophat_tight_bands",
+      "bin_size": null,
+      "file": "5x5_tuned_multiscale_tophat_tight_bands.py",
       "role": "detector",
       "holdout_f1": 0.7706,
-      "source": "5x5"
+      "holdout_f2": null,
+      "source": "cvevolve",
+      "dev_bin": "5x5",
+      "notes": "Developed on 5x5 (CVEvolve)."
     },
     {
-      "name": "baseline",
-      "bin_size": "4x4",
-      "file": "4x4/baseline.py",
+      "name": "5x5_tuned_multiscale_tophat_dual_snr",
+      "bin_size": null,
+      "file": "5x5_tuned_multiscale_tophat_dual_snr.py",
       "role": "detector",
-      "holdout_f1": null,
-      "source": null
+      "holdout_f1": 0.7691,
+      "holdout_f2": null,
+      "source": "cvevolve",
+      "dev_bin": "5x5",
+      "notes": "Developed on 5x5 (CVEvolve)."
     },
     {
-      "name": "log_tophat_hybrid_detector",
-      "bin_size": "4x4",
-      "file": "4x4/log_tophat_hybrid_detector.py",
+      "name": "5x5_log_tophat_hybrid_detector",
+      "bin_size": null,
+      "file": "5x5_log_tophat_hybrid_detector.py",
       "role": "detector",
       "holdout_f1": 0.768,
-      "source": "5x5"
-    },
-    {
-      "name": "noise_reduction_algorithms",
-      "bin_size": "4x4",
-      "file": "4x4/noise_reduction_algorithms.py",
-      "role": "support",
-      "holdout_f1": null,
-      "source": null
-    },
-    {
-      "name": "tophat_band_adaptive_snr",
-      "bin_size": "4x4",
-      "file": "4x4/tophat_band_adaptive_snr.py",
-      "role": "detector",
-      "holdout_f1": 0.7905,
-      "source": "5x5"
-    },
-    {
-      "name": "tophat_dual_snr_detector",
-      "bin_size": "4x4",
-      "file": "4x4/tophat_dual_snr_detector.py",
-      "role": "detector",
-      "holdout_f1": 0.7778,
-      "source": "5x5"
-    },
-    {
-      "name": "tuned_multiscale_tophat_dual_snr",
-      "bin_size": "4x4",
-      "file": "4x4/tuned_multiscale_tophat_dual_snr.py",
-      "role": "detector",
-      "holdout_f1": 0.7691,
-      "source": "5x5"
-    },
-    {
-      "name": "tuned_multiscale_tophat_tight_bands",
-      "bin_size": "4x4",
-      "file": "4x4/tuned_multiscale_tophat_tight_bands.py",
-      "role": "detector",
-      "holdout_f1": 0.7706,
-      "source": "5x5"
-    },
-    {
-      "name": "baseline",
-      "bin_size": "5x5",
-      "file": "5x5/baseline.py",
-      "role": "detector",
-      "holdout_f1": null,
-      "source": null
-    },
-    {
-      "name": "log_tophat_hybrid_detector",
-      "bin_size": "5x5",
-      "file": "5x5/log_tophat_hybrid_detector.py",
-      "role": "detector",
-      "holdout_f1": 0.768,
-      "source": "5x5"
-    },
-    {
-      "name": "noise_reduction_algorithms",
-      "bin_size": "5x5",
-      "file": "5x5/noise_reduction_algorithms.py",
-      "role": "support",
-      "holdout_f1": null,
-      "source": null
-    },
-    {
-      "name": "tophat_band_adaptive_snr",
-      "bin_size": "5x5",
-      "file": "5x5/tophat_band_adaptive_snr.py",
-      "role": "detector",
-      "holdout_f1": 0.7905,
-      "source": "5x5"
-    },
-    {
-      "name": "tophat_dual_snr_detector",
-      "bin_size": "5x5",
-      "file": "5x5/tophat_dual_snr_detector.py",
-      "role": "detector",
-      "holdout_f1": 0.7778,
-      "source": "5x5"
-    },
-    {
-      "name": "tuned_multiscale_tophat_dual_snr",
-      "bin_size": "5x5",
-      "file": "5x5/tuned_multiscale_tophat_dual_snr.py",
-      "role": "detector",
-      "holdout_f1": 0.7691,
-      "source": "5x5"
-    },
-    {
-      "name": "tuned_multiscale_tophat_tight_bands",
-      "bin_size": "5x5",
-      "file": "5x5/tuned_multiscale_tophat_tight_bands.py",
-      "role": "detector",
-      "holdout_f1": 0.7706,
-      "source": "5x5"
+      "holdout_f2": null,
+      "source": "cvevolve",
+      "dev_bin": "5x5",
+      "notes": "Developed on 5x5 (CVEvolve)."
     }
   ]
 }

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from ..gui import device_map
-from ._embed import embed_window
+from ._embed import BinnedTab
 
 TAB_META = {
     "title": "Device View",
@@ -12,14 +12,14 @@ TAB_META = {
     "scan_dependent": True,
     "general": (
         "Spatial maps across the full bin grid with switchable metrics: integrated "
-        "intensity, lattice strain (Δ2θ), chi orientation, rocking width, and strain "
-        "breadth. Chi-range filter with interactive controls."
+        "intensity, lattice strain (Δ2θ), chi orientation, azimuthal breadth "
+        "(χ FWHM), and strain breadth. Chi-range filter with interactive controls."
     ),
 }
 
 
 def make_tab(project_root=".", scan=None, bin_size=3):
-    return embed_window(device_map.build_window(project_root, scan=scan, bin_size=bin_size))
+    return BinnedTab(device_map.build_window, project_root, scan=scan, bin_size=bin_size)
 
 
 if __name__ == "__main__":

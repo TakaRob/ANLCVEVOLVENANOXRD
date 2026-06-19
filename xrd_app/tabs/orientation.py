@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from ..gui import orientation as orientation_gui
-from ._embed import embed_window
+from ._embed import BinnedTab
 
 TAB_META = {
     "title": "Orientation Map",
@@ -20,7 +20,7 @@ TAB_META = {
 
 
 def make_tab(project_root=".", scan=None, bin_size=3):
-    return embed_window(orientation_gui.build_window(project_root, scan=scan, bin_size=bin_size))
+    return BinnedTab(orientation_gui.build_window, project_root, scan=scan, bin_size=bin_size)
 
 
 if __name__ == "__main__":

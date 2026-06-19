@@ -22,19 +22,24 @@ from pathlib import Path
 import h5py
 import hdf5plugin  # noqa: F401
 import numpy as np
+import pyqtgraph as pg
+
+# matplotlib is retained only for the 3D isometric view (IsometricCanvas); all
+# other panels are now pyqtgraph.
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
 from matplotlib.figure import Figure
-import matplotlib.colors as mcolors
 import matplotlib.pyplot as plt
 
-from PyQt5.QtCore import Qt, QThread, QTimer, pyqtSignal
-from PyQt5.QtGui import QColor
+from PyQt5.QtCore import Qt, QRectF, QThread, QTimer, pyqtSignal
+from PyQt5.QtGui import QBrush, QColor, QPen
 from PyQt5.QtWidgets import (
-    QAbstractItemView, QApplication, QComboBox, QGridLayout, QGroupBox,
-    QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem,
-    QMainWindow, QPushButton, QSizePolicy, QSlider, QSpinBox,
+    QAbstractItemView, QApplication, QComboBox, QGraphicsRectItem, QGridLayout,
+    QGroupBox, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem,
+    QMainWindow, QMessageBox, QPushButton, QSizePolicy, QSlider, QSpinBox,
     QSplitter, QVBoxLayout, QWidget, QCheckBox,
 )
+
+pg.setConfigOptions(imageAxisOrder="row-major", antialias=True)
 
 # These are resolved at runtime by configure(); see launch_gui().
 _DM = None
@@ -126,23 +131,93 @@ def group_by_reflection(features):
     return dict(groups)
 
 
+# ── pyqtgraph helpers ──────────────────────────────────────────────
+
+def _get_cmap(name):
+    """pyqtgraph ColorMap by name, falling back through matplotlib."""
+    try:
+        return pg.colormap.get(name)
+    except Exception:
+        try:
+            return pg.colormap.get(name, source="matplotlib")
+        except Exception:
+            return pg.colormap.get("viridis")
+
+
+def _hex_rgb(hex_color):
+    c = QColor(hex_color)
+    return c.red(), c.green(), c.blue()
+
+
+def _qcolor(color, alpha=None):
+    c = QColor(color)
+    if alpha is not None:
+        c.setAlphaF(alpha)
+    return c
+
+
+def _scalar_to_rgba(arr, vmin, vmax, cmap):
+    """Map a 2-D scalar array → (H, W, 4) uint8 RGBA; NaN → transparent."""
+    h, w = arr.shape
+    out = np.zeros((h, w, 4), dtype=np.ubyte)
+    finite = np.isfinite(arr)
+    if finite.any():
+        lut = cmap.getLookupTable(0.0, 1.0, 256)
+        norm = np.clip((arr - vmin) / max(vmax - vmin, 1e-9), 0, 1)
+        idx = np.zeros_like(arr, dtype=int)
+        idx[finite] = (norm[finite] * 255).astype(int)
+        out[..., :3] = lut[idx][..., :3]
+        out[..., 3] = np.where(finite, 255, 0).astype(np.ubyte)
+    return out
+
+
+def _circle_item(x, y, r, color, width=2, dash=True, alpha=1.0, n=64):
+    """A data-space circle outline as a PlotDataItem (dashed by default)."""
+    th = np.linspace(0, 2 * np.pi, n)
+    pen = pg.mkPen(_qcolor(color, alpha), width=width)
+    if dash:
+        pen.setStyle(Qt.DashLine)
+    item = pg.PlotDataItem(x + r * np.cos(th), y + r * np.sin(th), pen=pen)
+    item.setZValue(5)
+    return item
+
+
+def _label_item(x, y, text, color, alpha=1.0):
+    """A text overlay with a translucent black background box."""
+    t = pg.TextItem(text, color=_qcolor(color, alpha), anchor=(0, 1),
+                    fill=pg.mkBrush(0, 0, 0, 180))
+    t.setPos(x, y)
+    t.setZValue(6)
+    return t
+
+
 # ── Canvases ───────────────────────────────────────────────────────
 
-class HeatmapCanvas(FigureCanvasQTAgg):
+class HeatmapView(pg.GraphicsLayoutWidget):
+    """Per-feature intensity heatmap (pyqtgraph rewrite of HeatmapCanvas)."""
+
     def __init__(self):
-        self.fig = Figure(figsize=(5, 6))
-        self.fig.patch.set_facecolor("#1a1a1a")
-        self.ax = self.fig.add_subplot(111)
-        self.ax.set_facecolor("black")
-        self.fig.subplots_adjust(left=0.12, right=0.88, top=0.93, bottom=0.07)
-        super().__init__(self.fig)
+        super().__init__()
+        self.setBackground("#1a1a1a")
         self.setMinimumSize(300, 300)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.plot = self.addPlot(row=0, col=0)
+        self.plot.setAspectLocked(True)
+        self.plot.invertY(True)            # origin='upper': row 0 at top
+        self.plot.getViewBox().setBackgroundColor("k")
+        self.plot.getAxis("bottom").setPen("#888")
+        self.plot.getAxis("left").setPen("#888")
+        self.img = pg.ImageItem()
+        self.plot.addItem(self.img)
+        self.colorbar = None
+        self._markers = []
         self._click_cb = None
         self._hover_cb = None
         self._grid_data = None
-        self.mpl_connect("button_press_event", self._on_click)
-        self.mpl_connect("motion_notify_event", self._on_motion)
+        self._grid_r_lo = 0
+        self._grid_c_lo = 0
+        self.plot.scene().sigMouseMoved.connect(self._on_move)
+        self.plot.scene().sigMouseClicked.connect(self._on_click)
 
     def set_click_callback(self, cb):
         self._click_cb = cb
@@ -150,29 +225,54 @@ class HeatmapCanvas(FigureCanvasQTAgg):
     def set_hover_callback(self, cb):
         self._hover_cb = cb
 
-    def _on_click(self, event):
-        if event.inaxes == self.ax and self._click_cb and event.xdata is not None:
-            col = int(event.xdata + 0.5)
-            row = int(event.ydata + 0.5)
-            self._click_cb(row, col)
+    def _scene_to_view(self, scene_pos):
+        if not self.plot.sceneBoundingRect().contains(scene_pos):
+            return None
+        pt = self.plot.getViewBox().mapSceneToView(scene_pos)
+        return pt.x(), pt.y()
 
-    def _on_motion(self, event):
-        if self._hover_cb and event.inaxes == self.ax and event.xdata is not None:
-            col = int(event.xdata + 0.5)
-            row = int(event.ydata + 0.5)
-            intensity = None
-            if self._grid_data is not None:
-                r_off = getattr(self, '_grid_r_lo', 0)
-                c_off = getattr(self, '_grid_c_lo', 0)
-                ri = row - r_off
-                ci = col - c_off
-                if 0 <= ri < self._grid_data.shape[0] and 0 <= ci < self._grid_data.shape[1]:
-                    val = self._grid_data[ri, ci]
-                    if not np.isnan(val):
-                        intensity = val
-            self._hover_cb(row, col, intensity)
-        elif self._hover_cb:
+    def set_markers(self, center, highlight):
+        """Redraw the white (center) and cyan (selected) bin markers."""
+        for it in self._markers:
+            self.plot.removeItem(it)
+        self._markers = []
+        for bin_rc, pen_color, z in ((center, "w", 8), (highlight, "c", 9)):
+            if bin_rc is None:
+                continue
+            r, c = bin_rc
+            s = pg.ScatterPlotItem([c], [r], symbol="s", size=16,
+                                   pen=pg.mkPen(pen_color, width=2),
+                                   brush=pg.mkBrush(None))
+            s.setZValue(z)
+            self.plot.addItem(s)
+            self._markers.append(s)
+
+    def _on_move(self, scene_pos):
+        if self._hover_cb is None:
+            return
+        pos = self._scene_to_view(scene_pos)
+        if pos is None:
             self._hover_cb(None, None, None)
+            return
+        col = int(round(pos[0]))
+        row = int(round(pos[1]))
+        intensity = None
+        if self._grid_data is not None:
+            ri = row - self._grid_r_lo
+            ci = col - self._grid_c_lo
+            if 0 <= ri < self._grid_data.shape[0] and 0 <= ci < self._grid_data.shape[1]:
+                val = self._grid_data[ri, ci]
+                if not np.isnan(val):
+                    intensity = float(val)
+        self._hover_cb(row, col, intensity)
+
+    def _on_click(self, ev):
+        if self._click_cb is None or ev.button() != Qt.LeftButton:
+            return
+        pos = self._scene_to_view(ev.scenePos())
+        if pos is None:
+            return
+        self._click_cb(int(round(pos[1])), int(round(pos[0])))
 
 
 class IsometricCanvas(FigureCanvasQTAgg):
@@ -187,28 +287,100 @@ class IsometricCanvas(FigureCanvasQTAgg):
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
 
 
-class DetectorCanvas(FigureCanvasQTAgg):
+class _RectItem:
+    """Persistent selection rectangle on the detector view (pg wrapper).
+
+    Exposes ``set_color``/``remove`` so the explore-mode bookkeeping can recolor
+    a selection green when its expansion completes, or drop it on accept/remove.
+    """
+
+    def __init__(self, vb, x0, y0, x1, y1, edge, face, alpha):
+        self.vb = vb
+        self.item = QGraphicsRectItem(min(x0, x1), min(y0, y1),
+                                      abs(x1 - x0), abs(y1 - y0))
+        self.item.setZValue(10)
+        self.set_color(edge, face, alpha)
+        vb.addItem(self.item)
+
+    def set_color(self, edge, face, alpha=0.2):
+        self.item.setPen(QPen(_qcolor(edge), 2))
+        self.item.setBrush(QBrush(_qcolor(face, alpha)))
+
+    def remove(self):
+        try:
+            self.vb.removeItem(self.item)
+        except Exception:
+            pass
+
+
+class _DragViewBox(pg.ViewBox):
+    """ViewBox that supports rubber-band peak selection in explore mode.
+
+    When ``drag_enabled`` is False it behaves like a normal ViewBox (left-drag
+    pans). When True, a left-drag draws a selection rectangle and, on release,
+    creates a persistent ``_RectItem`` and invokes the drag callback.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.drag_enabled = False
+        self._drag_cb = None
+        self._sel = None
+
+    def mouseDragEvent(self, ev, axis=None):
+        if not (self.drag_enabled and ev.button() == Qt.LeftButton):
+            super().mouseDragEvent(ev, axis)
+            return
+        ev.accept()
+        p0 = self.mapSceneToView(ev.buttonDownScenePos())
+        p1 = self.mapSceneToView(ev.scenePos())
+        x0, y0, x1, y1 = p0.x(), p0.y(), p1.x(), p1.y()
+        if ev.isStart():
+            self._sel = QGraphicsRectItem()
+            self._sel.setPen(QPen(_qcolor("lime"), 2, Qt.DotLine))
+            self._sel.setBrush(QBrush(_qcolor("lime", 0.15)))
+            self._sel.setZValue(9)
+            self.addItem(self._sel)
+        if self._sel is not None:
+            self._sel.setRect(min(x0, x1), min(y0, y1),
+                              abs(x1 - x0), abs(y1 - y0))
+        if ev.isFinish():
+            if self._sel is not None:
+                self.removeItem(self._sel)
+                self._sel = None
+            if abs(x1 - x0) > 3 and abs(y1 - y0) > 3 and self._drag_cb:
+                rx0, rx1 = int(min(x0, x1)), int(max(x0, x1))
+                ry0, ry1 = int(min(y0, y1)), int(max(y0, y1))
+                rect = _RectItem(self, rx0, ry0, rx1, ry1,
+                                 edge="#f0a030", face="#f0a030", alpha=0.2)
+                self._drag_cb(rx0, ry0, rx1, ry1, rect)
+
+
+class DetectorView(pg.GraphicsLayoutWidget):
+    """Detector image with colormap, overlays and drag-select (pyqtgraph)."""
+
     def __init__(self):
-        self.fig = Figure(figsize=(6, 6))
-        self.fig.patch.set_facecolor("#1a1a1a")
-        self.ax = self.fig.add_subplot(111)
-        self.ax.set_facecolor("black")
-        self.fig.subplots_adjust(left=0.05, right=0.98, top=0.95, bottom=0.03)
-        super().__init__(self.fig)
+        super().__init__()
+        self.setBackground("#1a1a1a")
         self.setMinimumSize(400, 400)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.vb = _DragViewBox()
+        self.plot = self.addPlot(row=0, col=0, viewBox=self.vb)
+        self.plot.setAspectLocked(True)
+        self.plot.invertY(True)
+        self.vb.setBackgroundColor("k")
+        self.plot.getAxis("bottom").setPen("#888")
+        self.plot.getAxis("left").setPen("#888")
+        self.img = pg.ImageItem()
+        self.plot.addItem(self.img)
+        self._overlay_items = []
+        self._display_data = None
         self._hover_cb = None
         self._click_cb = None
-        self._drag_cb = None
-        self._display_data = None
-        self._drag_start = None
-        self._dragging = False
-        self._drag_rect = None
-        self.drag_enabled = False
-        self.mpl_connect("motion_notify_event", self._on_motion)
-        self.mpl_connect("button_press_event", self._on_press)
-        self.mpl_connect("button_release_event", self._on_release)
+        self.plot.scene().sigMouseMoved.connect(self._on_move)
+        self.plot.scene().sigMouseClicked.connect(self._on_click)
 
+    # ── callbacks ────────────────────────────────────────────────
     def set_hover_callback(self, cb):
         self._hover_cb = cb
 
@@ -216,79 +388,113 @@ class DetectorCanvas(FigureCanvasQTAgg):
         self._click_cb = cb
 
     def set_drag_callback(self, cb):
-        self._drag_cb = cb
+        self.vb._drag_cb = cb
 
-    def _on_press(self, event):
-        if event.button != 1 or event.inaxes != self.ax or event.xdata is None:
-            return
-        if self.drag_enabled:
-            self._dragging = True
-            self._drag_start = (event.xdata, event.ydata)
-            return
-        if self._click_cb:
-            col = int(event.xdata + 0.5)
-            row = int(event.ydata + 0.5)
-            self._click_cb(col, row)
+    @property
+    def drag_enabled(self):
+        return self.vb.drag_enabled
 
-    def _on_release(self, event):
-        if not self._dragging or not self._drag_start:
-            return
-        # Remove the transient drag preview rect
-        if self._drag_rect:
+    @drag_enabled.setter
+    def drag_enabled(self, value):
+        self.vb.drag_enabled = bool(value)
+
+    # ── rendering ────────────────────────────────────────────────
+    def show_image(self, display, vmin, vmax, cmap_name, reverse=False):
+        self.clear_overlays()
+        self._display_data = display
+        cmap = _get_cmap(cmap_name + "_r") if reverse else _get_cmap(cmap_name)
+        self.img.setImage(display, autoLevels=False)
+        self.img.setLookupTable(cmap.getLookupTable(0.0, 1.0, 256))
+        self.img.setLevels((vmin, vmax))
+        self.img.setZValue(0)
+
+    def clear_image(self):
+        self.clear_overlays()
+        self.img.clear()
+        self._display_data = None
+
+    def add_overlay(self, item):
+        self.plot.addItem(item)
+        self._overlay_items.append(item)
+
+    def clear_overlays(self):
+        for it in self._overlay_items:
             try:
-                self._drag_rect.remove()
+                self.plot.removeItem(it)
             except Exception:
                 pass
-            self._drag_rect = None
+        self._overlay_items = []
 
-        if event.inaxes == self.ax and event.xdata is not None:
-            x0, y0 = self._drag_start
-            x1, y1 = event.xdata, event.ydata
-            if abs(x1 - x0) > 3 and abs(y1 - y0) > 3 and self._drag_cb:
-                rx0, rx1 = int(min(x0, x1)), int(max(x0, x1))
-                ry0, ry1 = int(min(y0, y1)), int(max(y0, y1))
-                # Draw a persistent rectangle for this selection
-                from matplotlib.patches import Rectangle
-                persist = Rectangle(
-                    (rx0, ry0), rx1 - rx0, ry1 - ry0,
-                    linewidth=2, edgecolor="#f0a030", facecolor="#f0a030",
-                    alpha=0.2, linestyle="-")
-                self.ax.add_patch(persist)
-                self._drag_cb(rx0, ry0, rx1, ry1, persist)
+    def set_title(self, text):
+        self.plot.setTitle(text, color="w", size="10pt")
 
-        self._dragging = False
-        self._drag_start = None
-        self.draw_idle()
+    # ── interaction ──────────────────────────────────────────────
+    def _scene_to_view(self, scene_pos):
+        if not self.plot.sceneBoundingRect().contains(scene_pos):
+            return None
+        pt = self.vb.mapSceneToView(scene_pos)
+        return pt.x(), pt.y()
 
-    def _on_motion(self, event):
-        if self._dragging and self._drag_start and event.inaxes == self.ax:
-            from matplotlib.patches import Rectangle
-            if self._drag_rect:
-                try:
-                    self._drag_rect.remove()
-                except Exception:
-                    pass
-            x0, y0 = self._drag_start
-            x1, y1 = event.xdata, event.ydata
-            self._drag_rect = Rectangle(
-                (min(x0, x1), min(y0, y1)), abs(x1 - x0), abs(y1 - y0),
-                linewidth=2, edgecolor="lime", facecolor="lime",
-                alpha=0.15, linestyle=":")
-            self.ax.add_patch(self._drag_rect)
-            self.draw_idle()
+    def _on_move(self, scene_pos):
+        if self._hover_cb is None:
             return
-
-        if self._hover_cb and event.inaxes == self.ax and event.xdata is not None:
-            col = int(event.xdata + 0.5)
-            row = int(event.ydata + 0.5)
-            intensity = None
-            if (self._display_data is not None and
-                    0 <= row < self._display_data.shape[0] and
-                    0 <= col < self._display_data.shape[1]):
-                intensity = float(self._display_data[row, col])
-            self._hover_cb(col, row, intensity)
-        elif self._hover_cb:
+        pos = self._scene_to_view(scene_pos)
+        if pos is None:
             self._hover_cb(None, None, None)
+            return
+        col = int(round(pos[0]))
+        row = int(round(pos[1]))
+        intensity = None
+        d = self._display_data
+        if d is not None and 0 <= row < d.shape[0] and 0 <= col < d.shape[1]:
+            intensity = float(d[row, col])
+        self._hover_cb(col, row, intensity)
+
+    def _on_click(self, ev):
+        if self._click_cb is None or ev.button() != Qt.LeftButton:
+            return
+        if self.vb.drag_enabled:
+            return
+        pos = self._scene_to_view(ev.scenePos())
+        if pos is None:
+            return
+        self._click_cb(int(round(pos[0])), int(round(pos[1])))
+
+
+class MiniMapView(pg.PlotWidget):
+    """Small clickable device-location map (pyqtgraph)."""
+
+    def __init__(self):
+        super().__init__()
+        self.setBackground("#1a1a1a")
+        self.setFixedHeight(120)
+        self.plot = self.getPlotItem()
+        self.plot.setAspectLocked(True)
+        self.plot.invertY(True)
+        self.plot.hideAxis("bottom")
+        self.plot.hideAxis("left")
+        self.plot.setMenuEnabled(False)
+        self.plot.getViewBox().setBackgroundColor("#222")
+        self.plot.getViewBox().setMouseEnabled(False, False)
+        self._click_cb = None
+        self.scene().sigMouseClicked.connect(self._on_click)
+
+    def set_click_callback(self, cb):
+        self._click_cb = cb
+
+    def _scene_to_view(self, scene_pos):
+        if not self.plot.sceneBoundingRect().contains(scene_pos):
+            return None
+        pt = self.plot.getViewBox().mapSceneToView(scene_pos)
+        return pt.x(), pt.y()
+
+    def _on_click(self, ev):
+        if self._click_cb is None or ev.button() != Qt.LeftButton:
+            return
+        pos = self._scene_to_view(ev.scenePos())
+        if pos is None:
+            return
+        self._click_cb(int(round(pos[1])), int(round(pos[0])))
 
 
 # ── Background expansion worker ───────────────────────────────────
@@ -412,11 +618,14 @@ class FeatureViewer(QMainWindow):
         self._next_job_id = 0
         self._region_shown = False
 
+        self._scan = _DM.scan_name if _DM is not None else None
+        self._bin_size = _BIN_SIZE
         self._load_data()
         self._build_ui()
         self._connect_signals()
 
         self._on_category_changed()
+        self._restore_state()
 
     # ── Data ───────────────────────────────────────────────────────
 
@@ -513,8 +722,11 @@ class FeatureViewer(QMainWindow):
     def _build_ui(self):
         central = QWidget()
         self.setCentralWidget(central)
-        layout = QHBoxLayout(central)
+        layout = QVBoxLayout(central)
         layout.setContentsMargins(4, 4, 4, 4)
+        layout.setSpacing(4)
+
+        layout.addLayout(self._build_top_bar())
 
         splitter = QSplitter(Qt.Horizontal)
 
@@ -548,7 +760,7 @@ class FeatureViewer(QMainWindow):
         left_vbox.addLayout(cb_bar)
 
         left_splitter = QSplitter(Qt.Vertical)
-        self.heatmap_canvas = HeatmapCanvas()
+        self.heatmap_canvas = HeatmapView()
         self.heatmap_canvas.set_click_callback(self._on_heatmap_click)
         self.heatmap_canvas.set_hover_callback(self._on_heatmap_hover)
         left_splitter.addWidget(self.heatmap_canvas)
@@ -560,7 +772,7 @@ class FeatureViewer(QMainWindow):
         splitter.addWidget(left_container)
 
         # Center: detector image
-        self.detector_canvas = DetectorCanvas()
+        self.detector_canvas = DetectorView()
         self.detector_canvas.set_hover_callback(self._on_detector_hover)
         self.detector_canvas.set_click_callback(self._on_detector_click)
         self.detector_canvas.set_drag_callback(self._on_explore_drag)
@@ -581,12 +793,8 @@ class FeatureViewer(QMainWindow):
         self._build_noise_reduction(right_layout)
 
         # Device location mini-map (clickable in explore mode)
-        self.loc_canvas = FigureCanvasQTAgg(Figure(figsize=(2, 1.5)))
-        self.loc_canvas.figure.patch.set_facecolor("#1a1a1a")
-        self.loc_ax = self.loc_canvas.figure.add_subplot(111)
-        self.loc_canvas.setFixedHeight(120)
-        self.loc_canvas.figure.subplots_adjust(left=0.05, right=0.95, top=0.88, bottom=0.05)
-        self.loc_canvas.mpl_connect("button_press_event", self._on_minimap_click)
+        self.loc_canvas = MiniMapView()
+        self.loc_canvas.set_click_callback(self._on_minimap_click)
         right_layout.addWidget(self.loc_canvas)
 
         # Status bar for hover info
@@ -602,6 +810,137 @@ class FeatureViewer(QMainWindow):
 
         splitter.setSizes([450, 800, 400])
         layout.addWidget(splitter)
+
+    def _build_top_bar(self):
+        bar = QHBoxLayout()
+        bar.addWidget(QLabel("<b>Scan:</b>"))
+        self.scan_combo = QComboBox()
+        self.scan_combo.setMinimumWidth(180)
+        bar.addWidget(self.scan_combo)
+        bar.addWidget(QLabel("<b>Bin:</b>"))
+        self.bin_combo = QComboBox()
+        self.bin_combo.addItems([f"{b}x{b}" for b in (1, 3, 4, 5)])
+        self.bin_combo.setCurrentText(f"{self._bin_size}x{self._bin_size}")
+        bar.addWidget(self.bin_combo)
+        self.load_btn = QPushButton("Load")
+        self.load_btn.setToolTip(
+            "Reload features and detector data for the selected scan + bin size")
+        self.load_btn.clicked.connect(self._on_load_clicked)
+        bar.addWidget(self.load_btn)
+        self.scan_status = QLabel("")
+        self.scan_status.setStyleSheet(
+            "color:#888; font-size:11px; padding-left:8px;")
+        bar.addWidget(self.scan_status)
+        bar.addStretch()
+        self._populate_scan_combo()
+        return bar
+
+    def _populate_scan_combo(self):
+        self.scan_combo.blockSignals(True)
+        self.scan_combo.clear()
+        scans = []
+        try:
+            if _DM is not None:
+                scans = _DM.discover_scans()
+        except Exception:
+            scans = []
+        if scans:
+            self.scan_combo.addItems(scans)
+            if self._scan and self._scan in scans:
+                self.scan_combo.setCurrentText(self._scan)
+        else:
+            self.scan_combo.addItem(self._scan or "(no scans)")
+        self.scan_combo.blockSignals(False)
+        self._update_scan_status()
+
+    def _bins_built_text(self):
+        """Whether the binned HDF5 for the current bin exists, and when built."""
+        if self._bin_size == 1:
+            return "1×1: raw frames"
+        try:
+            p = _DM.bins_h5(self._bin_size) if _DM is not None else None
+        except Exception:
+            p = None
+        if not p:
+            return f"{self._bin_size}×{self._bin_size}: raw frames"
+        if os.path.exists(p):
+            import datetime
+            ts = datetime.datetime.fromtimestamp(os.path.getmtime(p))
+            return f"bins {self._bin_size}×{self._bin_size} built {ts:%Y-%m-%d %H:%M}"
+        return f"bins {self._bin_size}×{self._bin_size}: not built"
+
+    def _update_scan_status(self):
+        self.scan_status.setText(
+            f"{self._kept_total} kept / {self._filtered_total} filtered  ·  "
+            f"{self._bins_built_text()}")
+
+    def _on_load_clicked(self):
+        scan = self.scan_combo.currentText()
+        if not scan or scan.startswith("("):
+            return
+        try:
+            bin_size = int(self.bin_combo.currentText().split("x")[0])
+        except ValueError:
+            bin_size = self._bin_size
+        self._reload(scan, bin_size)
+
+    def _reload(self, scan, bin_size=None):
+        """Re-read all data for ``scan`` + bin size in place and refresh views."""
+        old_scan, old_bin = self._scan, self._bin_size
+        bin_size = bin_size if bin_size is not None else self._bin_size
+        self.load_btn.setEnabled(False)
+        try:
+            configure(project_root=str(_DM.root), bin_size=bin_size, scan=scan)
+            self._load_data()
+        except Exception as e:
+            try:
+                configure(project_root=str(_DM.root), bin_size=old_bin,
+                          scan=old_scan)
+            except Exception:
+                pass
+            self.load_btn.setEnabled(True)
+            QMessageBox.warning(self, "Load failed",
+                                f"Could not load scan “{scan}” ({bin_size}×{bin_size}):"
+                                f"\n\n{e}")
+            return
+
+        self._scan = scan
+        self._bin_size = bin_size
+        # Drop stale per-scan state and image caches.
+        if self._h5f is not None:
+            self._h5f.close()
+            self._h5f = None
+        self._raw_image_cache.clear()
+        self._image_cache.clear()
+        self._noise_cache.clear()
+        self._clear_explore_rects()
+        self._pending_features = []
+        self._explore_feature = None
+        self._explore_bin = None
+        self._highlight_bin = None
+        self._selected_bin = None
+        self._region_shown = False
+        self._detector_other_features = []
+
+        self.category_combo.blockSignals(True)
+        self._refresh_category_labels()
+        self.category_combo.setCurrentIndex(0)
+        self.category_combo.blockSignals(False)
+        self._on_category_changed()
+
+        if self._explore_mode:
+            self._update_pending_list()
+            self._render_explore_minimap()
+        self.region_btn.setText("Show region features")
+        self.load_btn.setEnabled(True)
+        self._update_scan_status()
+
+    def _refresh_category_labels(self):
+        self.category_combo.clear()
+        self.category_combo.addItems([
+            f"Kept Features ({self._kept_total})",
+            f"Filtered Features ({self._filtered_total})",
+        ])
 
     def _build_navigation(self, parent_layout):
         grp = QGroupBox("Feature Selection")
@@ -679,9 +1018,9 @@ class FeatureViewer(QMainWindow):
             "font-family: monospace; font-size: 10px; color: #aaa; padding: 2px;")
         lay.addWidget(self.score_label)
 
-        self.region_btn = QPushButton("Show region peaks")
+        self.region_btn = QPushButton("Show region features")
         self.region_btn.setToolTip("Sum ~10 nearby bins and overlay all\n"
-                                   "detected peaks (kept + filtered)")
+                                   "detected features (kept + filtered)")
         self.region_btn.setStyleSheet(
             "QPushButton { background: #2a4a5a; color: white; font-weight: bold; "
             "padding: 4px 12px; border-radius: 3px; }"
@@ -812,10 +1151,7 @@ class FeatureViewer(QMainWindow):
     # ── Signals ────────────────────────────────────────────────────
 
     def _connect_signals(self):
-        self.category_combo.addItems([
-            f"Kept Features ({self._kept_total})",
-            f"Filtered Features ({self._filtered_total})",
-        ])
+        self._refresh_category_labels()
         self.category_combo.currentIndexChanged.connect(self._on_category_changed)
         self.reflection_combo.currentIndexChanged.connect(self._on_reflection_changed)
         self.feat_spin.valueChanged.connect(self._on_feature_changed)
@@ -924,33 +1260,29 @@ class FeatureViewer(QMainWindow):
         self._selected_bin = feat.get("center_bin")
         if self._explore_mode:
             self._explore_bin = feat.get("center_bin")
-            self._explore_rects = []
+            self._clear_explore_rects()
         self._region_shown = False
-        self.region_btn.setText("Show region peaks")
+        self.region_btn.setText("Show region features")
         self._load_detector_image(feat["center_bin"], feat)
 
     # ── Device location mini-map ──────────────────────────────────────
 
     def _render_location(self, feat):
-        ax = self.loc_ax
-        ax.clear()
-        ax.set_facecolor("#222")
+        p = self.loc_canvas.plot
+        p.clear()
         nr, nc = self._n_rows, self._n_cols
-        ax.add_patch(plt.Rectangle((0, 0), nc, nr, linewidth=1.5,
-                                    edgecolor="gray", facecolor="#333"))
+        rect = QGraphicsRectItem(0, 0, nc, nr)
+        rect.setPen(QPen(_qcolor("gray"), 1.5))
+        rect.setBrush(QBrush(_qcolor("#333")))
+        p.addItem(rect)
         cr = feat.get("center_row", 0)
         cc = feat.get("center_col", 0)
-        ax.plot(cc, cr, "o", color="red", markersize=7,
-                markeredgecolor="white", markeredgewidth=1)
-        ax.set_xlim(-2, nc + 2)
-        ax.set_ylim(nr + 2, -2)
-        ax.set_aspect("equal")
-        ax.set_xticks([])
-        ax.set_yticks([])
-        ax.set_title(f"Device ({cr}, {cc})", color="white", fontsize=8, pad=3)
-        for spine in ax.spines.values():
-            spine.set_visible(False)
-        self.loc_canvas.draw_idle()
+        p.addItem(pg.ScatterPlotItem([cc], [cr], symbol="o", size=9,
+                                     brush=pg.mkBrush("r"),
+                                     pen=pg.mkPen("w", width=1)))
+        p.setXRange(-2, nc + 2, padding=0)
+        p.setYRange(-2, nr + 2, padding=0)
+        p.setTitle(f"Device ({cr}, {cc})", color="#ddd", size="8pt")
 
     # ── Profile value helper ─────────────────────────────────────────
 
@@ -1112,61 +1444,67 @@ class FeatureViewer(QMainWindow):
     # ── Heatmap ────────────────────────────────────────────────────
 
     def _render_heatmap(self, feat):
-        self.heatmap_canvas.fig.clear()
-        ax = self.heatmap_canvas.fig.add_subplot(111)
-        self.heatmap_canvas.ax = ax
-        ax.set_facecolor("black")
-        self.heatmap_canvas.fig.patch.set_facecolor("#1a1a1a")
-        self.heatmap_canvas.fig.subplots_adjust(left=0.12, right=0.88, top=0.93, bottom=0.07)
-
+        hv = self.heatmap_canvas
         Z, z_max, bounds = self._build_feature_grid(feat)
         if Z is None:
-            self.heatmap_canvas.draw_idle()
+            hv.img.clear()
+            hv._grid_data = None
+            hv.set_markers(None, None)
+            self._update_heatmap_colorbar(None, None, None)
+            hv.plot.setTitle("No profile data", color="w", size="9pt")
             return
         r_lo, r_hi, c_lo, c_hi = bounds
 
         grid = np.where(Z > 0, Z, np.nan)
-        self.heatmap_canvas._grid_data = grid
-        self.heatmap_canvas._grid_r_lo = r_lo
-        self.heatmap_canvas._grid_c_lo = c_lo
+        hv._grid_data = grid
+        hv._grid_r_lo = r_lo
+        hv._grid_c_lo = c_lo
+        nr, nc = grid.shape
 
-        cmap = plt.get_cmap(self._cmap_name).copy()
-        cmap.set_bad(color="black")
+        cmap = _get_cmap(self._cmap_name)
+        rgba = _scalar_to_rgba(grid, 0.0, z_max, cmap)
+        hv.img.setImage(rgba, autoLevels=False)
+        hv.img.setRect(QRectF(c_lo - 0.5, r_lo - 0.5, nc, nr))
+        self._update_heatmap_colorbar(cmap, 0.0, z_max)
 
-        im = ax.imshow(grid, origin="upper", cmap=cmap, interpolation="nearest",
-                       aspect="equal", vmin=0, vmax=z_max,
-                       extent=[c_lo - 0.5, c_hi + 0.5, r_hi + 0.5, r_lo - 0.5])
-
-        cb = self.heatmap_canvas.fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-        cb.ax.tick_params(colors="white", labelsize=7)
-        cb_label = "Integrated" if self._display_metric == "integrated" else "Intensity"
-        cb.set_label(cb_label, color="white", fontsize=8)
-
-        # Mark center bin
-        center = feat.get("center_bin", "")
-        parts = center.split("_")
-        if len(parts) == 2:
-            cr, cc = int(parts[0]), int(parts[1])
-            ax.plot(cc, cr, "s", markersize=10, markerfacecolor="none",
-                    markeredgecolor="white", markeredgewidth=2)
-
-        # Mark highlighted (selected) bin
-        if self._highlight_bin is not None:
-            hp = self._highlight_bin.split("_")
-            if len(hp) == 2:
-                hr, hc = int(hp[0]), int(hp[1])
-                ax.plot(hc, hr, "s", markersize=10, markerfacecolor="none",
-                        markeredgecolor="cyan", markeredgewidth=2)
+        center = self._parse_bin(feat.get("center_bin", ""))
+        highlight = self._parse_bin(self._highlight_bin)
+        hv.set_markers(center, highlight)
 
         cat = "Kept" if self._current_category_key() == "kept" else "Filtered"
         mode_str = "peak pixel" if self._display_metric == "intensity" else "area under curve"
         ref = feat["reflection"]
-        ax.set_title(f"Spatial heatmap — intensity = {mode_str}\n"
-                     f"{ref} #{feat.get('feature_id', '?')}, {cat}, {feat['n_bins']} bins",
-                     color="white", fontsize=9)
-        ax.tick_params(colors="white", labelsize=7)
+        hv.plot.setTitle(
+            f"Spatial heatmap — intensity = {mode_str}<br>"
+            f"{ref} #{feat.get('feature_id', '?')}, {cat}, {feat['n_bins']} bins",
+            color="w", size="9pt")
 
-        self.heatmap_canvas.draw_idle()
+    @staticmethod
+    def _parse_bin(bin_key):
+        """'row_col' → (row, col) ints, or None."""
+        if not bin_key:
+            return None
+        parts = bin_key.split("_")
+        if len(parts) != 2:
+            return None
+        try:
+            return int(parts[0]), int(parts[1])
+        except ValueError:
+            return None
+
+    def _update_heatmap_colorbar(self, cmap, vmin, vmax):
+        hv = self.heatmap_canvas
+        if hv.colorbar is not None:
+            try:
+                hv.removeItem(hv.colorbar)
+            except Exception:
+                pass
+            hv.colorbar = None
+        if cmap is None:
+            return
+        label = "Integrated" if self._display_metric == "integrated" else "Intensity"
+        hv.colorbar = pg.ColorBarItem(values=(vmin, vmax), colorMap=cmap, label=label)
+        hv.addItem(hv.colorbar, row=0, col=1)
 
     # ── Isometric 3D ─────────────────────────────────────────────────
 
@@ -1299,36 +1637,21 @@ class FeatureViewer(QMainWindow):
         if feat is None:
             return
 
+        self._clear_explore_rects()
         cleaned = self._get_display_image(bin_key)
+        dv = self.detector_canvas
         if cleaned is None:
-            self.detector_canvas.ax.clear()
-            self.detector_canvas.ax.set_title(f"Bin {bin_key} not found", color="white")
-            self.detector_canvas.draw_idle()
+            dv.clear_image()
+            dv.set_title(f"Bin {bin_key} not found")
             return
-
-        ax = self.detector_canvas.ax
-        ax.clear()
-        ax.set_facecolor("black")
 
         display = cleaned.copy()
         if self._log_scale:
             display = np.log1p(np.clip(display, 0, None))
 
-        self.detector_canvas._display_data = display
-
-        finite = display[np.isfinite(display)]
-        if len(finite) == 0:
-            vmin, vmax = 0, 1
-        else:
-            vmin = float(np.percentile(finite, self._vmin_pct))
-            vmax = float(np.percentile(finite, self._vmax_pct))
-
-        cmap_name = self._cmap_name
-        if self.reverse_cb.isChecked():
-            cmap_name += "_r"
-        cmap = plt.get_cmap(cmap_name)
-        ax.imshow(display, origin="upper", cmap=cmap, vmin=vmin, vmax=vmax,
-                  interpolation="nearest", aspect="equal")
+        vmin, vmax = self._percentiles(display)
+        dv.show_image(display, vmin, vmax, self._cmap_name,
+                      self.reverse_cb.isChecked())
 
         # Circle other features visible in this bin
         self._detector_other_features = []
@@ -1337,63 +1660,59 @@ class FeatureViewer(QMainWindow):
                 continue
             ox, oy = other["detector_x"], other["detector_y"]
             self._detector_other_features.append(other)
-            c = plt.Circle((ox, oy), 18, fill=False, color="#7fff00",
-                            linewidth=1.5, linestyle="--")
-            ax.add_patch(c)
-            ax.text(ox + 22, oy - 12,
-                    f"#{other.get('feature_id','')} {other['reflection']}",
-                    color="#7fff00", fontsize=8, fontweight="bold",
-                    bbox=dict(boxstyle="round,pad=0.2", fc="black",
-                              ec="#7fff00", alpha=0.8, linewidth=0.5))
+            dv.add_overlay(_circle_item(ox, oy, 18, "#7fff00", width=1.5))
+            dv.add_overlay(_label_item(
+                ox + 22, oy - 12,
+                f"#{other.get('feature_id','')} {other['reflection']}", "#7fff00"))
 
         # Circle the current feature's peak
         det_x, det_y = feat["detector_x"], feat["detector_y"]
-        circle = plt.Circle((det_x, det_y), 15, fill=False, color="lime",
-                            linewidth=2, linestyle="--")
-        ax.add_patch(circle)
+        dv.add_overlay(_circle_item(det_x, det_y, 15, "lime", width=2))
 
-        # 2-theta band overlay (same style as labeling_tool.show_arcs)
+        # 2-theta band overlay
         if self._show_tth_overlay:
-            tth = self._tth_map
-            for idx, (lab, d) in enumerate(zip(self._ref_labels, self._ref_degs)):
-                mask = np.abs(tth - d) < 0.3
-                overlay = np.where(mask, 1.0, np.nan)
-                color = ARC_COLORS[idx % len(ARC_COLORS)]
-                cmap_band = mcolors.ListedColormap([color])
-                ax.imshow(overlay, cmap=cmap_band, alpha=0.25,
-                          interpolation="nearest")
-                ys, xs = np.where(mask)
-                if len(ys) > 0:
-                    mid = len(ys) // 2
-                    ax.text(xs[mid], ys[mid], lab, color=color, fontsize=7,
-                            fontweight="bold",
-                            bbox=dict(boxstyle="round,pad=0.15",
-                                      fc="black", alpha=0.7))
+            self._add_tth_overlay()
 
         self._selected_bin = bin_key
+        dv.set_title(f"Detector image — bin {bin_key}, peak at ({det_x}, {det_y})")
 
-        ax.set_title(f"Detector image — bin {bin_key}, peak at ({det_x}, {det_y})",
-                     color="white", fontsize=10)
-        ax.tick_params(colors="white", labelsize=7)
+    def _percentiles(self, display):
+        finite = display[np.isfinite(display)]
+        if len(finite) == 0:
+            return 0.0, 1.0
+        return (float(np.percentile(finite, self._vmin_pct)),
+                float(np.percentile(finite, self._vmax_pct)))
 
-        self.detector_canvas.draw_idle()
+    def _add_tth_overlay(self):
+        """Paint 2θ reflection bands as a translucent RGBA layer + labels."""
+        dv = self.detector_canvas
+        tth = self._tth_map
+        rgba = np.zeros((tth.shape[0], tth.shape[1], 4), dtype=np.ubyte)
+        for idx, (lab, d) in enumerate(zip(self._ref_labels, self._ref_degs)):
+            mask = np.abs(tth - d) < 0.3
+            if not mask.any():
+                continue
+            color = ARC_COLORS[idx % len(ARC_COLORS)]
+            r, g, b = _hex_rgb(color)
+            rgba[mask, 0] = r
+            rgba[mask, 1] = g
+            rgba[mask, 2] = b
+            rgba[mask, 3] = 64
+            ys, xs = np.where(mask)
+            mid = len(ys) // 2
+            dv.add_overlay(_label_item(xs[mid], ys[mid], lab, color))
+        band = pg.ImageItem(rgba)
+        band.setZValue(1)
+        dv.add_overlay(band)
 
     # ── Heatmap click ──────────────────────────────────────────────
 
     def _update_heatmap_marker(self):
-        """Move the cyan selection marker without redrawing the heatmap."""
-        ax = self.heatmap_canvas.ax
-        if ax is None:
-            return
-        while len(ax.lines) > 1:
-            ax.lines[-1].remove()
-        if self._highlight_bin is not None:
-            hp = self._highlight_bin.split("_")
-            if len(hp) == 2:
-                hr, hc = int(hp[0]), int(hp[1])
-                ax.plot(hc, hr, "s", markersize=10, markerfacecolor="none",
-                        markeredgecolor="cyan", markeredgewidth=2)
-        self.heatmap_canvas.draw_idle()
+        """Move the cyan selection marker without rebuilding the heatmap image."""
+        feat = self._explore_feature if self._explore_mode else self._current_feature()
+        center = self._parse_bin(feat.get("center_bin", "")) if feat else None
+        highlight = self._parse_bin(self._highlight_bin)
+        self.heatmap_canvas.set_markers(center, highlight)
 
     def _update_iso_alpha(self):
         """Update bar transparency without rebuilding the 3D geometry."""
@@ -1614,15 +1933,16 @@ class FeatureViewer(QMainWindow):
             lines.append(f"\nWould be FILTERED ({pf['score']}% < 100%)")
         self.score_label.setText("\n".join(lines))
 
+    def _clear_explore_rects(self):
+        for _job_id, rect in self._explore_rects:
+            rect.remove()
+        self._explore_rects = []
+
     def _remove_rect_for_job(self, job_id):
-        for i, (rid, rect_patch) in enumerate(self._explore_rects):
+        for i, (rid, rect) in enumerate(self._explore_rects):
             if rid == job_id:
-                try:
-                    rect_patch.remove()
-                except Exception:
-                    pass
+                rect.remove()
                 self._explore_rects.pop(i)
-                self.detector_canvas.draw_idle()
                 break
 
     def _on_accept_pending(self):
@@ -1685,7 +2005,7 @@ class FeatureViewer(QMainWindow):
     def _on_show_region(self):
         if self._region_shown:
             self._region_shown = False
-            self.region_btn.setText("Show region peaks")
+            self.region_btn.setText("Show region features")
             bin_key = self._explore_bin or self._selected_bin
             if bin_key:
                 feat = self._current_feature() if not self._explore_feature else self._explore_feature
@@ -1736,27 +2056,15 @@ class FeatureViewer(QMainWindow):
                     seen_ids.add(fid)
                     region_feats.append(feat)
 
-        ax = self.detector_canvas.ax
-        ax.clear()
-        ax.set_facecolor("black")
-
+        dv = self.detector_canvas
+        self._clear_explore_rects()
         display = cleaned.copy()
         if self._log_scale:
             display = np.log1p(np.clip(display, 0, None))
-        self.detector_canvas._display_data = display
 
-        finite = display[np.isfinite(display)]
-        if len(finite) == 0:
-            vmin, vmax = 0, 1
-        else:
-            vmin = float(np.percentile(finite, self._vmin_pct))
-            vmax = float(np.percentile(finite, self._vmax_pct))
-
-        cmap_name = self._cmap_name
-        if self.reverse_cb.isChecked():
-            cmap_name += "_r"
-        ax.imshow(display, origin="upper", cmap=plt.get_cmap(cmap_name),
-                  vmin=vmin, vmax=vmax, interpolation="nearest", aspect="equal")
+        vmin, vmax = self._percentiles(display)
+        dv.show_image(display, vmin, vmax, self._cmap_name,
+                      self.reverse_cb.isChecked())
 
         ref_color_map = {}
         for idx, lab in enumerate(self._ref_labels):
@@ -1776,42 +2084,33 @@ class FeatureViewer(QMainWindow):
                 and "flat" not in reason and "non-positive" not in reason
             if is_kept:
                 n_kept += 1
-                style = "-"
+                dash = False
                 alpha = 0.9
                 lw = 2
             else:
                 n_filtered += 1
-                style = ":"
+                dash = True
                 alpha = 0.6
                 lw = 1.5
 
-            circle = plt.Circle((dx, dy), 18, fill=False,
-                                color=color, linewidth=lw,
-                                linestyle=style, alpha=alpha)
-            ax.add_patch(circle)
+            dv.add_overlay(_circle_item(dx, dy, 18, color, width=lw,
+                                        dash=dash, alpha=alpha))
 
             tag = f"#{fid} {ref}"
             if not is_kept:
                 short = reason.split(":")[0] if ":" in reason else reason[:15]
                 tag += f"\n({short})"
-            ax.text(dx + 22, dy - 12, tag,
-                    color=color, fontsize=7, fontweight="bold",
-                    alpha=alpha,
-                    bbox=dict(boxstyle="round,pad=0.2", fc="black",
-                              ec=color, alpha=0.6, linewidth=0.4))
+            dv.add_overlay(_label_item(dx + 22, dy - 12, tag, color, alpha=alpha))
 
-        ax.set_title(
+        dv.set_title(
             f"Region sum — {len(bin_keys)} bins around {bin_key}  "
-            f"({n_kept} kept, {n_filtered} filtered)",
-            color="white", fontsize=10)
-        ax.tick_params(colors="white", labelsize=7)
-        self.detector_canvas.draw_idle()
+            f"({n_kept} kept, {n_filtered} filtered)")
 
         self._region_shown = True
         self.region_btn.setText("Back to single bin")
         self.info_label.setText(
             f"Region: {len(bin_keys)} bins summed\n"
-            f"{n_kept} kept + {n_filtered} filtered peaks shown\n"
+            f"{n_kept} kept + {n_filtered} filtered features shown\n"
             f"Solid = kept, dotted = filtered")
 
     # ── Explore mode ──────────────────────────────────────────────
@@ -1820,7 +2119,7 @@ class FeatureViewer(QMainWindow):
         self._explore_mode = bool(state)
         self._explore_peaks = []
         self._explore_feature = None
-        self._explore_rects = []
+        self._clear_explore_rects()
         self.detector_canvas.drag_enabled = self._explore_mode
 
         feat = self._current_feature()
@@ -1839,20 +2138,15 @@ class FeatureViewer(QMainWindow):
             self._explore_bin = None
             self._on_feature_changed()
 
-    def _on_minimap_click(self, event):
+    def _on_minimap_click(self, row, col):
         if not self._explore_mode:
             return
-        if event.inaxes != self.loc_ax or event.xdata is None:
-            return
-        col = int(event.xdata + 0.5)
-        row = int(event.ydata + 0.5)
         if 0 <= row < self._n_rows and 0 <= col < self._n_cols:
             self._on_explore_navigate(row, col)
 
     def _render_explore_minimap(self):
-        ax = self.loc_ax
-        ax.clear()
-        ax.set_facecolor("#222")
+        p = self.loc_canvas.plot
+        p.clear()
         nr, nc = self._n_rows, self._n_cols
 
         h5 = self._get_h5()
@@ -1864,45 +2158,49 @@ class FeatureViewer(QMainWindow):
                 if 0 <= r < nr and 0 <= c < nc:
                     grid[r, c] = 0.15
 
-        cmap = plt.get_cmap("gray").copy()
-        cmap.set_bad(color="#111")
-        ax.imshow(grid, origin="upper", cmap=cmap, interpolation="nearest",
-                  aspect="equal", vmin=0, vmax=1,
-                  extent=[-0.5, nc - 0.5, nr - 0.5, -0.5])
+        rgba = _scalar_to_rgba(grid, 0.0, 1.0, _get_cmap("gray"))
+        img = pg.ImageItem(rgba)
+        img.setRect(QRectF(-0.5, -0.5, nc, nr))
+        p.addItem(img)
 
+        xs, ys = [], []
         for feat_list in self._features.get("kept", {}).values():
             for f in feat_list:
-                ax.plot(f["center_col"], f["center_row"], ".",
-                        color="#666", markersize=1.5)
+                xs.append(f["center_col"])
+                ys.append(f["center_row"])
+        if xs:
+            p.addItem(pg.ScatterPlotItem(xs, ys, symbol="o", size=2,
+                                         brush=pg.mkBrush("#666"), pen=None))
 
-        if self._explore_bin:
-            parts = self._explore_bin.split("_")
-            if len(parts) == 2:
-                er, ec = int(parts[0]), int(parts[1])
-                ax.plot(ec, er, "s", markersize=5, markerfacecolor="none",
-                        markeredgecolor="cyan", markeredgewidth=1.5)
+        ebin = self._parse_bin(self._explore_bin)
+        if ebin is not None:
+            p.addItem(pg.ScatterPlotItem([ebin[1]], [ebin[0]], symbol="s",
+                                         size=9, pen=pg.mkPen("c", width=1.5),
+                                         brush=pg.mkBrush(None)))
 
         for pf in self._pending_features:
-            feat = pf["feature"]
+            feat = pf.get("feature")
+            if not feat:
+                continue
             color = "#3cb44b" if pf["score"] == 100 else "#f0a030"
-            ax.plot(feat["center_col"], feat["center_row"], "o",
-                    markersize=3, color=color, alpha=0.8)
+            p.addItem(pg.ScatterPlotItem([feat["center_col"]], [feat["center_row"]],
+                                         symbol="o", size=6,
+                                         brush=pg.mkBrush(color), pen=None))
 
         if self._explore_feature:
+            ex, ey = [], []
             for bk in self._explore_feature.get("spatial_extent", []):
-                parts = bk.split("_")
-                if len(parts) == 2:
-                    ax.plot(int(parts[1]), int(parts[0]), "s",
-                            markersize=3, color="lime", alpha=0.7)
+                rc = self._parse_bin(bk)
+                if rc is not None:
+                    ex.append(rc[1])
+                    ey.append(rc[0])
+            if ex:
+                p.addItem(pg.ScatterPlotItem(ex, ey, symbol="s", size=6,
+                                             brush=pg.mkBrush("lime"), pen=None))
 
-        ax.set_xlim(-1, nc)
-        ax.set_ylim(nr, -1)
-        ax.set_xticks([])
-        ax.set_yticks([])
-        ax.set_title("Click to navigate", color="#f0a030", fontsize=7, pad=2)
-        for spine in ax.spines.values():
-            spine.set_visible(False)
-        self.loc_canvas.draw_idle()
+        p.setXRange(-1, nc, padding=0)
+        p.setYRange(-1, nr, padding=0)
+        p.setTitle("Click to navigate", color="#f0a030", size="7pt")
 
     def _on_explore_navigate(self, row, col):
         bin_key = f"{row}_{col}"
@@ -1913,7 +2211,7 @@ class FeatureViewer(QMainWindow):
 
         self._explore_bin = bin_key
         self._explore_peaks = []
-        self._explore_rects = []
+        self._clear_explore_rects()
 
         self._load_detector_image(bin_key)
         self._render_explore_minimap()
@@ -1922,57 +2220,31 @@ class FeatureViewer(QMainWindow):
                                 "on the detector to select it.")
 
     def _render_explore_detector(self, bin_key, cleaned, peaks):
-        ax = self.detector_canvas.ax
-        ax.clear()
-        ax.set_facecolor("black")
-
+        dv = self.detector_canvas
+        self._clear_explore_rects()
         display = cleaned.copy()
         if self._log_scale:
             display = np.log1p(np.clip(display, 0, None))
-        self.detector_canvas._display_data = display
 
-        finite = display[np.isfinite(display)]
-        if len(finite) == 0:
-            vmin, vmax = 0, 1
-        else:
-            vmin = float(np.percentile(finite, self._vmin_pct))
-            vmax = float(np.percentile(finite, self._vmax_pct))
-
-        cmap_name = self._cmap_name
-        if self.reverse_cb.isChecked():
-            cmap_name += "_r"
-        ax.imshow(display, origin="upper", cmap=plt.get_cmap(cmap_name),
-                  vmin=vmin, vmax=vmax, interpolation="nearest", aspect="equal")
+        vmin, vmax = self._percentiles(display)
+        dv.show_image(display, vmin, vmax, self._cmap_name,
+                      self.reverse_cb.isChecked())
 
         ref_color_map = {}
         for idx, lab in enumerate(self._ref_labels):
             ref_color_map[lab] = ARC_COLORS[idx % len(ARC_COLORS)]
 
-        for i, p in enumerate(peaks):
+        for p in peaks:
             color = ref_color_map.get(p["label"], "#7fff00")
-            circle = plt.Circle((p["x"], p["y"]), 18, fill=False,
-                                color=color, linewidth=2, linestyle="--")
-            ax.add_patch(circle)
-            ax.text(p["x"] + 22, p["y"] - 12,
-                    f"{p['label']}  SNR={p['snr']:.1f}",
-                    color=color, fontsize=8, fontweight="bold",
-                    bbox=dict(boxstyle="round,pad=0.2", fc="black",
-                              ec=color, alpha=0.8, linewidth=0.5))
+            dv.add_overlay(_circle_item(p["x"], p["y"], 18, color, width=2))
+            dv.add_overlay(_label_item(
+                p["x"] + 22, p["y"] - 12,
+                f"{p['label']}  SNR={p['snr']:.1f}", color))
 
         if self._show_tth_overlay:
-            tth = self._tth_map
-            for idx, (lab, d) in enumerate(zip(self._ref_labels, self._ref_degs)):
-                mask = np.abs(tth - d) < 0.3
-                overlay = np.where(mask, 1.0, np.nan)
-                color = ARC_COLORS[idx % len(ARC_COLORS)]
-                cmap_band = mcolors.ListedColormap([color])
-                ax.imshow(overlay, cmap=cmap_band, alpha=0.25,
-                          interpolation="nearest")
+            self._add_tth_overlay()
 
-        ax.set_title(f"Explore — bin {bin_key}, {len(peaks)} peaks",
-                     color="white", fontsize=10)
-        ax.tick_params(colors="white", labelsize=7)
-        self.detector_canvas.draw_idle()
+        dv.set_title(f"Explore — bin {bin_key}, {len(peaks)} peaks")
 
     def _on_explore_detector_click(self, x, y):
         pass
@@ -2054,11 +2326,9 @@ class FeatureViewer(QMainWindow):
                 pf["status"] = "ready"
                 break
 
-        for i, (rid, rect_patch) in enumerate(self._explore_rects):
+        for rid, rect in self._explore_rects:
             if rid == job_id:
-                rect_patch.set_edgecolor("#3cb44b")
-                rect_patch.set_facecolor("#3cb44b")
-                self.detector_canvas.draw_idle()
+                rect.set_color("#3cb44b", "#3cb44b", 0.2)
                 break
 
         self._explore_workers = [w for w in self._explore_workers if w.isRunning()]
@@ -2262,9 +2532,145 @@ class FeatureViewer(QMainWindow):
         if bin_key:
             self._load_detector_image(bin_key, feat)
 
+    # ── State persistence ("cookies") ──────────────────────────────
+
+    def _state_path(self):
+        if _DM is None:
+            return None
+        return _DM.metadata_dir / "viewer_state.json"
+
+    def _load_state(self):
+        p = self._state_path()
+        if p is not None and p.exists():
+            try:
+                with open(p) as f:
+                    return json.load(f) or {}
+            except Exception:
+                return {}
+        return {}
+
+    def _save_state(self):
+        p = self._state_path()
+        if p is None:
+            return
+        state = {
+            "category_index": self.category_combo.currentIndex(),
+            "reflection": self.reflection_combo.currentData(),
+            "feature_index": self.feat_spin.value(),
+            "cmap": self.cmap_combo.currentText(),
+            "reverse": self.reverse_cb.isChecked(),
+            "log_scale": self.log_cb.isChecked(),
+            "peak_metric": self.peak_mode_cb.isChecked(),
+            "expand_boundary": self.expand_cb.isChecked(),
+            "fill_surface": self.fill_cb.isChecked(),
+            "tth_overlay": self.tth_cb.isChecked(),
+            "vmin_pct": self._vmin_pct,
+            "vmax_pct": self._vmax_pct,
+            "noise_enabled": self.noise_cb.isChecked(),
+            "noise_algo": self.noise_algo_combo.currentData(),
+            "noise_strength": self._noise_strength,
+            "noise_shift": self._noise_shift,
+        }
+        try:
+            p.parent.mkdir(parents=True, exist_ok=True)
+            with open(p, "w") as f:
+                json.dump(state, f, indent=2)
+        except Exception:
+            pass
+
+    def _restore_state(self):
+        """Re-apply the last session's display settings + selection."""
+        st = self._load_state()
+        if not st:
+            return
+
+        # Visualization settings (each setter triggers a single re-render).
+        if "cmap" in st:
+            i = self.cmap_combo.findText(st["cmap"])
+            if i >= 0:
+                self.cmap_combo.setCurrentIndex(i)
+        self.reverse_cb.setChecked(st.get("reverse", False))
+        self.log_cb.setChecked(st.get("log_scale", False))
+        self.peak_mode_cb.setChecked(st.get("peak_metric", False))
+        self.expand_cb.setChecked(st.get("expand_boundary", True))
+        self.fill_cb.setChecked(st.get("fill_surface", False))
+        self.tth_cb.setChecked(st.get("tth_overlay", False))
+        if "vmin_pct" in st:
+            self.vmin_slider.setValue(int(st["vmin_pct"] * 10))
+        if "vmax_pct" in st:
+            self.vmax_slider.setValue(int(st["vmax_pct"] * 10))
+        self.noise_cb.setChecked(st.get("noise_enabled", False))
+        if st.get("noise_algo"):
+            j = self.noise_algo_combo.findData(st["noise_algo"])
+            if j >= 0:
+                self.noise_algo_combo.setCurrentIndex(j)
+        if "noise_strength" in st:
+            self.strength_slider.setValue(int(st["noise_strength"] * 100))
+        if "noise_shift" in st:
+            self.shift_slider.setValue(int(st["noise_shift"] * 10))
+
+        # Navigation last: category → reflection → feature index.
+        ci = st.get("category_index", 0)
+        if 0 <= ci < self.category_combo.count():
+            self.category_combo.setCurrentIndex(ci)
+        ref = st.get("reflection")
+        if ref is not None:
+            ri = self.reflection_combo.findData(ref)
+            if ri >= 0:
+                self.reflection_combo.setCurrentIndex(ri)
+        fi = st.get("feature_index", 0)
+        if 0 <= fi <= self.feat_spin.maximum():
+            self.feat_spin.setValue(fi)
+
+    def _accept_all_pending(self):
+        """Write every ready (non-processing) pending feature to the catalog."""
+        ready = [pf for pf in self._pending_features
+                 if pf.get("status") == "ready"]
+        if not ready:
+            return 0
+        catalog_path = RESULTS_DIR / f"feature_catalog_{_BIN_SIZE}x{_BIN_SIZE}.json"
+        try:
+            with open(catalog_path) as f:
+                catalog = json.load(f)
+        except Exception:
+            catalog = []
+        next_id = max((f.get("feature_id", 0) for f in catalog), default=0) + 1
+        for pf in ready:
+            feat = pf["feature"]
+            feat.pop("_members", None)
+            feat["feature_id"] = next_id
+            next_id += 1
+            catalog.append(feat)
+            ref = feat["reflection"]
+            self._features.setdefault("kept", {}).setdefault(ref, []).append(feat)
+            for bk in feat.get("spatial_extent", []):
+                self._bin_to_features[bk].append(feat)
+            self._remove_rect_for_job(pf.get("job_id", -1))
+        with open(catalog_path, "w") as f:
+            json.dump(catalog, f, indent=2)
+        self._pending_features = [pf for pf in self._pending_features
+                                  if pf.get("status") != "ready"]
+        return len(ready)
+
     # ── Cleanup ────────────────────────────────────────────────────
 
     def closeEvent(self, event):
+        ready = [pf for pf in self._pending_features
+                 if pf.get("status") == "ready"]
+        if ready:
+            reply = QMessageBox.question(
+                self, "Save pending features?",
+                f"You have {len(ready)} unsaved pending feature(s) from explore "
+                f"mode.\nSave them to the catalog before closing?",
+                QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel,
+            )
+            if reply == QMessageBox.Cancel:
+                event.ignore()
+                return
+            if reply == QMessageBox.Yes:
+                self._accept_all_pending()
+
+        self._save_state()
         if self._h5f is not None:
             self._h5f.close()
         super().closeEvent(event)

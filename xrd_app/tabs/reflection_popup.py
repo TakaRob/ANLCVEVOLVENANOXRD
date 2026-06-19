@@ -18,8 +18,9 @@ import pyqtgraph as pg
 import pyqtgraph.exporters
 
 from PyQt5.QtWidgets import (
-    QDialog, QDoubleSpinBox, QHBoxLayout, QLabel, QLineEdit, QListWidget,
-    QMessageBox, QPushButton, QSpinBox, QVBoxLayout,
+    QCheckBox, QComboBox, QDialog, QDoubleSpinBox, QFileDialog, QHBoxLayout,
+    QLabel, QLineEdit, QListWidget, QMessageBox, QPushButton, QSpinBox,
+    QVBoxLayout,
 )
 
 from ..config import DataManager
@@ -40,11 +41,16 @@ class ReflectionDialog(QDialog):
         self.scan = scan
         self.bin_size = bin_size
         self.reflections = list(refl_io.read_json(self.dm.reflections_json(scan)))
-        self._image = None
-        self._tth = None
+        self._image = None          # raw summed image
+        self._cleaned = None        # summed image after optional noise reduction
+        self._tth = None            # currently displayed 2θ map (may be edited)
+        self._tth_raw = None        # 2θ map as loaded from disk
         self._centers = None
         self._profile = None
         self._rings = []
+        self._center = None         # estimated (y0, x0) beam center
+        self._det = None            # detector module (for noise reduction)
+        self._tth_data = None
 
         self.setWindowTitle(f"Reflections — {self.dm.scan_name or project_root}")
         self.resize(1200, 720)
@@ -71,6 +77,20 @@ class ReflectionDialog(QDialog):
 
         # ---- compute controls ------------------------------------------
         crow = QHBoxLayout()
+        crow.addWidget(QLabel("View:"))
+        self.view_combo = QComboBox()
+        self.view_combo.addItems(["2θ map (tth.tiff)", "Summed image"])
+        self.view_combo.currentIndexChanged.connect(self._redraw_image)
+        crow.addWidget(self.view_combo)
+        crow.addWidget(QLabel("Bin:"))
+        self.bin_combo = QComboBox()
+        self.bin_combo.addItems([f"{b}x{b}" for b in (1, 3, 4, 5)])
+        self.bin_combo.setCurrentText(f"{self.bin_size}x{self.bin_size}")
+        crow.addWidget(self.bin_combo)
+        self.noise_cb = QCheckBox("Noise reduction")
+        self.noise_cb.setToolTip(
+            "Radial background subtraction before the 2θ histogram is computed")
+        crow.addWidget(self.noise_cb)
         crow.addWidget(QLabel("Max bins to sum (0 = all):"))
         self.max_bins = QSpinBox()
         self.max_bins.setRange(0, 1_000_000)
@@ -81,6 +101,41 @@ class ReflectionDialog(QDialog):
         self.status = QLabel("click 'Compute' (then click the histogram to set 2θ)")
         crow.addWidget(self.status, 1)
         lay.addLayout(crow)
+
+        # ---- geometry / 2θ calibration (edit the tth map) --------------
+        grow = QHBoxLayout()
+        self.center_label = QLabel("beam center: —")
+        self.center_label.setStyleSheet("color:#555;")
+        grow.addWidget(self.center_label)
+        grow.addSpacing(12)
+        grow.addWidget(QLabel("Detected 2θ:"))
+        self.detect_combo = QComboBox()
+        self.detect_combo.setMinimumWidth(110)
+        self.detect_combo.activated.connect(self._on_detected)
+        grow.addWidget(self.detect_combo)
+        grow.addSpacing(12)
+        grow.addWidget(QLabel("2θ offset:"))
+        self.tth_offset = QDoubleSpinBox()
+        self.tth_offset.setRange(-20, 20)
+        self.tth_offset.setDecimals(4)
+        self.tth_offset.setSingleStep(0.01)
+        grow.addWidget(self.tth_offset)
+        grow.addWidget(QLabel("2θ scale:"))
+        self.tth_scale = QDoubleSpinBox()
+        self.tth_scale.setRange(0.5, 2.0)
+        self.tth_scale.setDecimals(4)
+        self.tth_scale.setSingleStep(0.001)
+        self.tth_scale.setValue(1.0)
+        grow.addWidget(self.tth_scale)
+        apply_btn = QPushButton("Apply")
+        apply_btn.setToolTip("Preview tth' = scale·tth + offset")
+        apply_btn.clicked.connect(self._apply_geometry)
+        grow.addWidget(apply_btn)
+        self.save_tth_btn = QPushButton("Save tth…")
+        self.save_tth_btn.clicked.connect(self._save_tth)
+        grow.addWidget(self.save_tth_btn)
+        grow.addStretch()
+        lay.addLayout(grow)
 
         # ---- reflection entry ------------------------------------------
         erow = QHBoxLayout()
@@ -126,39 +181,200 @@ class ReflectionDialog(QDialog):
 
         self._refresh_list()
         self._redraw_hist()
+        self._load_tth_for_display()
+
+    # ----- bin / noise reduction --------------------------------------
+    def _selected_bin(self):
+        return int(self.bin_combo.currentText().split("x")[0])
+
+    def _apply_noise_reduction(self, image):
+        """Radial background subtraction via the project detector module."""
+        if self._det is None:
+            det_path = self.dm.detector_script()
+            self._det = io.load_module(det_path)
+            self._tth_data = self._det.precompute_tth(self._tth_raw)
+        return self._det.radial_median_subtract(image, self._tth_data)
 
     # ----- compute ----------------------------------------------------
     def _compute(self):
-        h5 = self.dm.binned_h5(self.bin_size)
+        bin_size = self._selected_bin()
+        h5 = self.dm.binned_h5(bin_size)
         tth_path = self.dm.tth_map(scan=self.scan)
-        if not Path(h5).exists():
-            self.status.setText(f"missing bins: {h5}")
-            return
-        if not Path(tth_path).exists():
+        if self._tth_raw is None and Path(tth_path).exists():
+            self._tth_raw = io.load_tth_map(tth_path)
+            self._tth = self._tth_raw.copy()
+        if self._tth is None:
             self.status.setText("missing tth map (load tth.tiff or convert a .poni)")
+            return
+        if not Path(h5).exists():
+            self.status.setText(f"missing bins for {bin_size}×{bin_size}: "
+                                f"build them in Programs → Create bins")
             return
         self.status.setText("summing bins…")
         self.status.repaint()
         mb = self.max_bins.value() or None
         self._image = io.sum_binned_image(h5, max_bins=mb)
-        self._tth = io.load_tth_map(tth_path)
-        self._centers, self._profile = io.radial_profile(self._image, self._tth)
-        self.status.setText(f"summed {self._image.shape}; tth {self._tth.shape}")
+
+        self._cleaned = self._image
+        if self.noise_cb.isChecked():
+            try:
+                self._cleaned = self._apply_noise_reduction(self._image)
+            except Exception as e:
+                self.status.setText(f"noise reduction failed: {e}")
+                self._cleaned = self._image
+
+        self._centers, self._profile = io.radial_profile(self._cleaned, self._tth)
+        self._populate_detected()
+        nr = " (noise-reduced)" if self.noise_cb.isChecked() else ""
+        self.status.setText(
+            f"summed {self._image.shape} @ {bin_size}×{bin_size}{nr}; "
+            f"tth {self._tth.shape}")
+        if not self.view_combo.currentText().startswith("2θ"):
+            pass  # keep summed view
         self._redraw_image()
         self._redraw_hist()
 
-    def _redraw_image(self):
-        if self._image is None:
+    def _load_tth_for_display(self):
+        """Load the linked tth.tiff so it can be shown before summing bins."""
+        tth_path = self.dm.tth_map(scan=self.scan)
+        if tth_path and Path(tth_path).exists():
+            try:
+                self._tth_raw = io.load_tth_map(tth_path)
+                self._tth = self._tth_raw.copy()
+                self._update_center()
+                self.status.setText(
+                    f"tth.tiff {self._tth.shape}  "
+                    f"2θ range {float(self._tth.min()):.3f}–{float(self._tth.max()):.3f}°  "
+                    f"({tth_path})")
+            except Exception as e:
+                self.status.setText(f"could not read tth.tiff: {e}")
+        else:
+            self.status.setText("no tth.tiff loaded — use Setup → Load tth.tiff")
+        self._redraw_image()
+
+    # ----- detected 2θ peaks + beam center ----------------------------
+    def _populate_detected(self):
+        """Auto-list 2θ peaks found in the radial profile (pick → fills 2θ)."""
+        self.detect_combo.clear()
+        self.detect_combo.addItem("—")
+        if self._profile is None:
             return
-        disp = np.log1p(np.clip(self._image, 0, None))
-        self.img_view.setImage(disp, autoLevels=True)
+        try:
+            from scipy.signal import find_peaks
+            prof = np.asarray(self._profile, dtype=float)
+            finite = prof[np.isfinite(prof)]
+            if finite.size == 0:
+                return
+            prom = max((finite.max() - finite.min()) * 0.03, 1e-9)
+            idx, _ = find_peaks(prof, prominence=prom, distance=3)
+            order = sorted(idx, key=lambda i: prof[i], reverse=True)[:20]
+            for i in sorted(order):
+                self.detect_combo.addItem(f"{self._centers[i]:.3f}°", float(self._centers[i]))
+        except Exception:
+            pass
+
+    def _on_detected(self, _idx):
+        val = self.detect_combo.currentData()
+        if val is not None:
+            self.tth_spin.setValue(float(val))
+            self.status.setText(f"2θ set to {val:.4f} (enter a name and Add)")
+
+    def _update_center(self):
+        if self._tth_raw is None:
+            return
+        try:
+            from ..core.processing import estimate_beam_center
+            y0, x0 = estimate_beam_center(self._tth_raw)
+            self._center = (y0, x0)
+            self.center_label.setText(f"beam center (x, y): ({x0:.1f}, {y0:.1f})")
+        except Exception:
+            self.center_label.setText("beam center: —")
+
+    # ----- geometry edit (2θ calibration) -----------------------------
+    def _apply_geometry(self):
+        if self._tth_raw is None:
+            self.status.setText("no tth.tiff loaded to adjust")
+            return
+        scale = self.tth_scale.value()
+        offset = self.tth_offset.value()
+        self._tth = self._tth_raw * scale + offset
+        if self._cleaned is not None:
+            self._centers, self._profile = io.radial_profile(self._cleaned, self._tth)
+            self._populate_detected()
+        self.status.setText(
+            f"preview: 2θ' = {scale:.4f}·2θ + {offset:.4f}  "
+            f"(range {float(self._tth.min()):.3f}–{float(self._tth.max()):.3f}°)  "
+            f"— Save tth… to keep")
+        self._redraw_image()
+        self._redraw_hist()
+
+    def _save_tth(self):
+        if self._tth is None:
+            return
+        box = QMessageBox(self)
+        box.setWindowTitle("Save 2θ map")
+        box.setText("Save the adjusted 2θ map (tth.tiff)?")
+        save_btn = box.addButton("Save", QMessageBox.AcceptRole)
+        new_btn = box.addButton("Save as new", QMessageBox.ActionRole)
+        box.addButton("Cancel", QMessageBox.RejectRole)
+        box.exec_()
+        clicked = box.clickedButton()
+        if clicked is None or clicked not in (save_btn, new_btn):
+            return
+
+        import tifffile
+        if clicked is save_btn:
+            path = Path(self.dm.tth_map(scan=self.scan))
+        else:
+            start = str(self.dm.metadata_dir / "tth_edited.tiff")
+            chosen, _ = QFileDialog.getSaveFileName(
+                self, "Save new 2θ map", start, "TIFF (*.tif *.tiff)")
+            if not chosen:
+                return
+            path = Path(chosen)
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tifffile.imwrite(str(path), self._tth.astype(np.float32))
+        except Exception as e:
+            QMessageBox.warning(self, "Save failed", f"Could not write {path}:\n{e}")
+            return
+        # The saved map becomes the new baseline; reset the offset/scale preview.
+        self._tth_raw = self._tth.copy()
+        self.tth_offset.blockSignals(True); self.tth_scale.blockSignals(True)
+        self.tth_offset.setValue(0.0); self.tth_scale.setValue(1.0)
+        self.tth_offset.blockSignals(False); self.tth_scale.blockSignals(False)
+        self._update_center()
+        self.status.setText(f"saved tth → {path}")
+
+    def _redraw_image(self):
         vb = self.img_view.getView()
         for r in self._rings:
             vb.removeItem(r)
         self._rings = []
-        if self._tth is not None:
+
+        summed = self._cleaned if self._cleaned is not None else self._image
+        showing_tth = self.view_combo.currentText().startswith("2θ")
+        shown = False
+        if showing_tth and self._tth is not None:
+            # Raw 2θ-per-pixel map (linear, not log) — this is the loaded tiff.
+            self.img_view.setImage(self._tth, autoLevels=True)
+            shown = True
+        elif not showing_tth and summed is not None:
+            self.img_view.setImage(np.log1p(np.clip(summed, 0, None)),
+                                   autoLevels=True)
+            shown = True
+        elif summed is not None:
+            self.img_view.setImage(np.log1p(np.clip(summed, 0, None)),
+                                   autoLevels=True)
+            shown = True
+        elif self._tth is not None:
+            self.img_view.setImage(self._tth, autoLevels=True)
+            shown = True
+
+        if shown and self._tth is not None:
             for r in self.reflections:
-                iso = pg.IsocurveItem(data=self._tth, level=float(r["two_theta"]), pen=_RING_PEN)
+                iso = pg.IsocurveItem(data=self._tth, level=float(r["two_theta"]),
+                                      pen=_RING_PEN)
                 vb.addItem(iso)
                 self._rings.append(iso)
 

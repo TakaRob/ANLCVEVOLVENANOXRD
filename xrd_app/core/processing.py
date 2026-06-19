@@ -312,7 +312,7 @@ def characterize_features(features, beam_center=None, tth_map=None, ref_tth_map=
             wn = wa / wa.sum()
             mu = np.dot(wn, ca)
             var = np.dot(wn, (ca - mu) ** 2)
-            feature_info["rocking_fwhm"] = round(2.3548 * np.sqrt(var), 4)
+            feature_info["chi_fwhm"] = round(2.3548 * np.sqrt(var), 4)
 
         if len(bin_tths) >= 3 and len(bin_weights) == len(bin_tths):
             ref_val = ref_tth_map.get(reflection) if ref_tth_map else None
@@ -412,6 +412,83 @@ def run_peaks(
         "n_peaks": n_peaks,
         "n_bins_with_peaks": len(peaks_by_bin),
         "peaks_by_bin": peaks_by_bin,
+    }
+
+
+# ── Public: combined (peak + shape in one per-frame pass) ──────────
+def run_combined(
+    detector_path: Union[str, Path],
+    tth_path: Union[str, Path],
+    reflections_path: Union[str, Path],
+    bins_h5: Union[str, Path],
+    grid_mapping: Union[str, Path, dict],
+    progress: Callable[[int, int], None] = None,
+    log: Callable[[str], None] = print,
+    **params,
+) -> dict:
+    """Run a combined (per-frame) algorithm over every center bin.
+
+    The detector exposes ``run_full_pipeline(center_bin, bins_h5, tth_map, degs,
+    deg_labels, grid_mapping, **params)`` returning ``{label: [(x, y), ...]}`` —
+    final spatially-validated points (peak + shape in one pass). Returns::
+
+        {algorithm, bin_size, n_features, by_bin, features}
+
+    ``features`` is a viewer-compatible feature list (points only — these
+    detectors don't emit per-bin intensities, so ``peak_intensity``/``mean_snr``
+    are null and ``intensity_profile`` is empty).
+    """
+    import json as _json
+    det = io.load_module(detector_path)
+    tth_map = io.load_tth_map(tth_path)
+    degs, deg_labels = io.load_reflections(reflections_path)
+    if isinstance(grid_mapping, (str, Path)):
+        with open(grid_mapping) as f:
+            grid_mapping = _json.load(f)
+    log(f"  Reflections: {deg_labels}")
+
+    with h5py.File(str(bins_h5), "r") as h5f:
+        bin_keys = sorted(h5f.keys(),
+                          key=lambda k: (int(k.split("_")[0]), int(k.split("_")[1])))
+    n_bins = len(bin_keys)
+    log(f"  Running combined pipeline on {n_bins} bins...")
+
+    by_bin, features, fid = {}, [], 0
+    for i, bk in enumerate(bin_keys):
+        try:
+            validated = det.run_full_pipeline(
+                bk, str(bins_h5), tth_map, degs, deg_labels, grid_mapping, **params)
+        except Exception as e:  # one bad bin shouldn't sink the whole run
+            log(f"  [{bk}] failed: {e}")
+            validated = {}
+        clean = {}
+        for label, pts in (validated or {}).items():
+            ipts = [[int(round(x)), int(round(y))] for (x, y) in pts]
+            if not ipts:
+                continue
+            clean[label] = ipts
+            row, col = int(bk.split("_")[0]), int(bk.split("_")[1])
+            for x, y in ipts:
+                fid += 1
+                features.append({
+                    "feature_id": fid, "reflection": label,
+                    "detector_x": x, "detector_y": y,
+                    "center_bin": bk, "center_row": row, "center_col": col,
+                    "n_bins": 1, "peak_intensity": None, "mean_snr": None,
+                    "intensity_profile": {},
+                })
+        if clean:
+            by_bin[bk] = clean
+        if progress is not None:
+            progress(i + 1, n_bins)
+
+    log(f"  Combined complete: {len(features)} features in {len(by_bin)} bins")
+    return {
+        "algorithm": Path(detector_path).stem,
+        "bin_size": 1,
+        "n_features": len(features),
+        "by_bin": by_bin,
+        "features": features,
     }
 
 

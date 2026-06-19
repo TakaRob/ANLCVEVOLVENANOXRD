@@ -1,0 +1,58 @@
+{
+  "description": "Combined XRD algorithms: each runs the whole pipeline in one pass (per-frame detection + cross-bin linking + Voigt shape verification) and emits final spatially-validated features. Developed per bin (CVEvolve); names carry the bin. holdout_f1/holdout_f2 are that session's holdout scores. These are per-frame (1x1) pipelines run by 'xrd-app run-combined' (not the binned 'peaks' pipeline). Automated algorithms live in their own named sub-folder.",
+  "metric": "holdout_f1 / holdout_f2 (spatially-validated holdout score; higher is better)",
+  "detectors": [
+    {
+      "name": "1x1_baseline",
+      "bin_size": "1x1",
+      "file": "1x1_baseline.py",
+      "role": "detector",
+      "kind": "combined",
+      "pipeline": "perframe",
+      "holdout_f1": 0.215,
+      "holdout_f2": null,
+      "source": "manual",
+      "dev_bin": "1x1",
+      "notes": "Per-frame baseline: detect + cross-bin link + Voigt filter -> validated peaks."
+    },
+    {
+      "name": "1x1_perframe_uf_voigt_hybrid",
+      "bin_size": "1x1",
+      "file": "1x1_perframe_uf_voigt_hybrid/detector.py",
+      "role": "detector",
+      "kind": "combined",
+      "pipeline": "perframe",
+      "holdout_f1": null,
+      "holdout_f2": 0.463,
+      "source": "cvevolve",
+      "dev_bin": "1x1",
+      "notes": "Developed on 1x1 (CVEvolve, F2 recall-first). Best F2 of the 1x1 session."
+    },
+    {
+      "name": "1x1_concentric_stack_perframe",
+      "bin_size": "1x1",
+      "file": "1x1_concentric_stack_perframe/detector.py",
+      "role": "detector",
+      "kind": "combined",
+      "pipeline": "perframe",
+      "holdout_f1": null,
+      "holdout_f2": 0.452,
+      "source": "cvevolve",
+      "dev_bin": "1x1",
+      "notes": "Developed on 1x1 (CVEvolve, F2 recall-first)."
+    },
+    {
+      "name": "1x1_tuned_perframe_uf_voigt",
+      "bin_size": "1x1",
+      "file": "1x1_tuned_perframe_uf_voigt/detector.py",
+      "role": "detector",
+      "kind": "combined",
+      "pipeline": "perframe",
+      "holdout_f1": null,
+      "holdout_f2": 0.442,
+      "source": "cvevolve",
+      "dev_bin": "1x1",
+      "notes": "Developed on 1x1 (CVEvolve, F2 recall-first)."
+    }
+  ]
+}

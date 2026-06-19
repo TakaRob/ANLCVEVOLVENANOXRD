@@ -5,7 +5,7 @@ Walks ``results/<scan>/feature_catalog_NxN.json`` across all scans and bin sizes
 and produces two flat tables you can open in Excel/pandas or query with SQL:
 
   features    one row per detected feature — intensity, prevalence (n_bins),
-              shape (rocking_fwhm / strain_breadth), orientation (chi_deg).
+              morphology (chi_fwhm / strain_breadth), orientation (chi_deg).
   device_map  one row per (scan, reflection, spatial bin) — the per-bin
               intensity map data, in long/tidy form.
 
@@ -28,14 +28,14 @@ FEATURE_COLUMNS = [
     "chi_deg",
     "peak_intensity", "mean_intensity", "sum_integrated", "mean_snr",  # intensity
     "n_bins",                                                          # prevalence
-    "rocking_fwhm", "strain_breadth",                                  # shape
+    "chi_fwhm", "strain_breadth",                                      # morphology
     "spatial_extent", "reason",
 ]
 
 # Column order for the long device-map table (one row per spatial bin).
 DEVICEMAP_COLUMNS = [
     "scan", "bin_size", "feature_id", "reflection", "bin_key", "row", "col",
-    "det_x", "det_y", "intensity", "integrated", "tth", "chi",
+    "detector_x", "detector_y", "intensity", "integrated", "tth", "chi",
 ]
 
 _CATALOG_RE = re.compile(r"feature_catalog_(\d+)x(\d+)\.json$")
@@ -80,7 +80,7 @@ def _feature_row(scan: str, bin_size: Optional[int], f: dict) -> dict:
         "sum_integrated": round(sum(integrated), 1) if integrated else None,
         "mean_snr": round(f["mean_snr"], 2) if "mean_snr" in f else None,
         "n_bins": f.get("n_bins"),
-        "rocking_fwhm": f.get("rocking_fwhm"),
+        "chi_fwhm": f.get("chi_fwhm", f.get("rocking_fwhm")),  # accept legacy field
         "strain_breadth": f.get("strain_breadth"),
         "spatial_extent": " ".join(f.get("spatial_extent", [])),
         "reason": f.get("reason"),
@@ -98,7 +98,7 @@ def _devicemap_rows(scan: str, bin_size: Optional[int], f: dict):
         rows.append({
             "scan": scan, "bin_size": bin_size, "feature_id": f.get("feature_id"),
             "reflection": f.get("reflection"), "bin_key": bk, "row": row, "col": col,
-            "det_x": e.get("det_x"), "det_y": e.get("det_y"),
+            "detector_x": e.get("det_x"), "detector_y": e.get("det_y"),
             "intensity": e.get("intensity"), "integrated": e.get("integrated"),
             "tth": e.get("tth"), "chi": e.get("chi"),
         })

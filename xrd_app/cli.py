@@ -65,10 +65,13 @@ _LINK_ROOTS = {
 @click.option('--detector', help='Path to a detector / evolved-algorithm .py script')
 @click.option('--raw-root', help='Parent dir containing many Scan_NNNN/ dirs (multi-scan)')
 @click.option('--position-root', help='Dir containing scan_NNNN_position.csv files (multi-scan)')
+@click.option('--position-csv', help='A single scan position CSV → Metadata/<scan>/positions.csv')
 @click.option('--poni', help='Path to a pyFAI .poni (recorded; conversion deferred)')
 @click.option('--copy', is_flag=True, help='Copy files instead of symlinking')
+@click.option('--scan', default=None, help='Scan number/name (for per-scan --position-csv)')
 @click.option('--root', default='.', help='Project root directory')
-def link(tth, reflections, detector, raw_root, position_root, poni, copy, root):
+def link(tth, reflections, detector, raw_root, position_root, position_csv,
+         poni, copy, scan, root):
     """Link external calibration/reflections/detector files into the project.
 
     Scan discovery lives in 'xrd-app scan-detect'; this command records the
@@ -96,10 +99,21 @@ def link(tth, reflections, detector, raw_root, position_root, poni, copy, root):
         cfg.data['data_sources']['poni'] = str(p)
         click.echo(f"  poni: {p}  (note: .poni→tth conversion is not yet implemented)")
 
+    if position_csv:
+        src = Path(position_csv).resolve()
+        if not src.exists():
+            click.echo(f"Warning: {src} does not exist — skipping positions.")
+        else:
+            dm = DataManager(root, scan=scan)
+            dest_dir = dm.metadata_scan_dir(scan) if scan else dm.metadata_dir
+            dest_dir.mkdir(parents=True, exist_ok=True)
+            stored = _place(src, dest_dir / "positions.csv", copy)
+            click.echo(f"  positions: {stored}")
+
     provided = {'tth': tth, 'reflections': reflections, 'detector': detector}
-    if not any(provided.values()) and not (raw_root or position_root or poni):
+    if not any(provided.values()) and not (raw_root or position_root or position_csv or poni):
         click.echo("Nothing to link. Provide --tth/--reflections/--detector/"
-                   "--raw-root/--position-root/--poni.")
+                   "--raw-root/--position-root/--position-csv/--poni.")
         return
 
     for opt, source_path in provided.items():
@@ -147,21 +161,29 @@ def _place(source: Path, dest: Path, copy: bool) -> Path:
 # ─────────────────────────────────────────────────────────────────────
 @main.command()
 @click.option('--bin-size', type=int, default=None, help='Filter to one bin size')
+@click.option('--kind', type=click.Choice(['peak', 'combined']), default='peak',
+              help='Library to list (peak detectors or combined peak+shape algos)')
 @click.option('--root', default='.', help='Project root directory')
-def detectors(bin_size, root):
-    """List the peak-detector algorithms and their holdout scores."""
+def detectors(bin_size, kind, root):
+    """List the algorithm library and holdout scores (peak or combined)."""
     dm = DataManager(root)
-    entries = dm.list_detectors(bin_size)
+    if kind == 'combined':
+        entries = dm.list_combined()
+        lib_dir = dm.combined_dir()
+    else:
+        entries = dm.list_detectors(bin_size)
+        lib_dir = dm.detectors_dir()
     if not entries:
         click.echo("No detectors found.")
         return
-    click.echo(f"Detectors ({dm.detectors_dir()}):\n")
+    click.echo(f"Detectors ({lib_dir}):\n")
     click.echo(f"  {'bin':>4}  {'f1':>7}  {'f2':>7}  {'src':>8}  name")
     click.echo(f"  {'-'*4}  {'-'*7}  {'-'*7}  {'-'*8}  {'-'*30}")
-    for d in sorted(entries, key=lambda d: (d['bin_size'], -(d.get('holdout_f1') or -1))):
+    for d in sorted(entries, key=lambda d: (d.get('bin_size') or '', -(d.get('holdout_f1') or -1))):
         f1 = f"{d['holdout_f1']:.4f}" if d.get('holdout_f1') is not None else "—"
         f2 = f"{d['holdout_f2']:.4f}" if d.get('holdout_f2') is not None else "—"
-        click.echo(f"  {d['bin_size']:>4}  {f1:>7}  {f2:>7}  "
+        bin_lbl = d.get('bin_size') or 'any'
+        click.echo(f"  {bin_lbl:>4}  {f1:>7}  {f2:>7}  "
                    f"{str(d.get('source') or '—'):>8}  {d['name']}")
 
 
@@ -381,11 +403,17 @@ def run_cvevolve(config_path, prompt_path, engine, cvevolve_dir, image, build, m
 # gui — launch the single-window app
 # ─────────────────────────────────────────────────────────────────────
 @main.command()
-@click.option('--root', default='.', help='Project root directory')
+@click.option('--root', default=None,
+              help='Project root (default: last-opened project, or pick one in Setup)')
 @click.option('--scan', default=None, help='Initial scan (defaults to config/last-used)')
 @click.option('--bin-size', type=int, default=3, help='Initial bin size')
 def gui(root, scan, bin_size):
-    """Launch the single-window GUI (Setup / Programs / viewers as tabs)."""
+    """Launch the single-window GUI (Setup / Programs / viewers as tabs).
+
+    With no ``--root``, the app reopens the last-used project (remembered in
+    ``~/.xrd-app/settings.json``); if there is none, the Setup tab prompts you to
+    choose a workspace and create or open a project.
+    """
     from .app import launch_app
     raise SystemExit(launch_app(root, scan=scan, bin_size=bin_size))
 
@@ -580,6 +608,10 @@ def peaks(bin_size, scan, algorithm, snr, out_name, h5_path, tth_path,
         progress=_make_progress("peaks"), log=click.echo)
     result["scan"] = dm.scan_name
     result["algorithm"] = algo
+    from .core import lineage
+    result["lineage"] = lineage.peak_lineage(
+        scan=dm.scan_name, bin_size=bin_size, algorithm=algo,
+        detector_file=det, snr=snr)
 
     out = dm.peaks_json(algo, bin_size, scan)
     _write_json(out, result)
@@ -631,6 +663,12 @@ def shapes(bin_size, scan, algorithm, from_peaks, peak_algo, link_tolerance,
     result["scan"] = dm.scan_name
     result["shape_algo"] = algorithm
     result["peak_source"] = peaks_data.get("algorithm", str(peaks_path.name))
+    from .core import lineage
+    result["lineage"] = lineage.shape_lineage(
+        scan=dm.scan_name, bin_size=bin_size, shape_algorithm=algorithm,
+        link_tolerance=link_tolerance,
+        peak_source=lineage.from_peaks_data(peaks_data, fallback_file=peaks_path.name),
+        peak_source_file=peaks_path.name)
 
     out = dm.shapes_json(algorithm, bin_size, scan)
     _write_json(out, result)
@@ -699,6 +737,151 @@ def batch(ctx, scans, all_scans, bin_size, algorithm, shape_algo, snr, grid_shap
                + (f", failed: {', '.join(failures)}" if failures else ""))
     if failures:
         raise SystemExit(1)
+
+
+# ─────────────────────────────────────────────────────────────────────
+# run-pipeline — peaks -> shapes for ONE scan in a single process
+# ─────────────────────────────────────────────────────────────────────
+@main.command(name='run-pipeline')
+@click.option('--bin-size', type=int, default=3, help='Bin size to process')
+@click.option('--scan', default=None, help='Scan number/name (defaults to config scan)')
+@click.option('--algorithm', default=None, help='Peak detector path OR bundled name')
+@click.option('--shape-algo', default='gaussian', help='Shape algorithm name (output label)')
+@click.option('--snr', type=float, default=4.0, help='SNR threshold for detection')
+@click.option('--root', default='.', help='Project root directory')
+@click.pass_context
+def run_pipeline(ctx, bin_size, scan, algorithm, shape_algo, snr, root):
+    """Run Peak Finding then Shape Finding for one scan, back to back."""
+    dm = DataManager(root, scan=scan)
+    # Same naming peaks uses for its output set, so shapes can pick it up.
+    algo = algorithm or Path(dm.detector_script(algorithm, bin_size=bin_size)).stem
+    ctx.invoke(peaks, bin_size=bin_size, scan=scan, algorithm=algorithm,
+               snr=snr, root=root)
+    ctx.invoke(shapes, bin_size=bin_size, scan=scan, algorithm=shape_algo,
+               peak_algo=algo, root=root)
+    click.echo("\nPipeline complete: peaks → shapes")
+
+
+# ─────────────────────────────────────────────────────────────────────
+# make-bins — grid mapping -> binned HDF5 for ONE scan
+# ─────────────────────────────────────────────────────────────────────
+@main.command(name='make-bins')
+@click.option('--bin-size', type=int, default=3, help='Spatial bin size (NxN)')
+@click.option('--scan', default=None, help='Scan number/name (defaults to config scan)')
+@click.option('--shape', 'grid_shape', default=None,
+              help='Synthesize a grid (no positions): ROWSxCOLS or COLS')
+@click.option('--compression', type=click.Choice(['gzip', 'lz4', 'none']), default='gzip')
+@click.option('--root', default='.', help='Project root directory')
+@click.pass_context
+def make_bins(ctx, bin_size, scan, grid_shape, compression, root):
+    """Build the binned HDF5 for one scan: grid mapping, then bins."""
+    ctx.invoke(grid, bin_size=bin_size, scan=scan, shape=grid_shape, root=root)
+    ctx.invoke(bin, bin_size=bin_size, scan=scan, compression=compression, root=root)
+    dm = DataManager(root, scan=scan)
+    click.echo(f"\nBins ready: {dm.binned_h5(bin_size)}")
+
+
+# ─────────────────────────────────────────────────────────────────────
+# run-combined — peak + shape in one per-frame pass (CombinedAlgorithms)
+# ─────────────────────────────────────────────────────────────────────
+@main.command(name='run-combined')
+@click.option('--bin-size', type=int, default=1, help='Bin size (combined algos are 1x1)')
+@click.option('--scan', default=None, help='Scan number/name (defaults to config scan)')
+@click.option('--algorithm', required=True,
+              help='Combined algorithm name (see `xrd-app detectors --kind combined`)')
+@click.option('--root', default='.', help='Project root directory')
+def run_combined_cmd(bin_size, scan, algorithm, root):
+    """Run a combined (peak+shape) per-frame algorithm over a scan.
+
+    Combined detectors do detection + cross-bin linking + Voigt verification in
+    one pass and emit final validated features. Output is feature-level (no per-bin
+    intensities), so View/Label shows the features but Device/Orientation heatmaps
+    are not populated.
+    """
+    from .core import processing
+    dm = DataManager(root, scan=scan)
+    det = dm.combined_script(algorithm)
+    h5 = dm.binned_h5(bin_size)
+    tth = dm.tth_map()
+    refl = dm.reflections()
+    gm = dm.grid_mapping(bin_size=bin_size)
+    if not Path(h5).exists():
+        click.echo(f"Error: no {bin_size}x{bin_size} bins at {h5}.")
+        click.echo("  Build them first: Programs → Create bins at 1x1 "
+                   "(or `xrd-app make-bins --bin-size 1`).")
+        raise SystemExit(1)
+    for label, p in [("combined detector", det), ("tth", tth),
+                     ("reflections", refl), ("grid_mapping", gm)]:
+        _require(p, label)
+
+    algo = Path(det).stem
+    click.echo(f"[combined] detector: {det}\n[combined] bins: {h5}\n")
+    result = processing.run_combined(
+        detector_path=det, tth_path=tth, reflections_path=refl,
+        bins_h5=h5, grid_mapping=gm,
+        progress=_make_progress("combined"), log=click.echo)
+    result["scan"] = dm.scan_name
+    from .core import lineage
+    result["lineage"] = lineage.combined_lineage(
+        scan=dm.scan_name, bin_size=bin_size, algorithm=algo, detector_file=det)
+
+    suffix = f"{bin_size}x{bin_size}"
+    ldir = dm.labels_dir(scan)
+    ldir.mkdir(parents=True, exist_ok=True)
+    _write_json(ldir / f"{algo}_combined_{suffix}.json", result)
+    # Viewer reads feature_catalog_<suffix>.json — write the points so View/Label
+    # can overlay them (atomic write so viewers never see a partial file).
+    processing.write_feature_catalog(
+        result["features"], ldir / f"feature_catalog_{suffix}.json", click.echo)
+    click.echo(f"\nDone: {result['n_features']} features in "
+               f"{len(result['by_bin'])} bins.")
+
+
+# ─────────────────────────────────────────────────────────────────────
+# lineage — show the provenance of result JSONs (peaks/shapes/combined)
+# ─────────────────────────────────────────────────────────────────────
+@main.command()
+@click.argument('target', required=False)
+@click.option('--scan', default=None, help='Scan number/name (defaults to config scan)')
+@click.option('--root', default='.', help='Project root directory')
+def lineage(target, scan, root):
+    """Show the lineage/provenance of result JSONs.
+
+    With no TARGET, summarizes every peaks/shapes/combined JSON in
+    Labels/<scan>/. TARGET may be a path or a file name within that folder.
+    """
+    import json
+    from .core import lineage as L
+    dm = DataManager(root, scan=scan)
+    ldir = dm.labels_dir(scan)
+    if target:
+        p = Path(target)
+        if not p.exists():
+            p = ldir / target            # try as a name inside Labels/<scan>
+        paths = [p]
+    else:
+        paths = (sorted(ldir.glob("*_peaks_*.json"))
+                 + sorted(ldir.glob("*_shapes_*.json"))
+                 + sorted(ldir.glob("*_combined_*.json")))
+    if not paths:
+        click.echo(f"No result JSONs found in {ldir}.")
+        return
+    for p in paths:
+        if not p.exists():
+            click.echo(f"\n{p}: not found")
+            continue
+        with open(p) as f:
+            data = json.load(f)
+        click.echo(f"\n{p.name}")
+        lin = data.get("lineage")
+        if isinstance(lin, dict):
+            for line in L.format_lineage(lin):
+                click.echo("  " + line)
+        else:
+            click.echo("  (no lineage block — legacy file)")
+            for k in ("algorithm", "shape_algo", "peak_source", "bin_size", "scan"):
+                if k in data:
+                    click.echo(f"    {k}: {data[k]}")
 
 
 def _resolve_scan_list(scans, all_scans, root):

@@ -51,11 +51,16 @@ class JobConsole(QWidget):
     def is_running(self) -> bool:
         return self._proc is not None and self._proc.state() != QProcess.NotRunning
 
-    def run(self, args, cwd=None):
-        """Run ``[python, -m, xrd_app.cli, *args]`` (args is the CLI arg list)."""
+    def run(self, args, cwd=None, on_finished=None):
+        """Run ``[python, -m, xrd_app.cli, *args]`` (args is the CLI arg list).
+
+        ``on_finished(exit_code)`` is invoked once when the process exits (e.g.
+        to refresh a status label after the job completes).
+        """
         if self.is_running():
             self._append("\n[a job is already running — cancel it first]\n")
             return
+        self._on_finished_cb = on_finished
         self.progress.setValue(0)
         self.log.clear()
         cmd = [sys.executable, "-m", "xrd_app.cli", *[str(a) for a in args]]
@@ -98,6 +103,13 @@ class JobConsole(QWidget):
         self.status.setText("done" if code == 0 else f"failed (exit {code})")
         self.cancel_btn.setEnabled(False)
         self._append(f"\n[exit {code}]\n")
+        cb = getattr(self, "_on_finished_cb", None)
+        self._on_finished_cb = None
+        if cb is not None:
+            try:
+                cb(code)
+            except Exception:
+                pass
 
     def _append(self, text):
         self.log.moveCursor(self.log.textCursor().End)
