@@ -982,7 +982,7 @@ class LabelingTool(QMainWindow):
         nav_layout.addLayout(btn_layout, 1, 0, 1, 3)
 
         self.info_label = QLabel("")
-        self.info_label.setStyleSheet("font-size: 10px; color: #aaa;")
+        self.info_label.setStyleSheet("font-size: 0.8em; color: #aaa;")
         nav_layout.addWidget(self.info_label, 2, 0, 1, 3)
 
         review_layout = QHBoxLayout()
@@ -1119,7 +1119,7 @@ class LabelingTool(QMainWindow):
         row += 1
 
         self.peak_source_label = QLabel("")
-        self.peak_source_label.setStyleSheet("font-size: 10px; color: #aaa; font-style: italic;")
+        self.peak_source_label.setStyleSheet("font-size: 0.8em; color: #aaa; font-style: italic;")
         peak_layout.addWidget(self.peak_source_label, row, 0, 1, 3)
         row += 1
 
@@ -2014,6 +2014,8 @@ def build_window(project_root=".", scan=None, bin_size=3):
 
 def launch_gui(project_root=".", scan=None):
     """Launch the labeling GUI for the given project root (used by the CLI)."""
+    QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)
+    QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
     app = QApplication.instance() or QApplication(sys.argv)
     app.setStyle("Fusion")
     window = LabelingTool(project_root=project_root, scan=scan)

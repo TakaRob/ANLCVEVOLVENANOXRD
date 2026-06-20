@@ -125,7 +125,7 @@ class BinnedTab(QWidget):
         bar.addWidget(self._bin_combo)
         self._status = QLabel("")
         self._status.setStyleSheet(
-            "color:#888; font-size:11px; padding-left:8px;")
+            "color:#888; font-size:0.9em; padding-left:8px;")
         bar.addWidget(self._status)
         for label, cb in (extra_buttons or []):
             b = QPushButton(label)
@@ -180,13 +180,13 @@ def placeholder(message: str, detail: str = "") -> QWidget:
     lbl = QLabel(message)
     lbl.setAlignment(Qt.AlignCenter)
     lbl.setWordWrap(True)
-    lbl.setStyleSheet("font-size: 14px;")
+    lbl.setStyleSheet("font-size: 1.2em;")
     lay.addWidget(lbl)
     if detail:
         d = QLabel(detail)
         d.setAlignment(Qt.AlignCenter)
         d.setWordWrap(True)
-        d.setStyleSheet("color: #999; font-size: 11px;")
+        d.setStyleSheet("color: #999; font-size: 0.9em;")
         lay.addWidget(d)
     lay.addStretch()
     return w

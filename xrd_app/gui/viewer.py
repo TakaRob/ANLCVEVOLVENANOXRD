@@ -21,6 +21,7 @@ from pathlib import Path
 
 import h5py
 import hdf5plugin  # noqa: F401
+import threading
 import numpy as np
 import pyqtgraph as pg
 
@@ -521,57 +522,55 @@ class _ExpansionWorker(QThread):
         center_bk = self._bin_key
         target_x, target_y = seed["x"], seed["y"]
 
-        h5 = h5py.File(str(H5_PATH), "r")
-        try:
-            visited = {center_bk}
-            queue = [center_bk]
-            members = [(center_bk, 0, center_row, center_col,
-                        seed["x"], seed["y"], seed)]
-            max_radius = 10
+        h5 = v._get_h5()
+        visited = {center_bk}
+        queue = [center_bk]
+        members = [(center_bk, 0, center_row, center_col,
+                    seed["x"], seed["y"], seed)]
+        max_radius = 10
 
-            while queue:
-                bk = queue.pop(0)
-                br, bc = int(bk.split("_")[0]), int(bk.split("_")[1])
-                for dr in [-1, 0, 1]:
-                    for dc in [-1, 0, 1]:
-                        if dr == 0 and dc == 0:
-                            continue
-                        nr, nc = br + dr, bc + dc
-                        nbk = f"{nr}_{nc}"
+        while queue:
+            bk = queue.pop(0)
+            br, bc = int(bk.split("_")[0]), int(bk.split("_")[1])
+            for dr in [-1, 0, 1]:
+                for dc in [-1, 0, 1]:
+                    if dr == 0 and dc == 0:
+                        continue
+                    nr, nc = br + dr, bc + dc
+                    nbk = f"{nr}_{nc}"
+                    with v.h5_lock:
                         if nbk in visited or nbk not in h5:
                             continue
                         dist = max(abs(nr - center_row), abs(nc - center_col))
                         if dist > max_radius:
                             continue
                         visited.add(nbk)
-
                         image = np.clip(h5[nbk][:].astype(np.float64), 0, 1e9)
-                        peaks, cleaned = detect_peaks_with_intensity(
-                            image, v._tth_map, v._ref_degs,
-                            v._ref_labels, v._tth_data, v._det)
 
-                        for p in peaks:
-                            r = 3
-                            py0 = max(0, p['y'] - r)
-                            py1 = min(cleaned.shape[0], p['y'] + r + 1)
-                            px0 = max(0, p['x'] - r)
-                            px1 = min(cleaned.shape[1], p['x'] + r + 1)
-                            p['cleaned_intensity'] = float(
-                                np.max(cleaned[py0:py1, px0:px1]))
+                    peaks, cleaned = detect_peaks_with_intensity(
+                        image, v._tth_map, v._ref_degs,
+                        v._ref_labels, v._tth_data, v._det)
 
-                        match = None
-                        for p in peaks:
-                            d = ((p["x"] - target_x)**2 +
-                                 (p["y"] - target_y)**2) ** 0.5
-                            if d <= self.LINK_TOLERANCE and p["label"] == seed["label"]:
-                                if match is None or p["snr"] > match["snr"]:
-                                    match = p
-                        if match:
-                            members.append((nbk, 0, nr, nc,
-                                            match["x"], match["y"], match))
-                            queue.append(nbk)
-        finally:
-            h5.close()
+                    for p in peaks:
+                        r = 3
+                        py0 = max(0, p['y'] - r)
+                        py1 = min(cleaned.shape[0], p['y'] + r + 1)
+                        px0 = max(0, p['x'] - r)
+                        px1 = min(cleaned.shape[1], p['x'] + r + 1)
+                        p['cleaned_intensity'] = float(
+                            np.max(cleaned[py0:py1, px0:px1]))
+
+                    match = None
+                    for p in peaks:
+                        d = ((p["x"] - target_x)**2 +
+                             (p["y"] - target_y)**2) ** 0.5
+                        if d <= self.LINK_TOLERANCE and p["label"] == seed["label"]:
+                            if match is None or p["snr"] > match["snr"]:
+                                match = p
+                    if match:
+                        members.append((nbk, 0, nr, nc,
+                                        match["x"], match["y"], match))
+                        queue.append(nbk)
 
         feat = v._build_explore_feature(members, seed)
         feat["_members"] = members
@@ -586,6 +585,8 @@ class FeatureViewer(QMainWindow):
         super().__init__()
         self.setWindowTitle("Spatial Feature Viewer — 3x3 Bins")
         self.setGeometry(50, 30, 1700, 950)
+        self.base_width = 1700.0
+        self.base_font_size = 10.0
 
         self._cmap_name = "inferno"
         self._log_scale = False
@@ -595,6 +596,7 @@ class FeatureViewer(QMainWindow):
         self._fill_surface = False
         self._iso_bar_info = None
         self._h5f = None
+        self.h5_lock = threading.RLock()
         self._image_cache = OrderedDict()
         self._raw_image_cache = OrderedDict()
         self._cache_max = 50
@@ -674,18 +676,20 @@ class FeatureViewer(QMainWindow):
             self._tth_bin_indices, self._tth_radial_counts = compute_tth_binning(self._tth_map)
 
     def _get_h5(self):
-        if self._h5f is None:
-            self._h5f = h5py.File(str(H5_PATH), "r")
-        return self._h5f
+        with self.h5_lock:
+            if self._h5f is None:
+                self._h5f = h5py.File(str(H5_PATH), "r")
+            return self._h5f
 
     def _load_raw_image(self, bin_key):
         if bin_key in self._raw_image_cache:
             self._raw_image_cache.move_to_end(bin_key)
             return self._raw_image_cache[bin_key]
-        h5 = self._get_h5()
-        if bin_key not in h5:
-            return None
-        image = np.clip(h5[bin_key][:].astype(np.float64), 0, 1e9)
+        with self.h5_lock:
+            h5 = self._get_h5()
+            if bin_key not in h5:
+                return None
+            image = np.clip(h5[bin_key][:].astype(np.float64), 0, 1e9)
         self._raw_image_cache[bin_key] = image
         if len(self._raw_image_cache) > self._cache_max:
             self._raw_image_cache.popitem(last=False)
@@ -802,7 +806,7 @@ class FeatureViewer(QMainWindow):
         self.hover_label.setWordWrap(True)
         self.hover_label.setMinimumHeight(36)
         self.hover_label.setStyleSheet(
-            "font-family: monospace; font-size: 10px; color: #aaa; padding: 2px;")
+            "font-family: monospace; font-size: 0.8em; color: #aaa; padding: 2px;")
         right_layout.addWidget(self.hover_label)
 
         right_layout.addStretch()
@@ -829,7 +833,7 @@ class FeatureViewer(QMainWindow):
         bar.addWidget(self.load_btn)
         self.scan_status = QLabel("")
         self.scan_status.setStyleSheet(
-            "color:#888; font-size:11px; padding-left:8px;")
+            "color:#888; font-size:0.9em; padding-left:8px;")
         bar.addWidget(self.scan_status)
         bar.addStretch()
         self._populate_scan_combo()
@@ -907,9 +911,10 @@ class FeatureViewer(QMainWindow):
         self._scan = scan
         self._bin_size = bin_size
         # Drop stale per-scan state and image caches.
-        if self._h5f is not None:
-            self._h5f.close()
-            self._h5f = None
+        with self.h5_lock:
+            if self._h5f is not None:
+                self._h5f.close()
+                self._h5f = None
         self._raw_image_cache.clear()
         self._image_cache.clear()
         self._noise_cache.clear()
@@ -990,7 +995,7 @@ class FeatureViewer(QMainWindow):
         self.info_label = QLabel("No feature selected")
         self.info_label.setWordWrap(True)
         self.info_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        self.info_label.setStyleSheet("font-family: monospace; font-size: 11px;")
+        self.info_label.setStyleSheet("font-family: monospace; font-size: 0.9em;")
         lay.addWidget(self.info_label)
         parent_layout.addWidget(grp)
 
@@ -1006,7 +1011,7 @@ class FeatureViewer(QMainWindow):
         self.pending_list.setSelectionMode(QAbstractItemView.SingleSelection)
         self.pending_list.setStyleSheet(
             "QListWidget { background: #1a1a1a; color: #ccc; font-family: monospace; "
-            "font-size: 10px; border: 1px solid #444; }"
+            "font-size: 0.8em; border: 1px solid #444; }"
             "QListWidget::item:selected { background: #333; }")
         self.pending_list.setMaximumHeight(150)
         self.pending_list.itemSelectionChanged.connect(self._on_pending_selected)
@@ -1015,7 +1020,7 @@ class FeatureViewer(QMainWindow):
         self.score_label = QLabel("")
         self.score_label.setWordWrap(True)
         self.score_label.setStyleSheet(
-            "font-family: monospace; font-size: 10px; color: #aaa; padding: 2px;")
+            "font-family: monospace; font-size: 0.8em; color: #aaa; padding: 2px;")
         lay.addWidget(self.score_label)
 
         self.region_btn = QPushButton("Show region features")
@@ -2024,22 +2029,23 @@ class FeatureViewer(QMainWindow):
 
         parts = bin_key.split("_")
         cr, cc = int(parts[0]), int(parts[1])
-        h5 = self._get_h5()
-        radius = 1
+        with self.h5_lock:
+            h5 = self._get_h5()
+            radius = 1
 
-        summed = None
-        bin_keys = []
-        for dr in range(-radius, radius + 1):
-            for dc in range(-radius, radius + 1):
-                bk = f"{cr + dr}_{cc + dc}"
-                if bk in h5:
-                    image = self._load_raw_image(bk)
-                    if image is not None:
-                        if summed is None:
-                            summed = image.copy()
-                        else:
-                            summed += image
-                        bin_keys.append(bk)
+            summed = None
+            bin_keys = []
+            for dr in range(-radius, radius + 1):
+                for dc in range(-radius, radius + 1):
+                    bk = f"{cr + dr}_{cc + dc}"
+                    if bk in h5:
+                        image = self._load_raw_image(bk)
+                        if image is not None:
+                            if summed is None:
+                                summed = image.copy()
+                            else:
+                                summed += image
+                            bin_keys.append(bk)
 
         if summed is None:
             self.info_label.setText("No data in region")
@@ -2149,9 +2155,11 @@ class FeatureViewer(QMainWindow):
         p.clear()
         nr, nc = self._n_rows, self._n_cols
 
-        h5 = self._get_h5()
+        with self.h5_lock:
+            h5 = self._get_h5()
+            keys = list(h5.keys())
         grid = np.full((nr, nc), np.nan)
-        for bk in h5.keys():
+        for bk in keys:
             parts = bk.split("_")
             if len(parts) == 2:
                 r, c = int(parts[0]), int(parts[1])
@@ -2204,8 +2212,10 @@ class FeatureViewer(QMainWindow):
 
     def _on_explore_navigate(self, row, col):
         bin_key = f"{row}_{col}"
-        h5 = self._get_h5()
-        if bin_key not in h5:
+        with self.h5_lock:
+            h5 = self._get_h5()
+            has_bin = bin_key in h5
+        if not has_bin:
             self.info_label.setText(f"Bin {bin_key} — no data")
             return
 
@@ -2346,7 +2356,6 @@ class FeatureViewer(QMainWindow):
         from ..core.processing import detect_peaks_with_intensity
 
         center_bk = f"{center_row}_{center_col}"
-        h5 = self._get_h5()
         visited = {center_bk}
         queue = [center_bk]
         members = [(center_bk, 0, center_row, center_col,
@@ -2364,14 +2373,15 @@ class FeatureViewer(QMainWindow):
                         continue
                     nr, nc = br + dr, bc + dc
                     nbk = f"{nr}_{nc}"
-                    if nbk in visited or nbk not in h5:
-                        continue
-                    dist = max(abs(nr - center_row), abs(nc - center_col))
-                    if dist > max_radius:
-                        continue
-                    visited.add(nbk)
-
-                    image = self._load_raw_image(nbk)
+                    with self.h5_lock:
+                        h5 = self._get_h5()
+                        if nbk in visited or nbk not in h5:
+                            continue
+                        dist = max(abs(nr - center_row), abs(nc - center_col))
+                        if dist > max_radius:
+                            continue
+                        visited.add(nbk)
+                        image = self._load_raw_image(nbk)
                     peaks, cleaned = detect_peaks_with_intensity(
                         image, self._tth_map, self._ref_degs,
                         self._ref_labels, self._tth_data, self._det
@@ -2671,9 +2681,22 @@ class FeatureViewer(QMainWindow):
                 self._accept_all_pending()
 
         self._save_state()
-        if self._h5f is not None:
-            self._h5f.close()
+        with self.h5_lock:
+            if self._h5f is not None:
+                self._h5f.close()
+                self._h5f = None
         super().closeEvent(event)
+
+    def resizeEvent(self, event):  # noqa: N802 (Qt signature)
+        super().resizeEvent(event)
+        scale_factor = self.width() / self.base_width
+        new_size = int(self.base_font_size * scale_factor)
+        new_size = max(9, min(new_size, 26))
+        app = QApplication.instance()
+        if app:
+            font = app.font()
+            font.setPointSize(new_size)
+            app.setFont(font)
 
 
 # ── Entry point ────────────────────────────────────────────────────
@@ -2702,6 +2725,8 @@ def main():
 
 
 def _run_app():
+    QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)
+    QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
     app = QApplication.instance() or QApplication(sys.argv)
     app.setStyle("Fusion")
 

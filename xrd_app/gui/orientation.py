@@ -325,7 +325,7 @@ class OrientationMapWindow(QMainWindow):
 
         self.hover_label = QLabel("Hover over a sector to see details")
         self.hover_label.setStyleSheet(
-            "font-family: monospace; font-size: 11px; color: #555; "
+            "font-family: monospace; font-size: 0.9em; color: #555; "
             "padding: 4px; background: #f0f0f0;")
         self.hover_label.setFixedHeight(22)
         left_lay.addWidget(self.hover_label)
@@ -729,6 +729,8 @@ def build_window(project_root=".", scan=None, bin_size=3):
 
 def launch_gui(project_root=".", bin_size=3, scan=None):
     """Configure paths and launch the orientation map (used by the CLI)."""
+    QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)
+    QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
     win = build_window(project_root=project_root, scan=scan, bin_size=bin_size)
     app = QApplication.instance() or QApplication(sys.argv)
     win.show()

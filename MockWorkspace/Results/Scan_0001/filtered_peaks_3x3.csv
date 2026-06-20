@@ -1,0 +1,2 @@
+feature_id,reflection,bin_key,center_row,center_col,detector_x,detector_y,peak_intensity,mean_snr,n_bins,spatial_extent,reason
+2,Phase_B,2_2,2,2,800,200,15.0,2.1,1,2_2,isolated: single-bin detection

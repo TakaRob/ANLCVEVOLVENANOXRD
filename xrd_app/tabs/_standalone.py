@@ -33,6 +33,9 @@ def run_standalone(make_tab, title):
     name = mod_name.rsplit(".", 1)[-1]
     tabs = ["setup"] if name == "setup" else ["setup", name]
 
+    from PyQt5.QtCore import Qt
+    QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)
+    QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
     app = QApplication.instance() or QApplication(sys.argv)
     app.setStyle("Fusion")
 

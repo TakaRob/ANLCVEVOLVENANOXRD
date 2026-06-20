@@ -6,7 +6,7 @@ from pathlib import Path
 
 from PyQt5.QtWidgets import (
     QComboBox, QGroupBox, QHBoxLayout, QLabel, QPushButton, QSpinBox,
-    QVBoxLayout, QWidget,
+    QVBoxLayout, QWidget, QSizePolicy,
 )
 
 from ..config import DataManager, format_detector_label
@@ -54,7 +54,7 @@ class ProgramsTab(QWidget):
         self.bin_combo.currentTextChanged.connect(self._on_bin_changed)
         top.addWidget(self.bin_combo)
         self.bins_status = QLabel("")
-        self.bins_status.setStyleSheet("color:#888; font-size:11px; padding-left:8px;")
+        self.bins_status.setStyleSheet("color:#888; font-size:0.9em; padding-left:8px;")
         top.addWidget(self.bins_status)
         top.addStretch()
         lay.addLayout(top)
@@ -74,6 +74,8 @@ class ProgramsTab(QWidget):
             "in “Existing bins” above.")
         bl.addWidget(self.make_bin_spin)
         make_bins_btn = QPushButton("Create bins")
+        make_bins_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.MinimumExpanding)
+        make_bins_btn.setMinimumHeight(40)
         make_bins_btn.clicked.connect(self._make_bins)
         bl.addWidget(make_bins_btn)
         bl.addStretch()
@@ -86,6 +88,8 @@ class ProgramsTab(QWidget):
         self.peak_algo = QComboBox()
         pl.addWidget(self.peak_algo, 1)
         run_peaks = QPushButton("Run")
+        run_peaks.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.MinimumExpanding)
+        run_peaks.setMinimumHeight(40)
         run_peaks.clicked.connect(self._run_peaks)
         pl.addWidget(run_peaks)
         lay.addWidget(peak_box)
@@ -97,6 +101,8 @@ class ProgramsTab(QWidget):
         self.shape_src = QComboBox()
         sl.addWidget(self.shape_src, 1)
         run_shapes = QPushButton("Run")
+        run_shapes.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.MinimumExpanding)
+        run_shapes.setMinimumHeight(40)
         run_shapes.clicked.connect(self._run_shapes)
         sl.addWidget(run_shapes)
         lay.addWidget(shape_box)
@@ -108,6 +114,8 @@ class ProgramsTab(QWidget):
         self.combined_algo = QComboBox()
         cb.addWidget(self.combined_algo, 1)
         run_combined = QPushButton("Run")
+        run_combined.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.MinimumExpanding)
+        run_combined.setMinimumHeight(40)
         run_combined.clicked.connect(self._run_combined)
         cb.addWidget(run_combined)
         lay.addWidget(comb_box)
@@ -115,9 +123,13 @@ class ProgramsTab(QWidget):
         # ---- CVEvolve + lineage -----------------------------------------
         cve_row = QHBoxLayout()
         cve_btn = QPushButton("Use CVEvolve…")
+        cve_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.MinimumExpanding)
+        cve_btn.setMinimumHeight(40)
         cve_btn.clicked.connect(self._open_cvevolve)
         cve_row.addWidget(cve_btn)
         lin_btn = QPushButton("Show lineage")
+        lin_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.MinimumExpanding)
+        lin_btn.setMinimumHeight(40)
         lin_btn.setToolTip("Print the provenance (bin → algorithm chain) of every "
                            "result JSON for the active scan.")
         lin_btn.clicked.connect(self._show_lineage)

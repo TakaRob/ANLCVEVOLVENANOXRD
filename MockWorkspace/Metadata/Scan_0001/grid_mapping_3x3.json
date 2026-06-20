@@ -1,0 +1,8 @@
+{
+  "bin_size": 3,
+  "n_rows": 30,
+  "n_cols": 30,
+  "n_bin_rows": 10,
+  "n_bin_cols": 10,
+  "n_bins": 100
+}

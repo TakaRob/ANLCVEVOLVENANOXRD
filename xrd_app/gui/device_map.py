@@ -418,7 +418,7 @@ class DeviceMapWindow(QMainWindow):
 
         self.hover_label = QLabel("Hover over a feature to see details")
         self.hover_label.setStyleSheet(
-            "font-family: monospace; font-size: 11px; color: #555; "
+            "font-family: monospace; font-size: 0.9em; color: #555; "
             "padding: 4px; background: #f0f0f0;")
         self.hover_label.setFixedHeight(22)
         left_lay.addWidget(self.hover_label)
@@ -472,7 +472,7 @@ class DeviceMapWindow(QMainWindow):
         self.metric_desc_label = QLabel(METRIC_DESCRIPTIONS.get(self.metric, ""))
         self.metric_desc_label.setWordWrap(True)
         self.metric_desc_label.setStyleSheet(
-            "color: #666; font-size: 11px; font-style: italic; padding: 2px;")
+            "color: #666; font-size: 0.9em; font-style: italic; padding: 2px;")
         sl.addWidget(self.metric_desc_label)
         rl.addWidget(sg)
 
@@ -528,7 +528,7 @@ class DeviceMapWindow(QMainWindow):
         self.chi_range_label = QLabel(
             f"χ: {self._chi_data_min}° to {self._chi_data_max}°")
         self.chi_range_label.setStyleSheet(
-            "font-family: monospace; font-size: 11px; color: #555; padding: 2px;")
+            "font-family: monospace; font-size: 0.9em; color: #555; padding: 2px;")
         rl.addWidget(self.chi_range_label)
 
         self.arc_plot = pg.PlotWidget()
@@ -1008,6 +1008,8 @@ def build_window(project_root=".", scan=None, bin_size=3):
 
 def launch_gui(project_root=".", bin_size=3, scan=None):
     """Configure paths and launch the device map (used by the CLI)."""
+    QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)
+    QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
     win = build_window(project_root=project_root, scan=scan, bin_size=bin_size)
     app = QApplication.instance() or QApplication(sys.argv)
     win.show()
@@ -1021,6 +1023,8 @@ def main():
     parser.add_argument("--bin-size", type=int, default=3)
     parser.add_argument("--scan", default=None)
     args = parser.parse_args()
+    QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)
+    QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
     app = QApplication.instance() or QApplication(sys.argv)
     win = build_window(project_root=args.project_root, bin_size=args.bin_size, scan=args.scan)
     win.show()

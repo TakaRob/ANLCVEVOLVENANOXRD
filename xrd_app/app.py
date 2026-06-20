@@ -73,6 +73,8 @@ class MainWindow(QMainWindow):
         # none (the Setup tab will prompt to create/open one).
         self._load_project(project_root, scan=scan, bin_size=bin_size)
         self.resize(1500, 950)
+        self.base_width = 1500.0
+        self.base_font_size = 10.0
 
         central = QWidget()
         root = QVBoxLayout(central)
@@ -285,11 +287,26 @@ class MainWindow(QMainWindow):
         self._save_state()
         super().closeEvent(event)
 
+    def resizeEvent(self, event):  # noqa: N802 (Qt signature)
+        super().resizeEvent(event)
+        scale_factor = self.width() / self.base_width
+        new_size = int(self.base_font_size * scale_factor)
+        new_size = max(9, min(new_size, 26))
+        from PyQt5.QtWidgets import QApplication
+        app = QApplication.instance()
+        if app:
+            font = app.font()
+            font.setPointSize(new_size)
+            app.setFont(font)
+
 
 def launch_app(project_root=None, scan=None, bin_size=3):
     """Create the QApplication and run the single-window app."""
     import sys
+    from PyQt5.QtCore import Qt
     from PyQt5.QtWidgets import QApplication
+    QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)
+    QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
     app = QApplication.instance() or QApplication(sys.argv)
     app.setStyle("Fusion")
     win = MainWindow(project_root, scan=scan, bin_size=bin_size)

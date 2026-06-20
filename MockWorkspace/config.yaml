@@ -1,0 +1,12 @@
+name: MockWorkspace
+scan:
+  number: 1
+  name: Scan_0001
+paths:
+  labels_dir: "Results"
+  metadata_dir: "Metadata"
+  binned_dir: "Binned"
+data_sources:
+  tth_map: "assets/tth.tiff"
+  reflections: "assets/reflections.py"
+  detector_script: "PeakAlgorithms/baseline.py"

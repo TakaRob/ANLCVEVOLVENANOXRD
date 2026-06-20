@@ -6,7 +6,7 @@ from pathlib import Path
 
 from PyQt5.QtWidgets import (
     QComboBox, QFileDialog, QGroupBox, QHBoxLayout, QInputDialog, QLabel,
-    QMessageBox, QPushButton, QVBoxLayout, QWidget,
+    QMessageBox, QPushButton, QVBoxLayout, QWidget, QSizePolicy,
 )
 
 from .. import workspace
@@ -52,6 +52,8 @@ class SetupTab(QWidget):
         self.ws_label.setStyleSheet("font-family: monospace;")
         ws_row.addWidget(self.ws_label, 1)
         b_ws = QPushButton("Change…")
+        b_ws.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.MinimumExpanding)
+        b_ws.setMinimumHeight(40)
         b_ws.clicked.connect(self._choose_workspace)
         ws_row.addWidget(b_ws)
         pl.addLayout(ws_row)
@@ -62,10 +64,16 @@ class SetupTab(QWidget):
         self.proj_combo.setMinimumWidth(220)
         sel_row.addWidget(self.proj_combo, 1)
         b_open = QPushButton("Open")
+        b_open.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.MinimumExpanding)
+        b_open.setMinimumHeight(40)
         b_open.clicked.connect(self._open_selected)
         b_new = QPushButton("New project…")
+        b_new.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.MinimumExpanding)
+        b_new.setMinimumHeight(40)
         b_new.clicked.connect(self._new_project)
         b_browse = QPushButton("Open other…")
+        b_browse.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.MinimumExpanding)
+        b_browse.setMinimumHeight(40)
         b_browse.clicked.connect(self._browse_project)
         sel_row.addWidget(b_open)
         sel_row.addWidget(b_new)
@@ -82,14 +90,20 @@ class SetupTab(QWidget):
         self.load_box = QGroupBox("Load Data")
         ll = QHBoxLayout(self.load_box)
         b_file = QPushButton("Select scan folder…")
+        b_file.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.MinimumExpanding)
+        b_file.setMinimumHeight(40)
         b_file.setToolTip(
             "Pick one scan folder (e.g. Scan_0203); the XRD/ frames inside are "
             "found automatically — no need to drill down to a single .h5.")
         b_file.clicked.connect(self._pick_scan_folder)
         b_dir = QPushButton("Select Scans parent dir…")
+        b_dir.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.MinimumExpanding)
+        b_dir.setMinimumHeight(40)
         b_dir.setToolTip("Pick a folder that contains several Scan_*/ directories.")
         b_dir.clicked.connect(self._pick_dir)
         b_pos = QPushButton("Load positions.csv…")
+        b_pos.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.MinimumExpanding)
+        b_pos.setMinimumHeight(40)
         b_pos.clicked.connect(self._load_positions)
         ll.addWidget(b_file)
         ll.addWidget(b_dir)
@@ -101,10 +115,16 @@ class SetupTab(QWidget):
         self.cal_box = QGroupBox("Calibration & Reflections")
         cl = QHBoxLayout(self.cal_box)
         b_tth = QPushButton("Load tth.tiff…")
+        b_tth.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.MinimumExpanding)
+        b_tth.setMinimumHeight(40)
         b_tth.clicked.connect(self._load_tth)
         b_poni = QPushButton("Convert .poni → tth…")
+        b_poni.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.MinimumExpanding)
+        b_poni.setMinimumHeight(40)
         b_poni.clicked.connect(self._convert_poni)
         b_refl = QPushButton("Manual reflections…")
+        b_refl.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.MinimumExpanding)
+        b_refl.setMinimumHeight(40)
         b_refl.clicked.connect(self._open_reflections)
         cl.addWidget(b_tth)
         cl.addWidget(b_poni)
