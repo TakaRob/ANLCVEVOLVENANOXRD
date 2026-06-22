@@ -64,11 +64,15 @@ def _discover_tabs(only=None):
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, project_root=None, scan=None, bin_size=3, tabs=None):
+    def __init__(self, project_root=None, scan=None, bin_size=3, tabs=None, fresh=False):
         super().__init__()
         self._only_tabs = tabs
         self._init_scan = scan
         self._init_bin = bin_size
+        # Fresh session: ignore the remembered last project and per-project
+        # gui_state (active tab/scan/bin) for this initial load. Reset to False
+        # afterwards so switching projects at runtime restores their state.
+        self._fresh = fresh
         # Resolve the project: explicit root, else the last-opened one, else
         # none (the Setup tab will prompt to create/open one).
         self._load_project(project_root, scan=scan, bin_size=bin_size)
@@ -104,11 +108,14 @@ class MainWindow(QMainWindow):
         # Connect only after all tabs exist, so the signal can't fire mid-build.
         self.tabs.currentChanged.connect(self._on_tab_changed)
         self._populate_scans()
-        # Restore last tab.
+        # Restore last tab (skipped in a fresh session — _state is empty → tab 0).
         last = self._state.get("current_tab", 0)
         if 0 <= last < self.tabs.count():
             self.tabs.setCurrentIndex(last)
         self._ensure_built(self.tabs.currentIndex())
+        # Fresh only governs the initial load; later project switches restore
+        # their own saved state normally.
+        self._fresh = False
 
     # ----- project loading / switching --------------------------------
     def _load_project(self, project_root, scan=None, bin_size=None):
@@ -118,7 +125,7 @@ class MainWindow(QMainWindow):
         → none. With no project, ``self.dm`` is None and the Setup tab shows the
         create/open controls while other tabs show a friendly placeholder.
         """
-        if project_root is None:
+        if project_root is None and not getattr(self, "_fresh", False):
             last = workspace.get_last_project()
             project_root = str(last) if last else None
 
@@ -256,7 +263,7 @@ class MainWindow(QMainWindow):
         return self.dm.metadata_dir / "gui_state.json"
 
     def _load_state(self) -> dict:
-        if self.dm is None:
+        if self.dm is None or getattr(self, "_fresh", False):
             return {}
         p = self.dm.metadata_dir / "gui_state.json"
         if p.exists():
@@ -300,7 +307,7 @@ class MainWindow(QMainWindow):
             app.setFont(font)
 
 
-def launch_app(project_root=None, scan=None, bin_size=3):
+def launch_app(project_root=None, scan=None, bin_size=3, fresh=False):
     """Create the QApplication and run the single-window app."""
     import sys
     from PyQt5.QtCore import Qt
@@ -309,6 +316,6 @@ def launch_app(project_root=None, scan=None, bin_size=3):
     QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
     app = QApplication.instance() or QApplication(sys.argv)
     app.setStyle("Fusion")
-    win = MainWindow(project_root, scan=scan, bin_size=bin_size)
+    win = MainWindow(project_root, scan=scan, bin_size=bin_size, fresh=fresh)
     win.show()
     return app.exec_()

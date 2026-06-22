@@ -407,15 +407,22 @@ def run_cvevolve(config_path, prompt_path, engine, cvevolve_dir, image, build, m
               help='Project root (default: last-opened project, or pick one in Setup)')
 @click.option('--scan', default=None, help='Initial scan (defaults to config/last-used)')
 @click.option('--bin-size', type=int, default=3, help='Initial bin size')
-def gui(root, scan, bin_size):
+@click.option('--fresh', is_flag=True,
+              help='Ignore saved state (last project + last tab/scan); start at Setup.')
+def gui(root, scan, bin_size, fresh):
     """Launch the single-window GUI (Setup / Programs / viewers as tabs).
 
     With no ``--root``, the app reopens the last-used project (remembered in
     ``~/.xrd-app/settings.json``); if there is none, the Setup tab prompts you to
     choose a workspace and create or open a project.
+
+    ``--fresh`` starts a clean session: it does not reopen the last project and
+    does not restore the last-used tab/scan/bin size. The workspace is still
+    remembered so you can pick a project in Setup. Useful when the remembered
+    project is broken or slow to load.
     """
     from .app import launch_app
-    raise SystemExit(launch_app(root, scan=scan, bin_size=bin_size))
+    raise SystemExit(launch_app(root, scan=scan, bin_size=bin_size, fresh=fresh))
 
 
 # ─────────────────────────────────────────────────────────────────────

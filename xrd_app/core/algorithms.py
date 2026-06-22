@@ -43,27 +43,42 @@ def fourier_lowpass(profile, cutoff_fraction=0.05):
     fft_vals[freqs > cutoff_fraction] = 0
     return np.fft.irfft(fft_vals, n=n)
 
+# A real 2θ-per-pixel map spans at most ~tens of degrees, so at the default
+# bin_width it never needs more than a few thousand bins. A value far above this
+# means the supplied map is not a 2θ map (e.g. a summed-intensity image was
+# linked as tth_map) — fail fast with a clear message instead of allocating a
+# multi-million-element histogram and hanging.
+_MAX_TTH_BINS = 100_000
+
 def compute_tth_binning(tth_map, bin_width=0.05):
-    tth_min, tth_max = tth_map.min(), tth_map.max()
+    tth_min, tth_max = float(tth_map.min()), float(tth_map.max())
+    n_bins = int(np.ceil((tth_max - tth_min) / bin_width)) if tth_max > tth_min else 1
+    if n_bins > _MAX_TTH_BINS:
+        raise ValueError(
+            f"2θ map spans {tth_min:.1f}..{tth_max:.1f} → {n_bins} bins at "
+            f"bin_width={bin_width}, far more than expected for a 2θ-per-pixel "
+            f"map. The linked tth_map is probably not a 2θ map (e.g. a summed "
+            f"intensity image). Re-link it with `xrd-app link --tth <tth.tiff>`."
+        )
     edges = np.arange(tth_min, tth_max + bin_width, bin_width)
     centers = 0.5 * (edges[:-1] + edges[1:])
     n_bins = len(centers)
     flat = tth_map.ravel()
     indices = np.digitize(flat, edges) - 1
     indices = np.clip(indices, 0, n_bins - 1)
-    counts = np.zeros(n_bins, dtype=int)
-    for i in range(n_bins):
-        counts[i] = np.count_nonzero(indices == i)
+    counts = np.bincount(indices, minlength=n_bins)
     return edges, centers, n_bins, indices, counts
 
 def compute_radial_profile(image, bin_indices, n_tth_bins):
     img_flat = image.ravel()
     profile = np.zeros(n_tth_bins)
+    order = np.argsort(bin_indices, kind="stable")
+    sorted_idx = bin_indices[order]
+    boundaries = np.searchsorted(sorted_idx, np.arange(n_tth_bins + 1))
     for i in range(n_tth_bins):
-        mask = bin_indices == i
-        vals = img_flat[mask]
-        if len(vals) > 0:
-            profile[i] = np.median(vals)
+        start, end = boundaries[i], boundaries[i + 1]
+        if end > start:
+            profile[i] = np.median(img_flat[order[start:end]])
     return profile
 
 def fit_all_models(tth_centers, radial_profile, valid_mask, tth_min, tth_max):

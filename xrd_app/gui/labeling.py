@@ -758,7 +758,7 @@ class LabelCanvas(FigureCanvasQTAgg):
 
 class LabelingTool(QMainWindow):
 
-    def __init__(self, project_root=None, data_manager=None, scan=None):
+    def __init__(self, project_root=None, data_manager=None, scan=None, bin_size=None):
         super().__init__()
         self.setWindowTitle("XRD Bin Analysis & Labeling Tool")
         self.setGeometry(60, 30, 1600, 1000)
@@ -767,7 +767,10 @@ class LabelingTool(QMainWindow):
         self.project_root = self.dm.root
         self._scan_number = self.dm.config.get("scan", "number") or 203
 
-        self.bin_size = 5
+        # Open at the requested bin size when it is a valid choice; otherwise
+        # fall back to 5. Starting at a size that has prebuilt bins avoids the
+        # slow raw-frame fallback in _load_bin_data_for_size.
+        self.bin_size = bin_size if bin_size in BIN_SIZES else 5
         self._labeling_enabled = False
         self._init_done = False
 
@@ -2009,7 +2012,7 @@ class LabelingTool(QMainWindow):
 
 def build_window(project_root=".", scan=None, bin_size=3):
     """Construct the labeling window without an event loop (for embedding as a tab)."""
-    return LabelingTool(project_root=project_root, scan=scan)
+    return LabelingTool(project_root=project_root, scan=scan, bin_size=bin_size)
 
 
 def launch_gui(project_root=".", scan=None):

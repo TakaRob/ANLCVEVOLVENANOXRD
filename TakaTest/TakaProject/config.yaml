@@ -27,8 +27,7 @@ data_sources:
   position_root: null
   raw_scan_dir: null
   position_csv: null
-  tth_map: /mnt/c/Users/trobson/OneDrive - Argonne National Laboratory/2026-1_Luo/203
-    other/scan_203_sum.tiff
+  tth_map: /mnt/c/Users/trobson/OneDrive - Argonne National Laboratory/2026-1_Luo/tth.tiff
   reflections: null
   grid_mapping: null
   detector_script: null

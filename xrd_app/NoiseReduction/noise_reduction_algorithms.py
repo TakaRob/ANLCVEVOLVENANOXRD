@@ -69,9 +69,23 @@ def fourier_lowpass(profile, cutoff_fraction=0.05):
 # Radial profile computation
 # ---------------------------------------------------------------------------
 
+# A genuine 2θ-per-pixel map needs only a few thousand bins; far more means the
+# linked map is not a 2θ map (e.g. a summed-intensity image), which would
+# otherwise allocate a multi-million-element histogram and hang.
+_MAX_TTH_BINS = 100_000
+
+
 def compute_tth_binning(tth_map, bin_width=0.05):
     """Pre-compute 2-theta bin edges, centers, and per-pixel bin indices."""
-    tth_min, tth_max = tth_map.min(), tth_map.max()
+    tth_min, tth_max = float(tth_map.min()), float(tth_map.max())
+    n_bins = int(np.ceil((tth_max - tth_min) / bin_width)) if tth_max > tth_min else 1
+    if n_bins > _MAX_TTH_BINS:
+        raise ValueError(
+            f"2θ map spans {tth_min:.1f}..{tth_max:.1f} → {n_bins} bins at "
+            f"bin_width={bin_width}; the linked tth_map is probably not a 2θ map "
+            f"(e.g. a summed intensity image). Re-link it with "
+            f"`xrd-app link --tth <tth.tiff>`."
+        )
     edges = np.arange(tth_min, tth_max + bin_width, bin_width)
     centers = 0.5 * (edges[:-1] + edges[1:])
     n_bins = len(centers)
@@ -80,9 +94,7 @@ def compute_tth_binning(tth_map, bin_width=0.05):
     indices = np.digitize(flat, edges) - 1
     indices = np.clip(indices, 0, n_bins - 1)
 
-    counts = np.zeros(n_bins, dtype=int)
-    for i in range(n_bins):
-        counts[i] = np.count_nonzero(indices == i)
+    counts = np.bincount(indices, minlength=n_bins)
 
     return edges, centers, n_bins, indices, counts
 
@@ -91,11 +103,13 @@ def compute_radial_profile(image, bin_indices, n_tth_bins):
     """Median intensity vs 2-theta for a single image."""
     img_flat = image.ravel()
     profile = np.zeros(n_tth_bins)
+    order = np.argsort(bin_indices, kind="stable")
+    sorted_idx = bin_indices[order]
+    boundaries = np.searchsorted(sorted_idx, np.arange(n_tth_bins + 1))
     for i in range(n_tth_bins):
-        mask = bin_indices == i
-        vals = img_flat[mask]
-        if len(vals) > 0:
-            profile[i] = np.median(vals)
+        start, end = boundaries[i], boundaries[i + 1]
+        if end > start:
+            profile[i] = np.median(img_flat[order[start:end]])
     return profile
 
 
