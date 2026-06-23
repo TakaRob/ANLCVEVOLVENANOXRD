@@ -113,6 +113,7 @@ class MainWindow(QMainWindow):
         if 0 <= last < self.tabs.count():
             self.tabs.setCurrentIndex(last)
         self._ensure_built(self.tabs.currentIndex())
+        self._sync_header_extra()
         # Fresh only governs the initial load; later project switches restore
         # their own saved state normally.
         self._fresh = False
@@ -160,6 +161,7 @@ class MainWindow(QMainWindow):
                 self._built[idx] = False
             self._populate_scans()
             self._ensure_built(self.tabs.currentIndex())
+            self._sync_header_extra()
             self._update_general()
         QTimer.singleShot(0, _do)
 
@@ -183,6 +185,15 @@ class MainWindow(QMainWindow):
         self.refl_combo.setMinimumWidth(200)
         self.refl_combo.activated.connect(self._on_reflection_changed)
         row.addWidget(self.refl_combo)
+
+        # Slot for the active tab's own header controls (e.g. Shape/Verify lifts
+        # its Bin + Scan/Feature Catalog + Load bar up here, so the whole top row
+        # is a single bar with no duplicated Scan selector).
+        row.addSpacing(12)
+        self.header_extra = QHBoxLayout()
+        self.header_extra.setContentsMargins(0, 0, 0, 0)
+        self._cur_extra = None
+        row.addLayout(self.header_extra)
 
         row.addStretch()
         self.help_toggle = QCheckBox("Show General (math & visualizations)")
@@ -294,8 +305,32 @@ class MainWindow(QMainWindow):
         self._content[idx] = content
         self._built[idx] = True
 
+    def _sync_header_extra(self):
+        """Show the active tab's own header controls (if any) in the top row.
+
+        A tab whose embedded window exposes ``header_bar()`` (the Shape/Verify
+        viewer) gets that bar lifted into the global header, so Scan / Bin /
+        Scan Catalog / Feature Catalog share one row with no duplication.
+        """
+        idx = self.tabs.currentIndex()
+        content = self._content.get(idx)
+        win = getattr(content, "_embedded_window", None)
+        bar = win.header_bar() if (win is not None and hasattr(win, "header_bar")) else None
+        if bar is self._cur_extra:
+            return
+        if self._cur_extra is not None:
+            try:  # the old bar may already be gone after a tab rebuild
+                self.header_extra.removeWidget(self._cur_extra)
+                self._cur_extra.setParent(None)
+            except RuntimeError:
+                pass
+        self._cur_extra = bar
+        if bar is not None:
+            self.header_extra.addWidget(bar)
+
     def _on_tab_changed(self, idx):
         self._ensure_built(idx)
+        self._sync_header_extra()
         self._update_general()
         self._save_state()
 
@@ -325,6 +360,7 @@ class MainWindow(QMainWindow):
                 if content is not None and hasattr(content, "update_context"):
                     content.update_context(self.scan, self.bin_size)
         self._ensure_built(self.tabs.currentIndex())
+        self._sync_header_extra()
         self._save_state()
 
     # ----- state persistence ------------------------------------------

@@ -645,8 +645,12 @@ class _ExpansionWorker(QThread):
 
 class FeatureViewer(QMainWindow):
 
-    def __init__(self):
+    def __init__(self, embedded=False):
         super().__init__()
+        # Embedded = hosted in the app's MainWindow, whose global header already
+        # carries the Scan selector. In that mode the viewer's own top-bar omits
+        # Scan (no duplicate) and is handed to the host header via header_bar().
+        self._embedded = embedded
         self.setWindowTitle("Spatial Feature Viewer — 3x3 Bins")
         self.setGeometry(50, 30, 1700, 950)
         self.base_width = 1700.0
@@ -830,7 +834,11 @@ class FeatureViewer(QMainWindow):
         layout.setContentsMargins(4, 4, 4, 4)
         layout.setSpacing(4)
 
-        layout.addLayout(self._build_top_bar())
+        self._build_top_bar()
+        # Embedded: the bar is lifted into the app header (see header_bar());
+        # standalone: it sits at the top of this window.
+        if not self._embedded:
+            layout.addWidget(self.top_bar)
 
         splitter = QSplitter(Qt.Horizontal)
 
@@ -916,11 +924,17 @@ class FeatureViewer(QMainWindow):
         layout.addWidget(splitter)
 
     def _build_top_bar(self):
-        bar = QHBoxLayout()
-        bar.addWidget(QLabel("<b>Scan:</b>"))
-        self.scan_combo = QComboBox()
-        self.scan_combo.setMinimumWidth(180)
-        bar.addWidget(self.scan_combo)
+        self.top_bar = QWidget()
+        bar = QHBoxLayout(self.top_bar)
+        bar.setContentsMargins(0, 0, 0, 0)
+        # Scan lives in the app's global header when embedded — don't repeat it.
+        if not self._embedded:
+            bar.addWidget(QLabel("<b>Scan:</b>"))
+            self.scan_combo = QComboBox()
+            self.scan_combo.setMinimumWidth(180)
+            bar.addWidget(self.scan_combo)
+        else:
+            self.scan_combo = None
         bar.addWidget(QLabel("<b>Bin:</b>"))
         self.bin_combo = QComboBox()
         self.bin_combo.addItems([f"{b}x{b}" for b in (1, 3, 4, 5)])
@@ -951,9 +965,16 @@ class FeatureViewer(QMainWindow):
         bar.addWidget(self.scan_status)
         bar.addStretch()
         self._populate_scan_combo()
-        return bar
+        return self.top_bar
+
+    def header_bar(self):
+        """The top-bar widget, so the app header can host it (embedded mode)."""
+        return self.top_bar
 
     def _populate_scan_combo(self):
+        if self.scan_combo is None:   # embedded: Scan lives in the app header
+            self._update_scan_status()
+            return
         self.scan_combo.blockSignals(True)
         self.scan_combo.clear()
         scans = []
@@ -1096,7 +1117,9 @@ class FeatureViewer(QMainWindow):
             f"{self._bins_built_text()}")
 
     def _on_load_clicked(self):
-        scan = self.scan_combo.currentText()
+        # Embedded: Scan is the app header's; reload the current scan at the
+        # chosen bin. Standalone: read the scan from our own selector.
+        scan = self._scan if self.scan_combo is None else self.scan_combo.currentText()
         if not scan or scan.startswith("("):
             return
         try:
@@ -2955,10 +2978,15 @@ class FeatureViewer(QMainWindow):
 
 # ── Entry point ────────────────────────────────────────────────────
 
-def build_window(project_root=".", scan=None, bin_size=3):
-    """Construct the feature viewer without an event loop (for embedding as a tab)."""
+def build_window(project_root=".", scan=None, bin_size=3, embedded=False):
+    """Construct the feature viewer without an event loop (for embedding as a tab).
+
+    ``embedded=True`` omits the viewer's own Scan selector and exposes its top
+    bar via :meth:`FeatureViewer.header_bar` so the app's global header can host
+    it (one unified top bar, no duplicate Scan).
+    """
     configure(project_root=project_root, bin_size=bin_size, scan=scan)
-    return FeatureViewer()
+    return FeatureViewer(embedded=embedded)
 
 
 def launch_gui(project_root=".", bin_size=3, scan=None):

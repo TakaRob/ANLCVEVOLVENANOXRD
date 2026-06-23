@@ -32,6 +32,19 @@ data/bins/
 **/mlruns/
 **/sessions/
 
+# ── XRD-app projects & workspaces (GUI-created at runtime; never commit) ──
+# A project is a config.yaml-rooted dir with this standard tree
+# (Raw/Binned/Metadata/Labels/Figures). Ignore the in-repo test workspaces and
+# that data tree wherever it appears. CVEvolve session dirs (e.g. cvevolve_5x5/)
+# are dev tooling — their config.yaml/prompts/scripts stay tracked.
+/TakaTest/
+/MockWorkspace/
+**/Raw/
+**/Binned/
+**/Metadata/
+**/Labels/
+**/Figures/
+
 # ── Generated analysis outputs ──
 /results/
 **/results/

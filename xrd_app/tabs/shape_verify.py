@@ -20,7 +20,10 @@ TAB_META = {
 
 
 def make_tab(project_root=".", scan=None, bin_size=3):
-    win = viewer.build_window(project_root, scan=scan, bin_size=bin_size)
+    # Embedded: the viewer's Scan/Bin/Catalog selectors are lifted into the app's
+    # global header (one top bar, no duplicate Scan). See app.MainWindow header.
+    win = viewer.build_window(project_root, scan=scan, bin_size=bin_size,
+                              embedded=True)
 
     def save_algo():
         from .save_algorithm_dialog import SaveAlgorithmDialog
