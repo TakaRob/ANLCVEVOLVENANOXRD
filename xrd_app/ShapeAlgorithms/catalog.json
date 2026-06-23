@@ -1,0 +1,16 @@
+{
+  "description": "Bundled XRD shape-finding algorithms (flat library). These are Phase-2 (cross-bin) algorithms run by 'xrd-app shapes' AFTER per-bin peak detection ('xrd-app peaks'): they link peaks across neighboring spatial bins and keep features with a gaussian-like cross-bin intensity profile (a real Bragg 'shape'). Each exposes link_peaks(...) and characterize_features(...) (and a standalone run_shape_pipeline / main). bin_size null = applies to any binned size. Per-frame combined (peak+shape) algorithms live in the CombinedAlgorithms/ library.",
+  "metric": "holdout_f1 / holdout_f2 (spatially-validated holdout score; higher is better)",
+  "detectors": [
+    {
+      "name": "gaussian",
+      "bin_size": null,
+      "file": "gaussian.py",
+      "role": "shape",
+      "holdout_f1": null,
+      "holdout_f2": null,
+      "source": "manual",
+      "notes": "Baseline shape finder: Union-Find cross-bin linking + gaussian-profile filtering (keep clusters with a clear bright center) + characterization (chi FWHM, strain breadth). Generic reference, runs on any binned size."
+    }
+  ]
+}

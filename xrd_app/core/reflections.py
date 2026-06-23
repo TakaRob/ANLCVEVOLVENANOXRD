@@ -15,6 +15,29 @@ from typing import List
 
 DEFAULT_WIDTH = 0.4  # ± degrees; the manual `width` drives the detection band
 
+# Perovskite default reflection set used to seed a new project's reflections.json
+# (and the bundled assets/reflections.py fallback). The first 8 are the labeled
+# Bragg peaks / phase markers; the last 3 had no label historically, so they are
+# named by their angle (easy to rename in the manual editor).
+DEFAULT_REFLECTIONS = [
+    {"name": "PbI2",  "two_theta": 6.81319,  "width": DEFAULT_WIDTH},
+    {"name": "(001)", "two_theta": 7.51422,  "width": DEFAULT_WIDTH},
+    {"name": "(011)", "two_theta": 10.61748, "width": DEFAULT_WIDTH},
+    {"name": "(111)", "two_theta": 13.00831, "width": DEFAULT_WIDTH},
+    {"name": "(002)", "two_theta": 15.01266, "width": DEFAULT_WIDTH},
+    {"name": "ITO",   "two_theta": 16.07224, "width": DEFAULT_WIDTH},
+    {"name": "(012)", "two_theta": 16.79944, "width": DEFAULT_WIDTH},
+    {"name": "(112)", "two_theta": 18.42549, "width": DEFAULT_WIDTH},
+    {"name": "21.30", "two_theta": 21.29655, "width": DEFAULT_WIDTH},
+    {"name": "22.60", "two_theta": 22.59817, "width": DEFAULT_WIDTH},
+    {"name": "26.16", "two_theta": 26.16205, "width": DEFAULT_WIDTH},
+]
+
+
+def default_reflections() -> List[dict]:
+    """A fresh copy of the default perovskite reflection set."""
+    return [dict(r) for r in DEFAULT_REFLECTIONS]
+
 
 def read_json(path) -> List[dict]:
     """Read a reflections.json (list of {name, two_theta, width})."""

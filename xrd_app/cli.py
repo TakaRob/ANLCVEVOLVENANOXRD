@@ -35,7 +35,16 @@ def init(project_name, scan_number, root):
     cfg.create_tree()
     cfg.save()
 
+    # Seed an editable default reflection set so the project resolves reflections
+    # from its own Metadata/ (not the hidden bundled fallback) out of the box.
+    from .core import reflections as refl_io
+    mdir = cfg.root / cfg.get('paths', 'metadata_dir', default='Metadata')
+    refl_io.save(refl_io.default_reflections(),
+                 mdir / "reflections.json", mdir / "reflections.py")
+
     click.echo(f"Project '{project_name}' initialized at {cfg.root}")
+    click.echo(f"  Reflections: {mdir / 'reflections.json'} "
+               "(default perovskite set — edit in Setup → Reflections)")
     if scan_number is not None:
         click.echo(f"  Scan: Scan_{scan_number:04d}")
     click.echo(f"  Config: {cfg.config_path}")
@@ -161,15 +170,18 @@ def _place(source: Path, dest: Path, copy: bool) -> Path:
 # ─────────────────────────────────────────────────────────────────────
 @main.command()
 @click.option('--bin-size', type=int, default=None, help='Filter to one bin size')
-@click.option('--kind', type=click.Choice(['peak', 'combined']), default='peak',
-              help='Library to list (peak detectors or combined peak+shape algos)')
+@click.option('--kind', type=click.Choice(['peak', 'shape', 'combined']), default='peak',
+              help='Library to list (peak detectors, shape finders, or combined algos)')
 @click.option('--root', default='.', help='Project root directory')
 def detectors(bin_size, kind, root):
-    """List the algorithm library and holdout scores (peak or combined)."""
+    """List the algorithm library and holdout scores (peak/shape/combined)."""
     dm = DataManager(root)
     if kind == 'combined':
         entries = dm.list_combined()
         lib_dir = dm.combined_dir()
+    elif kind == 'shape':
+        entries = dm.list_shapes()
+        lib_dir = dm.shapes_dir()
     else:
         entries = dm.list_detectors(bin_size)
         lib_dir = dm.detectors_dir()
@@ -632,7 +644,7 @@ def peaks(bin_size, scan, algorithm, snr, out_name, h5_path, tth_path,
 @main.command()
 @click.option('--bin-size', type=int, default=3, help='Bin size to process')
 @click.option('--scan', default=None, help='Scan number/name (defaults to config scan)')
-@click.option('--algorithm', default='gaussian', help='Shape algorithm name (output label)')
+@click.option('--algorithm', default='gaussian', help='Shape algorithm path OR bundled name (see "detectors --kind shape")')
 @click.option('--from-peaks', help='Path to a saved *_peaks.json (else --peak-algo)')
 @click.option('--peak-algo', help='Name of a saved peak set in Labels/<scan>/')
 @click.option('--link-tolerance', type=int, default=5, help='Cross-bin link tolerance (px)')
@@ -659,25 +671,28 @@ def shapes(bin_size, scan, algorithm, from_peaks, peak_algo, link_tolerance,
     tth = dm.tth_map(tth_path)
     refl = dm.reflections(reflections_path)
     gm = Path(grid_mapping) if grid_mapping else dm.grid_mapping(bin_size=bin_size)
-    for label, p in [("tth", tth), ("reflections", refl), ("grid_mapping", gm)]:
+    shape = dm.shape_script(algorithm)
+    for label, p in [("tth", tth), ("reflections", refl), ("grid_mapping", gm),
+                     ("shape algorithm", shape)]:
         _require(p, label)
+    algo = Path(shape).stem
 
-    click.echo(f"[shapes] peaks: {peaks_path}\n")
+    click.echo(f"[shapes] algorithm: {shape}\n[shapes] peaks: {peaks_path}\n")
     result = processing.run_shapes(
         peaks=peaks_data, tth_path=tth, grid_mapping=gm, reflections_path=refl,
-        bin_size=bin_size, link_tolerance=link_tolerance,
+        bin_size=bin_size, link_tolerance=link_tolerance, shape_path=shape,
         progress=_make_progress("shapes"), log=click.echo)
     result["scan"] = dm.scan_name
-    result["shape_algo"] = algorithm
+    result["shape_algo"] = algo
     result["peak_source"] = peaks_data.get("algorithm", str(peaks_path.name))
     from .core import lineage
     result["lineage"] = lineage.shape_lineage(
-        scan=dm.scan_name, bin_size=bin_size, shape_algorithm=algorithm,
+        scan=dm.scan_name, bin_size=bin_size, shape_algorithm=algo,
         link_tolerance=link_tolerance,
         peak_source=lineage.from_peaks_data(peaks_data, fallback_file=peaks_path.name),
         peak_source_file=peaks_path.name)
 
-    out = dm.shapes_json(algorithm, bin_size, scan)
+    out = dm.shapes_json(algo, bin_size, scan)
     _write_json(out, result)
 
     # Also emit legacy-format catalog + CSVs so the embedded GUIs (viewer,

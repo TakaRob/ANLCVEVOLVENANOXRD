@@ -14,15 +14,29 @@ from PyQt5.QtWidgets import (
 from ..config import DataManager, format_detector_label
 from ..core import save_algorithm
 
-_NOISE_OPTIONS = ["(none)", "gaussian"]
+# Radial background models from NoiseReduction/noise_reduction_algorithms.py.
+_NOISE_OPTIONS = ["(none)", "gaussian", "split_gaussian", "skewed_gaussian",
+                  "fourier"]
 
 
 class SaveAlgorithmDialog(QDialog):
-    def __init__(self, project_root, bin_size=3, kind="peak", parent=None):
+    def __init__(self, project_root, bin_size=3, kind="peak", parent=None,
+                 sensitivity=None, noise_reduction=None, noise_strength=1.0,
+                 noise_shift=0.0, log_scale=False, clip_lo_pct=None,
+                 clip_hi_pct=None, compact=False):
         super().__init__(parent)
         self.project_root = project_root
         self.bin_size = bin_size
         self.kind = kind
+        self.compact = compact
+        # Prefill values used in compact mode (taken from the live GUI view).
+        self._sensitivity = sensitivity if sensitivity is not None else 4.0
+        self._noise_reduction = noise_reduction
+        self._noise_strength = noise_strength
+        self._noise_shift = noise_shift
+        self._log_scale = log_scale
+        self._clip_lo_pct = clip_lo_pct
+        self._clip_hi_pct = clip_hi_pct
         self.setWindowTitle(f"Save Algorithm ({kind})")
 
         lay = QVBoxLayout(self)
@@ -41,21 +55,25 @@ class SaveAlgorithmDialog(QDialog):
                               "5x5_tophat_band_adaptive_snr")
         form.addRow("Base detector:", self.base)
 
-        self.sens = QDoubleSpinBox()
-        self.sens.setRange(0.1, 50.0)
-        self.sens.setDecimals(2)
-        self.sens.setSingleStep(0.5)
-        self.sens.setValue(4.0)
-        form.addRow("Sensitivity (SNR):", self.sens)
+        # Compact mode (View/Label "Run on displayed image" flow): sensitivity,
+        # noise reduction and bin size are taken from the live view, so we only
+        # ask for the base detector + name and show the baked values as a hint.
+        if not compact:
+            self.sens = QDoubleSpinBox()
+            self.sens.setRange(0.1, 50.0)
+            self.sens.setDecimals(2)
+            self.sens.setSingleStep(0.5)
+            self.sens.setValue(4.0)
+            form.addRow("Sensitivity (SNR):", self.sens)
 
-        self.noise = QComboBox()
-        self.noise.addItems(_NOISE_OPTIONS)
-        form.addRow("Noise reduction:", self.noise)
+            self.noise = QComboBox()
+            self.noise.addItems(_NOISE_OPTIONS)
+            form.addRow("Noise reduction:", self.noise)
 
-        self.bin = QComboBox()
-        self.bin.addItems([f"{b}x{b}" for b in (1, 3, 4, 5)])
-        self.bin.setCurrentText(f"{bin_size}x{bin_size}")
-        form.addRow("Bin size:", self.bin)
+            self.bin = QComboBox()
+            self.bin.addItems([f"{b}x{b}" for b in (1, 3, 4, 5)])
+            self.bin.setCurrentText(f"{bin_size}x{bin_size}")
+            form.addRow("Bin size:", self.bin)
 
         self.name = QLineEdit()
         self.name.setPlaceholderText("(auto: <base>__sens<NN>__nr-<...>)")
@@ -64,6 +82,24 @@ class SaveAlgorithmDialog(QDialog):
 
         self.status = QLabel("")
         self.status.setWordWrap(True)
+        if compact:
+            if self._noise_reduction:
+                nr_txt = (f"{self._noise_reduction} "
+                          f"(strength {self._noise_strength:g}, "
+                          f"shift {self._noise_shift:g})")
+            else:
+                nr_txt = "none"
+            disp = []
+            if self._log_scale:
+                disp.append("log")
+            if self._clip_lo_pct is not None and self._clip_hi_pct is not None:
+                disp.append(
+                    f"clip {self._clip_lo_pct:g}–{self._clip_hi_pct:g}%")
+            disp_txt = (" · " + ", ".join(disp)) if disp else ""
+            self.status.setStyleSheet("color: #888; font-style: italic;")
+            self.status.setText(
+                f"Using current view: sensitivity {self._sensitivity:g} · "
+                f"{bin_size}x{bin_size} · noise: {nr_txt}{disp_txt}")
         lay.addWidget(self.status)
 
         btns = QHBoxLayout()
@@ -77,14 +113,28 @@ class SaveAlgorithmDialog(QDialog):
         lay.addLayout(btns)
 
     def _save(self):
-        nr = self.noise.currentText()
-        nr = None if nr == "(none)" else nr
-        bs = int(self.bin.currentText().split("x")[0])
+        if self.compact:
+            nr = self._noise_reduction
+            bs = int(self.bin_size)
+            sens = self._sensitivity
+            strength = self._noise_strength
+            shift = self._noise_shift
+            log_scale = self._log_scale
+            clip_lo, clip_hi = self._clip_lo_pct, self._clip_hi_pct
+        else:
+            nr = self.noise.currentText()
+            nr = None if nr == "(none)" else nr
+            bs = int(self.bin.currentText().split("x")[0])
+            sens = self.sens.value()
+            strength, shift = 1.0, 0.0
+            log_scale, clip_lo, clip_hi = False, None, None
         try:
             out = save_algorithm.save_algorithm(
                 self.base.currentData() or self.base.currentText(),
-                sensitivity=self.sens.value(),
+                sensitivity=sens,
                 bin_size=bs, noise_reduction=nr,
+                noise_strength=strength, noise_shift=shift,
+                log_scale=log_scale, clip_lo_pct=clip_lo, clip_hi_pct=clip_hi,
                 name=self.name.text().strip() or None, kind=self.kind,
                 source="manual")
         except Exception as e:

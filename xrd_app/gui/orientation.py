@@ -40,10 +40,21 @@ HOLDOUT_DIR = None
 
 def configure(project_root=".", bin_size=3, scan=None):
     global _DM, _BIN_SIZE, RESULTS_DIR, HOLDOUT_DIR
+    global DEGS, DEG_LABELS, LABELED_DEGS
     _DM = DataManager(project_root, scan=scan)
     _BIN_SIZE = bin_size
     RESULTS_DIR = _DM.results_dir()
     HOLDOUT_DIR = _DM.holdout_dir
+    # Honor the per-scan/selected reflections file (fall back to defaults).
+    try:
+        from ..core import io as _io
+        degs, labels = _io.load_reflections(_DM.reflections(scan=_DM._scan()))
+        if degs:
+            DEGS = list(degs)
+            DEG_LABELS = list(labels)
+            LABELED_DEGS = {lab: deg for lab, deg in zip(DEG_LABELS, DEGS)}
+    except Exception:
+        pass
 
 
 DEGS = [6.81319, 7.51422, 10.61748, 13.00831, 15.01266,

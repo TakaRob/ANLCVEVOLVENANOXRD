@@ -97,6 +97,9 @@ class ProgramsTab(QWidget):
         # ---- Shape Finding ----------------------------------------------
         shape_box = QGroupBox("Shape Finding  (Phase 2: link + gaussian filter)")
         sl = QHBoxLayout(shape_box)
+        sl.addWidget(QLabel("Algorithm:"))
+        self.shape_algo = QComboBox()
+        sl.addWidget(self.shape_algo, 1)
         sl.addWidget(QLabel("Peaks:"))
         self.shape_src = QComboBox()
         sl.addWidget(self.shape_src, 1)
@@ -207,6 +210,15 @@ class ProgramsTab(QWidget):
             # Show "name (F1 0.79)"; keep the bare name + perframe flag as data.
             self.peak_algo.addItem(format_detector_label(d),
                                    (d["name"], d.get("pipeline") == "perframe"))
+        # Shape (Phase 2) library — names carry scores, data = bare name.
+        self.shape_algo.clear()
+        shapes = dm.list_shapes()
+        if shapes:
+            for d in shapes:
+                self.shape_algo.addItem(format_detector_label(d), d["name"])
+        else:
+            self.shape_algo.addItem("(none found)")
+
         # Combined (peak+shape) library — names carry scores, data = bare name.
         self.combined_algo.clear()
         combined = dm.list_combined()
@@ -311,6 +323,9 @@ class ProgramsTab(QWidget):
         if self._cur_bin() is None:
             self.console._append("[no bins — create one in Data Prep first]\n")
             return
+        shape_algo = self.shape_algo.currentData() or self.shape_algo.currentText()
+        if not shape_algo or shape_algo.startswith("("):
+            shape_algo = None  # let the CLI fall back to its default shape algo
         src = self.shape_src.currentText()
         # Chain option: run the peak algorithm above, then shapes, in one process.
         if src == _CHAIN_OPTION:
@@ -325,6 +340,8 @@ class ProgramsTab(QWidget):
                     "--bin-size", str(self._cur_bin())]
             if peak_algo:
                 args += ["--algorithm", peak_algo]
+            if shape_algo:
+                args += ["--shape-algo", shape_algo]
             self.console.run(args)
             return
         if not src or src.startswith("("):
@@ -332,6 +349,8 @@ class ProgramsTab(QWidget):
             return
         args = ["shapes", "--root", self.project_root, "--scan", str(self.scan),
                 "--bin-size", str(self._cur_bin()), "--peak-algo", src]
+        if shape_algo:
+            args += ["--algorithm", shape_algo]
         self.console.run(args)
 
 

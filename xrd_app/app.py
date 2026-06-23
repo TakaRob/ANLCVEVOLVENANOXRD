@@ -16,8 +16,8 @@ from pathlib import Path
 
 from PyQt5.QtCore import QTimer
 from PyQt5.QtWidgets import (
-    QCheckBox, QComboBox, QHBoxLayout, QLabel, QMainWindow, QTabWidget,
-    QVBoxLayout, QWidget,
+    QCheckBox, QComboBox, QFileDialog, QHBoxLayout, QLabel, QMainWindow,
+    QTabWidget, QVBoxLayout, QWidget,
 )
 
 from . import workspace
@@ -174,6 +174,16 @@ class MainWindow(QMainWindow):
         # Bin size is chosen per-tab (each bin-dependent tab has its own Bin
         # selector); there is intentionally no global bin selector here.
 
+        # Reflection-set selector (per scan): which reflections.py every tab
+        # overlays. Defaults to Auto (per-scan/project/bundled); the user can
+        # point it at a set made in Manual reflections, or Browse for one.
+        row.addSpacing(12)
+        row.addWidget(QLabel("<b>Reflections:</b>"))
+        self.refl_combo = QComboBox()
+        self.refl_combo.setMinimumWidth(200)
+        self.refl_combo.activated.connect(self._on_reflection_changed)
+        row.addWidget(self.refl_combo)
+
         row.addStretch()
         self.help_toggle = QCheckBox("Show General (math & visualizations)")
         self.help_toggle.toggled.connect(self._update_general)
@@ -194,6 +204,64 @@ class MainWindow(QMainWindow):
         elif scans:
             self.scan = scans[0]
         self.scan_combo.blockSignals(False)
+        self._populate_reflections()
+
+    # ----- reflection-set selector ------------------------------------
+    _REFL_BROWSE = "__browse__"
+
+    def _populate_reflections(self):
+        """Fill the Reflections combo for the active scan."""
+        combo = getattr(self, "refl_combo", None)
+        if combo is None:
+            return
+        combo.blockSignals(True)
+        combo.clear()
+        if self.dm is None:
+            combo.addItem("Auto (default)", None)
+            combo.blockSignals(False)
+            return
+        combo.addItem("Auto (default)", None)
+        seen = set()
+        per_scan = self.dm.metadata_scan_dir(self.scan) / "reflections.py"
+        if per_scan.exists():
+            combo.addItem(f"Per-scan ({per_scan.name})", str(per_scan))
+            seen.add(str(per_scan))
+        proj = self.dm.metadata_dir / "reflections.py"
+        if proj.exists() and str(proj) not in seen:
+            combo.addItem("Project default", str(proj))
+            seen.add(str(proj))
+        current = self.dm.reflection_source(self.scan)
+        if current is not None and str(current) not in seen:
+            combo.addItem(f"Selected ({Path(current).name})", str(current))
+            seen.add(str(current))
+        combo.addItem("Browse…", self._REFL_BROWSE)
+        # Reflect the saved per-scan choice.
+        if current is not None:
+            i = combo.findData(str(current))
+            if i >= 0:
+                combo.setCurrentIndex(i)
+        combo.blockSignals(False)
+
+    def _on_reflection_changed(self, _idx):
+        if self.dm is None:
+            return
+        data = self.refl_combo.currentData()
+        if data == self._REFL_BROWSE:
+            path, _ = QFileDialog.getOpenFileName(
+                self, "Select a reflections file", str(self.dm.metadata_dir),
+                "Reflections (reflections.py reflections.json *.py *.json)")
+            if not path:
+                self._populate_reflections()  # revert selection
+                return
+            if path.endswith(".json"):
+                path = str(Path(path).with_suffix(".py"))
+            self.dm.set_reflection_source(path, self.scan)
+        elif data is None:
+            self.dm.clear_reflection_source(self.scan)
+        else:
+            self.dm.set_reflection_source(data, self.scan)
+        self._populate_reflections()
+        self._refresh_context()
 
     # ----- tab lifecycle ----------------------------------------------
     def _ensure_built(self, idx):
@@ -244,6 +312,7 @@ class MainWindow(QMainWindow):
         if not text or text.startswith("("):
             return
         self.scan = text
+        self._populate_reflections()
         self._refresh_context()
 
     def _refresh_context(self):

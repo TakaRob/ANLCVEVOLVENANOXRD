@@ -126,9 +126,17 @@ class SetupTab(QWidget):
         b_refl.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.MinimumExpanding)
         b_refl.setMinimumHeight(40)
         b_refl.clicked.connect(self._open_reflections)
+        b_load_refl = QPushButton("Load reflections…")
+        b_load_refl.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.MinimumExpanding)
+        b_load_refl.setMinimumHeight(40)
+        b_load_refl.setToolTip(
+            "Choose the reflection set the GUIs use for the active scan (the "
+            "auto-created one or a set made in Manual reflections).")
+        b_load_refl.clicked.connect(self._load_reflections_file)
         cl.addWidget(b_tth)
         cl.addWidget(b_poni)
         cl.addWidget(b_refl)
+        cl.addWidget(b_load_refl)
         cl.addStretch()
         lay.addWidget(self.cal_box)
 
@@ -320,6 +328,34 @@ class SetupTab(QWidget):
         from .reflection_popup import open_reflection_dialog
         dlg = open_reflection_dialog(self.project_root, scan=self.scan, parent=self)
         dlg.exec_()
+        self._refresh_summary()
+
+    def _load_reflections_file(self):
+        """Pick the reflection set used by every GUI for the active scan."""
+        if not self.project_root:
+            return
+        dm = DataManager(self.project_root, scan=self.scan)
+        if not dm._scan():
+            QMessageBox.information(
+                self, "No active scan",
+                "Select a scan first (top-left), then load its reflections.")
+            return
+        start = str(dm.metadata_scan_dir(self.scan))
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Select a reflections file", start,
+            "Reflections (reflections.py reflections.json *.py *.json)")
+        if not path:
+            return
+        if path.endswith(".json"):
+            path = str(Path(path).with_suffix(".py"))
+        dm.set_reflection_source(path, self.scan)
+        # Refresh the host header selector + rebuild scan-dependent tabs.
+        if self._host is not None:
+            if hasattr(self._host, "_populate_reflections"):
+                self._host._populate_reflections()
+            if hasattr(self._host, "_refresh_context"):
+                self._host._refresh_context()
+        self.console._append(f"[reflections set for {dm._scan()} → {path}]\n")
         self._refresh_summary()
 
 

@@ -558,3 +558,206 @@ def build_bins(
     size_mb = os.path.getsize(output) / 1024 / 1024
     log(f"Done! {output}: {size_mb:.0f} MB ({size_mb/1024:.1f} GB)")
     return output
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Bin image source — per-bin summed images from a built h5 OR raw frames
+# ─────────────────────────────────────────────────────────────────────
+# Shown by the GUIs when they read pixel images straight from raw frames
+# (no prebuilt xrd_NxN_bins.h5). Raw is correct but slow — re-binning every
+# frame on demand — so the GUIs surface this and gate it behind a second press.
+RAW_FALLBACK_NOTE = "raw frames (no binning) — slower; build bins in Programs to speed up"
+
+
+def _bin_sort_key(k: str):
+    a, b = k.split("_")
+    return (int(a), int(b))
+
+
+def sum_raw_frames(xrd_files, frame_map, frame_indices) -> Optional[np.ndarray]:
+    """Sum the raw detector frames at ``frame_indices`` into one image.
+
+    ``frame_map[gi]`` is ``[file_index, frame_index]`` into ``xrd_files`` (the
+    grid-mapping format). Frames are grouped by file so each H5 is opened once.
+    Port of the labeling tool's ``load_and_sum_frames``.
+    """
+    summed = None
+    by_file = {}
+    for gi in frame_indices:
+        fi, fj = frame_map[gi]
+        by_file.setdefault(fi, []).append(fj)
+    for fi, frame_list in by_file.items():
+        with h5py.File(xrd_files[fi], "r") as f:
+            ds = f[H5_DATASET]
+            for fj in sorted(frame_list):
+                frame = ds[fj].astype(np.float64)
+                summed = frame if summed is None else summed + frame
+    if summed is not None:
+        summed[summed < 0] = 0
+        summed[summed > 1e9] = 0
+    return summed
+
+
+class BinImageSource:
+    """Per-bin summed images from either a built h5 or raw frames.
+
+    Common interface used by the image GUIs so they don't care which backing
+    store provides the pixels. Use :func:`open_bin_source` to construct one.
+    """
+
+    is_raw = False
+
+    def keys(self) -> list:
+        raise NotImplementedError
+
+    def image(self, key: str) -> Optional[np.ndarray]:
+        raise NotImplementedError
+
+    def sum_all(self, max_bins: Optional[int] = None,
+                progress: Optional[Callable[[int, int], None]] = None) -> np.ndarray:
+        raise NotImplementedError
+
+    def close(self):
+        pass
+
+    # Mapping-style access so callers written against an h5py.File handle
+    # (``key in h5`` / ``h5[key][:]``) work unchanged against either backend.
+    def __contains__(self, key) -> bool:
+        raise NotImplementedError
+
+    def __getitem__(self, key):
+        img = self.image(key)
+        if img is None:
+            raise KeyError(key)
+        return img
+
+
+class _H5Source(BinImageSource):
+    """Read per-bin images from a prebuilt ``xrd_NxN_bins.h5``."""
+
+    is_raw = False
+
+    def __init__(self, h5_path):
+        self._path = str(h5_path)
+        self._f = h5py.File(self._path, "r")
+
+    def keys(self) -> list:
+        return sorted(self._f.keys(), key=_bin_sort_key)
+
+    def __contains__(self, key) -> bool:
+        return key in self._f
+
+    def image(self, key: str) -> Optional[np.ndarray]:
+        if key not in self._f:
+            return None
+        return np.clip(self._f[key][:].astype(np.float64), 0, 1e9)
+
+    def sum_all(self, max_bins=None, progress=None) -> np.ndarray:
+        keys = self.keys()
+        if max_bins:
+            keys = keys[:max_bins]
+        acc = None
+        n = len(keys)
+        for i, k in enumerate(keys):
+            a = np.clip(self._f[k][:].astype(np.float64), 0, 1e9)
+            acc = a if acc is None else acc + a
+            if progress is not None:
+                progress(i + 1, n)
+        return acc if acc is not None else np.zeros((1, 1))
+
+    def close(self):
+        try:
+            self._f.close()
+        except Exception:
+            pass
+
+
+class _RawSource(BinImageSource):
+    """Bin raw frames on demand — used when no binned h5 exists.
+
+    Bins are resolved from a saved ``grid_mapping_NxN.json`` when present,
+    otherwise built in-memory from the scan positions (or a synthesized raster).
+    """
+
+    is_raw = True
+
+    def __init__(self, dm, bin_size, scan=None, n_cols=None):
+        self.bin_size = bin_size
+        gm_path = dm.grid_mapping(bin_size=bin_size, scan=scan)
+        if gm_path and Path(gm_path).exists():
+            with open(gm_path) as f:
+                gm = json.load(f)
+            self._bins = gm["bins"]
+            self._xrd_files = gm["xrd_files"]
+            self._frame_map = gm["frame_map"]
+        else:
+            xrd_dir = dm.xrd_frames_dir(scan=scan)
+            if not xrd_dir or not Path(xrd_dir).exists():
+                raise FileNotFoundError(
+                    f"No binned file and no raw frames directory ({xrd_dir}) to "
+                    "fall back to. Link the raw scan in Setup or build bins.")
+            scan_no = dm.scan_number(scan) or 203
+            self._xrd_files, self._frame_map, n_total = load_xrd_metadata(
+                xrd_dir, scan_number=scan_no)
+            pos = dm.position_csv(scan=scan)
+            if pos and Path(pos).exists():
+                frame_x = load_positions(pos, n_total)
+                grid_row, grid_col, n_rows, n_cols2 = build_scan_grid(frame_x, n_total)
+            elif n_cols:
+                grid_row, grid_col, n_rows, n_cols2 = build_regular_grid(n_total, n_cols)
+            else:
+                raise FileNotFoundError(
+                    "No grid mapping, no position CSV, and no raster shape — "
+                    "cannot assign raw frames to bins. Run 'xrd-app grid' or link positions.")
+            grid_to_frames = {}
+            for gi in range(n_total):
+                grid_to_frames.setdefault(
+                    (int(grid_row[gi]), int(grid_col[gi])), []).append(gi)
+            self._bins, _, _ = build_bin_mapping(
+                n_rows, n_cols2, bin_size, grid_to_frames)
+        self._cache = {}
+
+    def keys(self) -> list:
+        return sorted(self._bins.keys(), key=_bin_sort_key)
+
+    def __contains__(self, key) -> bool:
+        return key in self._bins
+
+    def image(self, key: str) -> Optional[np.ndarray]:
+        if key not in self._bins:
+            return None
+        if key in self._cache:
+            return self._cache[key]
+        img = sum_raw_frames(self._xrd_files, self._frame_map, self._bins[key])
+        # Bounded cache so panning across many bins doesn't grow without limit.
+        if len(self._cache) < 64 and img is not None:
+            self._cache[key] = img
+        return img
+
+    def sum_all(self, max_bins=None, progress=None) -> np.ndarray:
+        keys = self.keys()
+        if max_bins:
+            keys = keys[:max_bins]
+        acc = None
+        n = len(keys)
+        for i, k in enumerate(keys):
+            a = self.image(k)
+            if a is not None:
+                acc = a if acc is None else acc + a
+            if progress is not None:
+                progress(i + 1, n)
+        return acc if acc is not None else np.zeros((1, 1))
+
+
+def open_bin_source(dm, bin_size, scan=None, n_cols=None) -> BinImageSource:
+    """Open the best per-bin image source for a scan + bin size.
+
+    Uses the prebuilt ``xrd_NxN_bins.h5`` when it exists (fast); otherwise falls
+    back to summing raw frames on demand (``is_raw`` True, slower). 1×1 has no
+    binned file by convention and always uses the raw source.
+    """
+    if bin_size != 1:
+        h5 = dm.bins_h5(bin_size, scan=scan)
+        if h5 and os.path.exists(h5):
+            return _H5Source(h5)
+    return _RawSource(dm, bin_size, scan=scan, n_cols=n_cols)

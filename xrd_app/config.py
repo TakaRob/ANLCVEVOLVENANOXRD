@@ -388,8 +388,40 @@ class DataManager:
         proj = self.metadata_dir / "tth.tiff"
         return proj if proj.exists() else self._asset("tth.tiff")
 
+    def reflection_source(self, scan: object = None) -> Optional[Path]:
+        """The user-selected reflections source for this scan, if any.
+
+        Stored per scan under ``data_sources.reflections_by_scan`` and chosen via
+        the host header "Reflections:" selector or Setup → Load reflections…. The
+        value points at a ``reflections.py`` (its sibling ``.json`` is derived).
+        """
+        name = self._scan(scan)
+        by_scan = self.config.get("data_sources", "reflections_by_scan", default={})
+        if name and isinstance(by_scan, dict) and by_scan.get(name):
+            return self._abs(by_scan[name])
+        return None
+
+    def set_reflection_source(self, path, scan: object = None) -> None:
+        """Persist the chosen reflections source for ``scan`` (or clear if None)."""
+        name = self._scan(scan)
+        if not name:
+            return
+        ds = self.config.data.setdefault("data_sources", {})
+        by_scan = ds.setdefault("reflections_by_scan", {})
+        if path is None:
+            by_scan.pop(name, None)
+        else:
+            by_scan[name] = str(Path(path))
+        self.config.save()
+
+    def clear_reflection_source(self, scan: object = None) -> None:
+        self.set_reflection_source(None, scan)
+
     def reflections_json(self, scan: object = None) -> Path:
-        """Reflection data (JSON): per-scan -> project."""
+        """Reflection data (JSON): per-scan selection -> per-scan -> project."""
+        chosen = self.reflection_source(scan)
+        if chosen is not None:
+            return chosen.with_suffix(".json")
         per_scan = self.metadata_scan_dir(scan) / "reflections.json"
         if per_scan.exists():
             return per_scan
@@ -398,11 +430,15 @@ class DataManager:
     def reflections(self, override: Optional[str] = None, scan: object = None) -> Path:
         """Reflections module (.py loader) the pipeline imports.
 
-        override -> config -> per-scan Metadata/<scan>/reflections.py ->
-        project Metadata/reflections.py -> bundled asset.
+        override -> per-scan selection -> config -> per-scan
+        Metadata/<scan>/reflections.py -> project Metadata/reflections.py ->
+        bundled asset.
         """
         if override:
             return self._abs(override)
+        chosen = self.reflection_source(scan)
+        if chosen is not None:
+            return chosen
         configured = self.config.get("data_sources", "reflections")
         if configured:
             return self._abs(configured)
@@ -460,8 +496,12 @@ class DataManager:
         """The combined-algorithm library directory (holds catalog.json)."""
         return self.algorithms_dir("combined")
 
+    def shapes_dir(self) -> Path:
+        """The shape-algorithm library directory (holds catalog.json)."""
+        return self.algorithms_dir("shape")
+
     def load_catalog(self, kind: str = "peak") -> dict:
-        """Read the ``catalog.json`` of an algorithm library (peak/combined)."""
+        """Read the ``catalog.json`` of an algorithm library (peak/shape/combined)."""
         cat = self.algorithms_dir(kind) / "catalog.json"
         if cat.exists():
             with open(cat) as f:
@@ -558,3 +598,44 @@ class DataManager:
             return self._abs(override)
         byname = self.resolve_combined_name(override)
         return byname if byname else self._abs(override)
+
+    # ----- shape algorithm library (cross-bin link + shape filter) ------
+    def list_shapes(self) -> list:
+        """List bundled *shape* algorithm entries from ShapeAlgorithms."""
+        return [d for d in self.load_catalog("shape").get("detectors", [])
+                if d.get("role") == "shape"]
+
+    def resolve_shape_name(self, name: str) -> Optional[Path]:
+        """Resolve a bare shape-algorithm name to its script path."""
+        stem = name[:-3] if name.endswith(".py") else name
+        for d in self.list_shapes():
+            if d["name"] == stem:
+                return self.shapes_dir() / d["file"]
+        return None
+
+    def best_shape(self) -> Optional[Path]:
+        """Path to the highest-scoring bundled shape algorithm (default 'gaussian')."""
+        shapes = self.list_shapes()
+        if not shapes:
+            return None
+        shapes.sort(
+            key=lambda d: (d.get("holdout_f1") if d.get("holdout_f1") is not None else -1,
+                           d.get("name") == "gaussian"),
+            reverse=True)
+        return self.shapes_dir() / shapes[0]["file"]
+
+    def shape_script(self, override: Optional[str] = None) -> Path:
+        """Resolve a shape-algorithm script.
+
+        Precedence: explicit path/name -> best bundled shape algorithm.
+        """
+        if override:
+            p = Path(override)
+            if p.exists():
+                return self._abs(override)
+            byname = self.resolve_shape_name(override)
+            if byname:
+                return byname
+            return self._abs(override)
+        bundled = self.best_shape()
+        return bundled if bundled else (self.shapes_dir() / "gaussian.py")

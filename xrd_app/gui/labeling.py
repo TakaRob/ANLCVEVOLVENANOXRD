@@ -99,10 +99,39 @@ BIN_CONFIGS = {
 IMAGE_CACHE_MAX = 50
 
 
-def discover_algorithms(project_root):
-    """Find available peak detection algorithms from CVEvolve directories."""
+def discover_algorithms(project_root, dm=None):
+    """Find available peak detection algorithms.
+
+    Sources: the built-in percentile base, the bundled ``PeakAlgorithms/``
+    library (catalog.json), and any per-session ``cvevolve_*x*/test_data/``
+    directories. Per-frame (unbinned) detectors are skipped — the View/Label
+    overlay runs on a single binned image.
+    """
     algos = [{"name": "Base (percentile threshold)", "source": "built-in",
               "func_type": "base", "file": None, "holdout_f1": None}]
+
+    # Bundled peak-detector library (PeakAlgorithms/catalog.json).
+    if dm is not None:
+        try:
+            ddir = dm.detectors_dir()
+            for d in dm.list_detectors():
+                if d.get("pipeline") == "perframe":
+                    continue
+                algo_file = ddir / d["file"]
+                if not algo_file.exists():
+                    continue
+                f1 = d.get("holdout_f1")
+                f1_str = f", F1={f1:.2f}" if f1 else ""
+                algos.append({
+                    "name": f"{d['name']} ({d.get('source', 'bundled')}{f1_str})",
+                    "source": d.get("source", "bundled"),
+                    "func_type": "module",
+                    "file": str(algo_file),
+                    "data_dir": str(ddir),
+                    "holdout_f1": f1,
+                })
+        except Exception:
+            pass
 
     for bs in BIN_SIZES:
         cvdir = project_root / f"cvevolve_{bs}x{bs}" / "test_data"
@@ -156,6 +185,10 @@ def run_cvevolve_algorithm(algo_info, image, tth_map, degs, deg_labels, tth_data
         sys.path[:] = saved_path
 
     return {}
+
+
+# Bundled-library detectors are imported and run the same way as CVEvolve ones.
+run_module_algorithm = run_cvevolve_algorithm
 
 
 # ===== Data loading =====
@@ -337,6 +370,11 @@ class LabelCanvas(FigureCanvasQTAgg):
         self.setParent(parent)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.setMinimumSize(400, 400)
+
+        # Reflection set used for the "guess reflection" helper; overwritten by
+        # LabelingTool with the project's loaded reflections (defaults otherwise).
+        self._degs = DEGS
+        self._deg_labels = DEG_LABELS
 
         self.image_data = None
         self.display_data = None
@@ -705,7 +743,7 @@ class LabelCanvas(FigureCanvasQTAgg):
             tth_val = self._tth_map[y, x]
             best_lab = ""
             best_dist = float("inf")
-            for lab, d in zip(DEG_LABELS, DEGS):
+            for lab, d in zip(self._deg_labels, self._degs):
                 dist = abs(tth_val - d)
                 if dist < best_dist:
                     best_dist = dist
@@ -780,7 +818,7 @@ class LabelingTool(QMainWindow):
         self._undo_stack = []
         self._redo_stack = []
 
-        self._available_algorithms = discover_algorithms(self.project_root)
+        self._available_algorithms = discover_algorithms(self.project_root, self.dm)
 
         self._build_ui()
 
@@ -788,6 +826,8 @@ class LabelingTool(QMainWindow):
         self.canvas.set_annotation_change_callback(self._on_annotations_changed)
         self.canvas.set_before_modify_callback(self._push_undo)
         self.canvas._tth_map = self.tth
+        self.canvas._degs = self.degs
+        self.canvas._deg_labels = self.deg_labels
         self.canvas.mode = "view"
 
         self.canvas.annotations = self._load_annotations_for_bin()
@@ -797,6 +837,17 @@ class LabelingTool(QMainWindow):
     # ----- Data loading -----
 
     def _load_project_data(self):
+        # Reflection set: honor the per-scan/selected reflections file, falling
+        # back to the bundled defaults if it can't be loaded.
+        self.degs, self.deg_labels = DEGS, DEG_LABELS
+        try:
+            from ..core import io as _io
+            degs, labels = _io.load_reflections(self.dm.reflections(scan=self.dm._scan()))
+            if degs:
+                self.degs, self.deg_labels = list(degs), list(labels)
+        except Exception:
+            pass
+
         tth_path = self.dm.tth_map()
         self.tth = tifffile.imread(str(tth_path)).astype(np.float64)
 
@@ -916,6 +967,22 @@ class LabelingTool(QMainWindow):
         self._image_cache = OrderedDict()
         self._noise_cache = {}
 
+    # ----- responsive layout -----
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._scale_panel_font()
+
+    def _scale_panel_font(self):
+        """Scale the right control panel's font to its current width so the
+        labels/buttons fit horizontally instead of being clipped."""
+        panel = getattr(self, "_right_panel", None)
+        if panel is None:
+            return
+        w = panel.width() or panel.minimumWidth()
+        pt = max(7, min(10, w / 42.0))
+        panel.setStyleSheet(f"QWidget {{ font-size: {pt:.1f}pt; }}")
+
     # ----- UI construction -----
 
     def _build_ui(self):
@@ -941,10 +1008,13 @@ class LabelingTool(QMainWindow):
         left_layout.addWidget(self.status_label)
         splitter.addWidget(left)
 
-        # Right: controls
+        # Right: controls. The font is scaled to the panel width in resizeEvent
+        # (_scale_panel_font) so the controls fit horizontally instead of being
+        # squished/clipped at narrow widths.
         right = QWidget()
-        right.setMaximumWidth(400)
-        right.setMinimumWidth(320)
+        right.setMaximumWidth(420)
+        right.setMinimumWidth(280)
+        self._right_panel = right
         right_layout = QVBoxLayout(right)
 
         # --- Bin Size Selector ---
@@ -990,9 +1060,11 @@ class LabelingTool(QMainWindow):
 
         review_layout = QHBoxLayout()
         self.mark_review_btn = QPushButton("Mark Reviewed")
+        self.mark_review_btn.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
         self.mark_review_btn.clicked.connect(self._toggle_reviewed)
         review_layout.addWidget(self.mark_review_btn)
         next_unrev_btn = QPushButton("Next Reviewed")
+        next_unrev_btn.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
         next_unrev_btn.clicked.connect(self._next_reviewed)
         review_layout.addWidget(next_unrev_btn)
         nav_layout.addLayout(review_layout, 3, 0, 1, 3)
@@ -1193,7 +1265,7 @@ class LabelingTool(QMainWindow):
         self.labeling_btn = QPushButton("Enable Labeling")
         self.labeling_btn.setCheckable(True)
         self.labeling_btn.setStyleSheet(
-            "font-weight: bold; padding: 8px; background-color: #2563eb; color: white;")
+            "padding: 5px; background-color: #2563eb; color: white;")
         self.labeling_btn.toggled.connect(self._toggle_labeling_mode)
         right_layout.addWidget(self.labeling_btn)
 
@@ -1204,13 +1276,17 @@ class LabelingTool(QMainWindow):
         # Mode buttons
         mode_layout = QHBoxLayout()
         self.click_btn = QPushButton("Click (Local Max)")
+        self.click_btn.setToolTip("Click to add a point, snapped to the local maximum")
         self.click_btn.setCheckable(True)
         self.click_btn.setChecked(True)
+        self.click_btn.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
         self.click_btn.clicked.connect(lambda: self._set_mode("click"))
         mode_layout.addWidget(self.click_btn)
 
         self.drag_btn = QPushButton("Drag Select")
+        self.drag_btn.setToolTip("Drag a box to select / add a region")
         self.drag_btn.setCheckable(True)
+        self.drag_btn.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
         self.drag_btn.clicked.connect(lambda: self._set_mode("drag"))
         mode_layout.addWidget(self.drag_btn)
         tools_layout.addLayout(mode_layout)
@@ -1494,7 +1570,7 @@ class LabelingTool(QMainWindow):
             if algo["func_type"] == "base":
                 percentile = self.peak_sens_slider.value() / 10.0
                 detected = find_peaks_on_image(
-                    img, self.tth, DEGS, DEG_LABELS, percentile=percentile)
+                    img, self.tth, self.degs, self.deg_labels, percentile=percentile)
                 if self.peak_bands_only_cb.isChecked():
                     band_tol = 0.5
                     filtered = {}
@@ -1503,7 +1579,7 @@ class LabelingTool(QMainWindow):
                         for peak in peaks:
                             y0, y1, x0, x1, cx, cy = peak
                             tth_val = self.tth[cy, cx] if 0 <= cy < self.tth.shape[0] and 0 <= cx < self.tth.shape[1] else None
-                            if tth_val is not None and any(abs(tth_val - d) < band_tol for d in DEGS):
+                            if tth_val is not None and any(abs(tth_val - d) < band_tol for d in self.degs):
                                 kept.append(peak)
                         if kept:
                             filtered[lab] = kept
@@ -1511,8 +1587,8 @@ class LabelingTool(QMainWindow):
             else:
                 snr = self.peak_sens_slider.value() / 10.0
                 band_width = self.peak_band_slider.value() / 100.0
-                raw = run_cvevolve_algorithm(
-                    algo, img, self.tth, DEGS, DEG_LABELS, self.tth_data,
+                raw = run_module_algorithm(
+                    algo, img, self.tth, self.degs, self.deg_labels, self.tth_data,
                     snr_threshold=snr, tth_tolerance=band_width,
                     band_half_width=band_width)
                 h, w = img.shape[:2]
@@ -1638,7 +1714,7 @@ class LabelingTool(QMainWindow):
         self._update_review_status()
 
         if self.arc_btn.isChecked():
-            self.canvas.show_arcs(self.tth, DEGS, DEG_LABELS)
+            self.canvas.show_arcs(self.tth, self.degs, self.deg_labels)
 
     def _load_annotations_for_bin(self):
         bk = self.bin_keys[self._current_bin_idx]
@@ -1700,11 +1776,11 @@ class LabelingTool(QMainWindow):
         if reviewed:
             self.mark_review_btn.setText("Mark Unreviewed")
             self.mark_review_btn.setStyleSheet(
-                "background-color: #e74c3c; color: white; font-weight: bold;")
+                "background-color: #e74c3c; color: white;")
         else:
             self.mark_review_btn.setText("Mark Reviewed")
             self.mark_review_btn.setStyleSheet(
-                "background-color: #2ecc71; color: white; font-weight: bold;")
+                "background-color: #2ecc71; color: white;")
 
     def _next_reviewed(self):
         for offset in range(1, self.n_bins):
@@ -1819,7 +1895,7 @@ class LabelingTool(QMainWindow):
         img = self._get_display_image()
         if img is None:
             return
-        detected = find_peaks_on_image(img, self.tth, DEGS, DEG_LABELS)
+        detected = find_peaks_on_image(img, self.tth, self.degs, self.deg_labels)
         total = sum(len(v) for v in detected.values())
         self.canvas.show_outlines(detected)
         self.status_label.setText(
@@ -1829,7 +1905,7 @@ class LabelingTool(QMainWindow):
 
     def _toggle_arcs(self, checked):
         if checked:
-            self.canvas.show_arcs(self.tth, DEGS, DEG_LABELS)
+            self.canvas.show_arcs(self.tth, self.degs, self.deg_labels)
         else:
             self.canvas.clear_arcs()
         self.canvas.draw_idle()
@@ -1935,7 +2011,7 @@ class LabelingTool(QMainWindow):
                     continue
                 merged.setdefault(ref, []).extend(points)
 
-        for lab in DEG_LABELS:
+        for lab in self.deg_labels:
             if lab not in merged:
                 merged[lab] = []
 

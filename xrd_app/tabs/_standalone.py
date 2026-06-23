@@ -43,3 +43,42 @@ def run_standalone(make_tab, title):
     win = MainWindow(args.project, scan=args.scan, bin_size=args.bin_size, tabs=tabs)
     win.show()
     sys.exit(app.exec_())
+
+
+def run_dialog_standalone(open_dialog, title):
+    """Run a popup tool (a ``QDialog``) as its own window.
+
+    Mirrors :func:`run_standalone` for tools that are dialogs rather than tabs:
+    same ``--project/--scan/--bin-size`` arguments and last-opened-project
+    resolution, so e.g. ``python -m xrd_app.tabs.reflection_popup`` opens the
+    Manual Reflections window directly. ``open_dialog(project_root, scan,
+    bin_size)`` must return a ``QDialog``.
+    """
+    parser = argparse.ArgumentParser(description=f"xrd-app tool: {title}")
+    parser.add_argument("--project", default=None,
+                        help="Project root (default: last-opened project)")
+    parser.add_argument("--scan", default=None, help="Scan number/name")
+    parser.add_argument("--bin-size", type=int, default=3, help="Bin size")
+    args = parser.parse_args()
+
+    from PyQt5.QtCore import Qt
+    from PyQt5.QtWidgets import QMessageBox
+    QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)
+    QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
+    app = QApplication.instance() or QApplication(sys.argv)
+    app.setStyle("Fusion")
+
+    from .. import workspace  # local import avoids an import cycle
+    project = args.project
+    if project is None:
+        last = workspace.get_last_project()
+        project = str(last) if last else None
+    if project is None:
+        QMessageBox.critical(
+            None, title,
+            "No project to open.\n\nPass --project <root>, or open/create a "
+            "project in the main app first (xrd-app gui).")
+        sys.exit(1)
+
+    dlg = open_dialog(project, scan=args.scan, bin_size=args.bin_size)
+    sys.exit(dlg.exec_())
