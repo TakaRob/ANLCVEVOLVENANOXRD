@@ -869,6 +869,19 @@ class FeatureViewer(QMainWindow):
         self.explore_cb.stateChanged.connect(self._on_explore_toggled)
         cb_bar.addWidget(self.explore_cb)
         cb_bar.addStretch()
+        # Heatmap contrast: the colormap spans [min%, max%] percentiles of the
+        # grid values (the colorbar on the right is just a legend for that range).
+        cb_bar.addWidget(QLabel("Contrast %:"))
+        self.heat_lo_spin = QSpinBox()
+        self.heat_lo_spin.setRange(0, 100); self.heat_lo_spin.setValue(0)
+        self.heat_lo_spin.setToolTip("Lower percentile — colormap bottom maps here")
+        self.heat_lo_spin.valueChanged.connect(self._on_heat_contrast_changed)
+        cb_bar.addWidget(self.heat_lo_spin)
+        self.heat_hi_spin = QSpinBox()
+        self.heat_hi_spin.setRange(0, 100); self.heat_hi_spin.setValue(100)
+        self.heat_hi_spin.setToolTip("Upper percentile — colormap top maps here")
+        self.heat_hi_spin.valueChanged.connect(self._on_heat_contrast_changed)
+        cb_bar.addWidget(self.heat_hi_spin)
         left_vbox.addLayout(cb_bar)
 
         left_splitter = QSplitter(Qt.Vertical)
@@ -1725,10 +1738,11 @@ class FeatureViewer(QMainWindow):
         nr, nc = grid.shape
 
         cmap = _get_cmap(self._cmap_name)
-        rgba = _scalar_to_rgba(grid, 0.0, z_max, cmap)
+        vmin, vmax = self._heat_levels(grid, z_max)
+        rgba = _scalar_to_rgba(grid, vmin, vmax, cmap)
         hv.img.setImage(rgba, autoLevels=False)
         hv.img.setRect(QRectF(c_lo - 0.5, r_lo - 0.5, nc, nr))
-        self._update_heatmap_colorbar(cmap, 0.0, z_max)
+        self._update_heatmap_colorbar(cmap, vmin, vmax)
 
         center = self._parse_bin(feat.get("center_bin", ""))
         highlight = self._parse_bin(self._highlight_bin)
@@ -1755,6 +1769,27 @@ class FeatureViewer(QMainWindow):
         except ValueError:
             return None
 
+    def _heat_levels(self, grid, z_max):
+        """vmin/vmax for the heatmap from the Contrast % spinboxes (percentiles
+        of the finite grid values). Falls back to [0, z_max]."""
+        finite = grid[np.isfinite(grid)]
+        if finite.size == 0:
+            return 0.0, z_max
+        lo = float(self.heat_lo_spin.value())
+        hi = float(self.heat_hi_spin.value())
+        if hi <= lo:
+            hi = min(100.0, lo + 1.0)
+        vmin = float(np.percentile(finite, lo))
+        vmax = float(np.percentile(finite, hi))
+        if vmax <= vmin:
+            vmax = vmin + 1e-9
+        return vmin, vmax
+
+    def _on_heat_contrast_changed(self, *_):
+        feat = self._current_feature()
+        if feat is not None:
+            self._render_heatmap(feat)
+
     def _update_heatmap_colorbar(self, cmap, vmin, vmax):
         hv = self.heatmap_canvas
         if hv.colorbar is not None:
@@ -1766,7 +1801,8 @@ class FeatureViewer(QMainWindow):
         if cmap is None:
             return
         label = "Integrated" if self._display_metric == "integrated" else "Intensity"
-        hv.colorbar = pg.ColorBarItem(values=(vmin, vmax), colorMap=cmap, label=label)
+        hv.colorbar = pg.ColorBarItem(values=(vmin, vmax), colorMap=cmap,
+                                      label=label, interactive=False)
         hv.addItem(hv.colorbar, row=0, col=1)
 
     # ── Isometric 3D ─────────────────────────────────────────────────

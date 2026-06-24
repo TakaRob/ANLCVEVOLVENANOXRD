@@ -106,8 +106,9 @@ Calling it "rocking" implies a measurement this app never makes. Same issue for
 the matching device-map metric label, descriptions, and tab help text.
 
 > Sibling metric `strain_breadth` is the analogous weighted FWHM of `Δ2θ`
-> (`tth − ref_tth`) across bins — the *radial* spread. That name is fine; it is
-> only the *azimuthal* one that is mislabeled "rocking".
+> (`tth − ref_tth`) across bins — the *radial* spread. It had the same overclaim
+> problem as "rocking" (it is not a calibrated strain) and was renamed the same
+> way: field `strain_breadth` → **`tth_fwhm`**, with honest UI labels. See §3.3.
 
 ### 3.2 The rename
 
@@ -131,6 +132,48 @@ after χ keeps the claim honest and matches the already-correct colorbar.
 > catalogs, or have the loader accept `chi_fwhm` and fall back to `rocking_fwhm`
 > for one release.
 
+### 3.3 The "strain" misnomer (radial metric)
+
+The radial metric is `Δ2θ = tth − ref_tth`: the **deviation of the measured 2θ
+from the reference Bragg angle**, per bin. The per-feature version
+(`strain_breadth`) is its intensity-weighted FWHM across the feature's bins.
+
+This is **not** calibrated lattice strain. True strain needs the conversion
+`ε = −½·Δ(2θ)·cot θ_B` *and* the assumption that the 2θ shift is purely a
+d-spacing change (not tilt, displacement, or detector geometry). The app applies
+no such conversion — it only reports Δ2θ — so "Lattice strain", "d-spacing
+deviation", and "lattice parameter gradient" overclaim a measurement this app
+does not make. This is the radial twin of the "rocking" misnomer in §3.1.
+
+### 3.2.1 The rename
+
+| Where | Now | Canonical |
+|---|---|---|
+| Feature field (`ShapeAlgorithms/gaussian.py`, `aggregate.py`) | `strain_breadth` | **`tth_fwhm`** |
+| Device-map metric key — per-bin (`device_map.py`) | `strain` | **`tth_dev`** |
+| Device-map metric key — per-feature (`device_map.py`) | `strain_bw` | **`tth_breadth`** |
+| Device-map label — per-bin (`METRICS`) | `Lattice strain` | **`2θ deviation (Δ2θ)`** |
+| Device-map label — per-feature (`METRICS`) | `Strain breadth` | **`Radial breadth (Δ2θ FWHM)`** |
+| Per-bin description (`device_map.py`) | `Δ2θ — distance from the reference Bragg angle` | **`Δ2θ — deviation of the measured 2θ from the reference Bragg angle per bin (not a calibrated strain)`** |
+| Per-feature description (`device_map.py`) | `Spread of Δ2θ across the feature (strain gradient)` | **`Radial breadth — FWHM of Δ2θ across the feature's bins (not a calibrated strain gradient)`** |
+| Per-bin 2D title (`device_map.py`) | `Lattice Strain — d-spacing deviation (Δ2θ from reference)` | **`2θ Deviation — Δ2θ from the reference Bragg angle per bin`** |
+| Per-feature 2D title (`device_map.py`) | `Strain Breadth — lattice parameter gradient across feature` | **`Radial Breadth — Δ2θ FWHM per feature`** |
+| Colorbar z-labels (`device_map.py`) | `Δ2θ (°)` / `FWHM Δ2θ (°)` | unchanged — already honest, keep |
+| Tab help (`tabs/device.py`, `tabs/shape_verify.py`) | "...lattice strain...", "...strain breadth..." | "...2θ deviation (Δ2θ)...", "...radial breadth (Δ2θ FWHM)..." |
+| Module docstring (`device_map.py:5`) | "...lattice strain ... mosaicity / domain structure" | "...2θ deviation (Δ2θ) ... azimuthal / radial breadth" |
+
+**Why `tth_fwhm`/`tth_dev` and not "strain":** the app reports only Δ2θ, never
+the cot θ_B conversion to true strain. Naming after 2θ keeps the claim honest and
+parallels the χ rename (`chi_fwhm`/`chi_breadth`). FWHM is shift-invariant, so the
+FWHM of Δ2θ equals the FWHM of 2θ across a feature's bins (one reflection → one
+`ref_tth`), making `tth_fwhm` exact.
+
+> **Migration note:** like `chi_fwhm`, renaming the JSON field breaks existing
+> `feature_catalog_*.json`. The device-map reader (`build_device_grids`) and the
+> aggregate reader accept `tth_fwhm` and fall back to `strain_breadth` for one
+> release. The per-bin/per-feature **metric keys** (`tth_dev` / `tth_breadth`)
+> are not persisted, so no migration is needed there.
+
 ---
 
 ## 4. Per-bin vs per-feature metrics (device map)
@@ -139,13 +182,13 @@ A device-map gotcha worth stating once: some metrics are **per-bin** (a real val
 in each bin) and some are **per-feature** (one value painted into every bin of the
 feature). Keep this distinction visible in tooltips so the map isn't misread.
 
-| Metric (canonical key) | Granularity | Source |
-|---|---|---|
-| `intensity` | per-bin | `intensity_profile[bin].integrated` |
-| `strain` (Δ2θ vs ref) | per-bin | `tth − ref_tth` per bin |
-| `chi` (χ angle) | per-feature | `feat.chi_deg` |
-| `chi_breadth` (χ FWHM) | per-feature | `feat.chi_fwhm` |
-| `strain_bw` (Δ2θ FWHM) | per-feature | `feat.strain_breadth` |
+| Metric (key) | UI label | Granularity | Source |
+|---|---|---|---|
+| `intensity` | Intensity | per-bin | `intensity_profile[bin].integrated` |
+| `tth_dev` | 2θ deviation (Δ2θ) | per-bin | `tth − ref_tth` per bin |
+| `chi` | χ angle | per-feature | `feat.chi_deg` |
+| `chi_breadth` | Azimuthal breadth (χ FWHM) | per-feature | `feat.chi_fwhm` |
+| `tth_breadth` | Radial breadth (Δ2θ FWHM) | per-feature | `feat.tth_fwhm` (legacy `strain_breadth`) |
 
 ---
 
@@ -162,8 +205,9 @@ feature). Keep this distinction visible in tooltips so the map isn't misread.
 - **center_row / center_col** — the feature's central bin in the scan grid.
 - **spatial_extent / n_bins** — feature footprint (bins) and its count.
 - **intensity_profile** — per-bin intensity + geometry for a feature.
-- **chi_fwhm** (was `rocking_fwhm`) — FWHM of χ across the feature's bins (azimuthal breadth).
-- **strain_breadth** — FWHM of Δ2θ across the feature's bins (radial breadth).
+- **chi_fwhm** (was `rocking_fwhm`) — FWHM of χ across the feature's bins. UI label **"Azimuthal breadth (χ FWHM)"**.
+- **tth_fwhm** (was `strain_breadth`) — FWHM of Δ2θ across the feature's bins. UI label **"Radial breadth (Δ2θ FWHM)"** — *not* a calibrated strain (§3.3).
+- **tth_dev** (metric key; was `strain`) — per-bin `tth − ref_tth`. UI label **"2θ deviation (Δ2θ)"** — deviation from the reference Bragg angle, *not* calibrated lattice strain (§3.3).
 - **chi_deg** — the feature's azimuthal angle on the Debye ring.
 
 ---
@@ -178,6 +222,7 @@ Done:
 - [x] `tabs/device.py`, `tabs/shape_verify.py`: fixed help text (`rocking`→azimuthal breadth; "shapes"→"features").
 - [x] catalog/aggregate readers: accept `chi_fwhm` with `rocking_fwhm` fallback.
 - [x] `peak`/`point` reclassification: `cli.py` combined output "points"→"features"; `viewer.py` region overlay labels "peaks"→"features" (they carry `feature_id`/`reason`); `labeling.py` comment "Detection point"→"Peak detection".
+- [x] `strain` misnomer (§3.3): field `strain_breadth`→`tth_fwhm` (`ShapeAlgorithms/gaussian.py` emit; `aggregate.py` column); device-map metric keys `strain`→`tth_dev`, `strain_bw`→`tth_breadth` across `METRICS`/`METRIC_ZLABELS`/`METRIC_DESCRIPTIONS`/`METRIC_2D_TITLES`/`PER_FEATURE_METRICS` + comparisons; labels "Lattice strain"→"2θ deviation (Δ2θ)", "Strain breadth"→"Radial breadth (Δ2θ FWHM)"; module docstring; `tabs/device.py` + `tabs/shape_verify.py` help. Legacy `strain_breadth` read-fallback in `device_map.build_device_grids` and `aggregate._feature_row`.
 
 Deliberately **not** changed (load-bearing identifiers / correct usage):
 

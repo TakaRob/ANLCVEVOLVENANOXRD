@@ -11,6 +11,16 @@
       "holdout_f2": null,
       "source": "manual",
       "notes": "Baseline shape finder: Union-Find cross-bin linking + gaussian-profile filtering (keep clusters with a clear bright center) + characterization (chi FWHM, strain breadth). Generic reference, runs on any binned size."
+    },
+    {
+      "name": "gaussian_deskew",
+      "bin_size": null,
+      "file": "gaussian_deskew.py",
+      "role": "shape",
+      "holdout_f1": null,
+      "holdout_f2": null,
+      "source": "manual",
+      "notes": "Skew-aware variant of 'gaussian'. Estimates each scan's serpentine-raster column backlash from unambiguous cross-row detector matches and de-skews the linking so a single feature stops fragmenting into horizontal slices at fine binning (esp. 1x1). Adaptive: neutral on well-registered grids, corrects proportionally where skew exists. Reuses gaussian's gaussian-profile filtering + characterization unchanged; only link_peaks differs. Cannot fix missing detections (SNR dropouts) — bin for those."
     }
   ]
 }

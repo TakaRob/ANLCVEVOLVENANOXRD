@@ -14,7 +14,8 @@ TAB_META = {
         "Review kept (gaussian-like) and filtered features from the linking "
         "stage. A feature is a peak that persists across neighboring bins with a "
         "gaussian-like spatial profile; metrics include azimuthal breadth (χ FWHM, "
-        "computed from the χ distribution across bins), strain breadth, and chi angle."
+        "computed from the χ distribution across bins), radial breadth (Δ2θ FWHM "
+        "across bins), and chi angle."
     ),
 }
 

@@ -24,7 +24,8 @@ from scipy.optimize import minimize
 from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QGroupBox, QPushButton,
-    QHBoxLayout, QLabel, QMainWindow, QSlider, QSplitter, QVBoxLayout, QWidget,
+    QHBoxLayout, QLabel, QMainWindow, QSlider, QSpinBox, QSplitter,
+    QVBoxLayout, QWidget,
 )
 
 from ..config import DataManager
@@ -195,10 +196,16 @@ def _chi_mask(chi_map, chi_lo, chi_hi, wraps):
 
 # ── Density overlay ───────────────────────────────────────────────
 def build_density_overlay(tth_map, chi_map, features_by_ref, active_refs,
-                          band_tol, cmap_name, sigma=3.0):
+                          band_tol, cmap_name, sigma=3.0,
+                          low_pct=0.0, high_pct=100.0):
     """Paint each Bragg ring with a smooth chi-density gradient.
 
-    Returns (overlay_rgba_float, global_max). global_max scales the colorbar.
+    The colormap spans the [low_pct, high_pct] percentile window of the density
+    values; alpha still follows the raw (global-max-normalized) density so faint
+    rings stay translucent.
+
+    Returns (overlay_rgba_float, global_max, vmin, vmax). vmin/vmax label the
+    colorbar.
     """
     h, w = tth_map.shape
     overlay = np.zeros((h, w, 4), dtype=np.float32)
@@ -220,20 +227,36 @@ def build_density_overlay(tth_map, chi_map, features_by_ref, active_refs,
         global_max = max(global_max, smooth.max())
 
     if global_max == 0:
-        return overlay, 0
+        return overlay, 0, 0.0, 1.0
+
+    # Contrast window from percentiles of the (non-empty) density values.
+    pool = np.concatenate([d for d in densities.values()])
+    pool = pool[pool > 0]
+    if pool.size:
+        if high_pct <= low_pct:
+            high_pct = min(100.0, low_pct + 1.0)
+        vmin = float(np.percentile(pool, low_pct))
+        vmax = float(np.percentile(pool, high_pct))
+    else:
+        vmin, vmax = 0.0, float(global_max)
+    if vmax <= vmin:
+        vmax = vmin + 1e-9
+    span = vmax - vmin
 
     for ref, density in densities.items():
         ref_tth = LABELED_DEGS[ref]
         band = np.abs(tth_map - ref_tth) < band_tol
-        normed = density / global_max
-        pixel_d = normed[chi_idx]
-        paint = band & (pixel_d > 0.01)
+        cscale = np.clip((density - vmin) / span, 0, 1)  # contrast-scaled colour
+        normed = density / global_max                    # alpha as before
+        pixel_c = cscale[chi_idx]
+        pixel_a = normed[chi_idx]
+        paint = band & (pixel_a > 0.01)
         if not np.any(paint):
             continue
-        rgba = cmap(pixel_d[paint])
+        rgba = cmap(pixel_c[paint])
         overlay[paint, :3] = rgba[:, :3]
-        overlay[paint, 3] = np.clip(pixel_d[paint] * 1.2, 0.05, 0.85)
-    return overlay, global_max
+        overlay[paint, 3] = np.clip(pixel_a[paint] * 1.2, 0.05, 0.85)
+    return overlay, global_max, vmin, vmax
 
 
 def _get_cmap(name):
@@ -390,6 +413,18 @@ class OrientationMapWindow(QMainWindow):
         self.cmap_combo = QComboBox(); self.cmap_combo.addItems(COLORMAPS)
         cr.addWidget(self.cmap_combo)
         sl.addLayout(cr)
+        # Contrast: colormap spans [min%, max%] percentiles of the density.
+        xr = QHBoxLayout()
+        xr.addWidget(QLabel("Contrast %"))
+        self.contrast_lo = QSpinBox()
+        self.contrast_lo.setRange(0, 100); self.contrast_lo.setValue(0)
+        self.contrast_lo.setToolTip("Lower percentile — colormap bottom maps here")
+        xr.addWidget(self.contrast_lo)
+        self.contrast_hi = QSpinBox()
+        self.contrast_hi.setRange(0, 100); self.contrast_hi.setValue(100)
+        self.contrast_hi.setToolTip("Upper percentile — colormap top maps here")
+        xr.addWidget(self.contrast_hi)
+        sl.addLayout(xr)
         tg = QHBoxLayout()
         self.arcs_cb = QCheckBox("Arcs"); self.arcs_cb.setChecked(True)
         self.bounds_cb = QCheckBox("Bounds"); self.bounds_cb.setChecked(True)
@@ -422,6 +457,8 @@ class OrientationMapWindow(QMainWindow):
         self.bw_slider.valueChanged.connect(self._on_bw_changed)
         self.tol_slider.valueChanged.connect(self._on_tol_changed)
         self.cmap_combo.currentTextChanged.connect(self._on_cmap_changed)
+        self.contrast_lo.valueChanged.connect(lambda _v: self._render_main())
+        self.contrast_hi.valueChanged.connect(lambda _v: self._render_main())
         for c in (self.arcs_cb, self.bounds_cb, self.markers_cb, self.labels_cb):
             c.toggled.connect(self._on_toggle)
 
@@ -478,9 +515,12 @@ class OrientationMapWindow(QMainWindow):
 
     def _render_main(self):
         self._clear_dyn()
-        overlay, global_max = build_density_overlay(
+        lo = float(self.contrast_lo.value()) if hasattr(self, "contrast_lo") else 0.0
+        hi = float(self.contrast_hi.value()) if hasattr(self, "contrast_hi") else 100.0
+        overlay, global_max, vmin, vmax = build_density_overlay(
             self._tth_map, self._chi_map, self._by_ref,
-            self._active_refs, self._band_tol, self._cmap_name)
+            self._active_refs, self._band_tol, self._cmap_name,
+            low_pct=lo, high_pct=hi)
         self.img_item.setImage((overlay * 255).astype(np.ubyte), autoLevels=False)
 
         h, w = self._tth_map.shape
@@ -519,7 +559,7 @@ class OrientationMapWindow(QMainWindow):
                 self.plot.addItem(sc); self._dyn_items.append(sc)
 
         if global_max > 0:
-            self._cbar = pg.ColorBarItem(values=(0, global_max),
+            self._cbar = pg.ColorBarItem(values=(vmin, vmax), interactive=False,
                                          colorMap=_get_cmap(self._cmap_name),
                                          label="Feature density")
             self.glw.addItem(self._cbar, row=0, col=1)

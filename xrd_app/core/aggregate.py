@@ -5,7 +5,7 @@ Walks ``results/<scan>/feature_catalog_NxN.json`` across all scans and bin sizes
 and produces two flat tables you can open in Excel/pandas or query with SQL:
 
   features    one row per detected feature — intensity, prevalence (n_bins),
-              morphology (chi_fwhm / strain_breadth), orientation (chi_deg).
+              morphology (chi_fwhm / tth_fwhm), orientation (chi_deg).
   device_map  one row per (scan, reflection, spatial bin) — the per-bin
               intensity map data, in long/tidy form.
 
@@ -28,7 +28,7 @@ FEATURE_COLUMNS = [
     "chi_deg",
     "peak_intensity", "mean_intensity", "sum_integrated", "mean_snr",  # intensity
     "n_bins",                                                          # prevalence
-    "chi_fwhm", "strain_breadth",                                      # morphology
+    "chi_fwhm", "tth_fwhm",                                            # morphology
     "spatial_extent", "reason",
 ]
 
@@ -81,7 +81,7 @@ def _feature_row(scan: str, bin_size: Optional[int], f: dict) -> dict:
         "mean_snr": round(f["mean_snr"], 2) if "mean_snr" in f else None,
         "n_bins": f.get("n_bins"),
         "chi_fwhm": f.get("chi_fwhm", f.get("rocking_fwhm")),  # accept legacy field
-        "strain_breadth": f.get("strain_breadth"),
+        "tth_fwhm": f.get("tth_fwhm", f.get("strain_breadth")),  # accept legacy field
         "spatial_extent": " ".join(f.get("spatial_extent", [])),
         "reason": f.get("reason"),
     }

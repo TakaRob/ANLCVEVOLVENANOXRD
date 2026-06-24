@@ -2,8 +2,8 @@
 Device-level feature map for perovskite reflections (pyqtgraph).
 
 Shows spatial profiles across the full bin grid with switchable metrics:
-intensity, lattice strain, crystallographic orientation, and mosaicity / domain
-structure. Chi-angle range filter with interactive histogram, arc, and slider.
+intensity, 2θ deviation (Δ2θ), crystallographic orientation, and azimuthal /
+radial breadth. Chi-angle range filter with interactive histogram, arc, and slider.
 
 pyqtgraph rewrite of the original matplotlib version (full feature parity). All
 data-prep logic is framework-agnostic and unchanged; only the rendering layer is
@@ -64,17 +64,17 @@ METRICS = [
     ("none",      "None (outlines only)"),
     ("intensity", "Intensity"),
     ("chi",       "χ angle"),
-    ("strain",    "Lattice strain"),
+    ("tth_dev",   "2θ deviation (Δ2θ)"),
     ("chi_breadth", "Azimuthal breadth (χ FWHM)"),
-    ("strain_bw", "Strain breadth"),
+    ("tth_breadth", "Radial breadth (Δ2θ FWHM)"),
 ]
 
 METRIC_ZLABELS = {
     "intensity":  "Integrated intensity",
     "chi":        "χ (°)",
-    "strain":     "Δ2θ (°)",
+    "tth_dev":    "Δ2θ (°)",
     "chi_breadth": "FWHM χ (°)",
-    "strain_bw":  "FWHM Δ2θ (°)",
+    "tth_breadth": "FWHM Δ2θ (°)",
 }
 
 METRIC_CMAPS = {"chi": "twilight"}
@@ -83,18 +83,18 @@ METRIC_DESCRIPTIONS = {
     "none":       "Feature outlines colored by reflection",
     "intensity":  "Integrated peak area (summed counts) per bin",
     "chi":        "Azimuthal angle χ around the Debye ring",
-    "strain":     "Δ2θ — distance from the reference Bragg angle",
+    "tth_dev":    "Δ2θ — deviation of the measured 2θ from the reference Bragg angle per bin (not a calibrated strain)",
     "chi_breadth": "χ-breadth — FWHM of azimuthal angle across the feature's bins (no rocking data involved)",
-    "strain_bw":  "Spread of Δ2θ across the feature (strain gradient)",
+    "tth_breadth": "Radial breadth — FWHM of Δ2θ across the feature's bins (not a calibrated strain gradient)",
 }
 
 METRIC_2D_TITLES = {
     "none":       "Crystal Segmentation — feature outlines by reflection",
     "intensity":  "Integrated Intensity — peak area per bin",
     "chi":        "χ Angle — azimuthal orientation on Debye ring",
-    "strain":     "Lattice Strain — d-spacing deviation (Δ2θ from reference)",
+    "tth_dev":    "2θ Deviation — Δ2θ from the reference Bragg angle per bin",
     "chi_breadth": "Azimuthal Breadth — χ FWHM per feature",
-    "strain_bw":  "Strain Breadth — lattice parameter gradient across feature",
+    "tth_breadth": "Radial Breadth — Δ2θ FWHM per feature",
 }
 
 
@@ -110,7 +110,7 @@ def load_grid_info():
 
 
 PER_FEATURE_METRICS = {
-    "chi_breadth": "chi_fwhm", "strain_bw": "strain_breadth", "chi": "chi_deg",
+    "chi_breadth": "chi_fwhm", "tth_breadth": "tth_fwhm", "chi": "chi_deg",
 }
 
 
@@ -119,7 +119,7 @@ def _extract_metric(entry, feat, metric):
         return float(entry) if metric == "intensity" else None
     if metric == "intensity":
         return entry.get("integrated", entry.get("intensity", 0))
-    if metric == "strain":
+    if metric == "tth_dev":
         tth = entry.get("tth")
         ref_tth = feat.get("ref_tth")
         if tth is not None and ref_tth is not None:
@@ -143,6 +143,8 @@ def build_device_grids(features, n_rows, n_cols, metric="intensity"):
                 val = feat.get(feat_key)
                 if val is None and feat_key == "chi_fwhm":
                     val = feat.get("rocking_fwhm")  # accept legacy field
+                if val is None and feat_key == "tth_fwhm":
+                    val = feat.get("strain_breadth")  # accept legacy field
                 if val is None:
                     continue
                 for bk in profile:
@@ -162,7 +164,7 @@ def build_device_grids(features, n_rows, n_cols, metric="intensity"):
                         val = _extract_metric(entry, feat, metric)
                         if val is None:
                             continue
-                        if metric == "strain":
+                        if metric == "tth_dev":
                             if np.isnan(grid[r, c]) or abs(val) > abs(grid[r, c]):
                                 grid[r, c] = val
                         else:
@@ -474,6 +476,22 @@ class DeviceMapWindow(QMainWindow):
         self.metric_desc_label.setStyleSheet(
             "color: #666; font-size: 0.9em; font-style: italic; padding: 2px;")
         sl.addWidget(self.metric_desc_label)
+        # Contrast: the colormap spans [min%, max%] percentiles of the metric
+        # values (the colorbar on the right is a legend for that range).
+        ch = QHBoxLayout()
+        ch.addWidget(QLabel("Contrast %:"))
+        self.lo_spin = QSpinBox()
+        self.lo_spin.setRange(0, 100); self.lo_spin.setValue(0)
+        self.lo_spin.setToolTip("Lower percentile — colormap bottom maps here")
+        self.lo_spin.valueChanged.connect(self._redraw)
+        ch.addWidget(self.lo_spin)
+        self.hi_spin = QSpinBox()
+        self.hi_spin.setRange(0, 100); self.hi_spin.setValue(100)
+        self.hi_spin.setToolTip("Upper percentile — colormap top maps here")
+        self.hi_spin.valueChanged.connect(self._redraw)
+        ch.addWidget(self.hi_spin)
+        ch.addStretch()
+        sl.addLayout(ch)
         rl.addWidget(sg)
 
         rl.addWidget(QLabel("  Azimuthal distribution (χ)"))
@@ -588,7 +606,7 @@ class DeviceMapWindow(QMainWindow):
             if not valid.any():
                 continue
             first_fill = valid & np.isnan(combined)
-            if metric == "strain":
+            if metric == "tth_dev":
                 better = valid & np.isfinite(combined) & (np.abs(Z) > np.abs(combined))
             else:
                 better = valid & np.isfinite(combined) & (Z > combined)
@@ -598,10 +616,13 @@ class DeviceMapWindow(QMainWindow):
         if not has.any():
             return combined, 0.0, 1.0
         finite = combined[has]
-        if metric == "intensity":
-            vmin, vmax = 0.0, float(finite.max())
-        else:
-            vmin, vmax = float(finite.min()), float(finite.max())
+        # Colormap spans the [min%, max%] percentile window of the metric values.
+        lo = float(self.lo_spin.value()) if hasattr(self, "lo_spin") else 0.0
+        hi = float(self.hi_spin.value()) if hasattr(self, "hi_spin") else 100.0
+        if hi <= lo:
+            hi = min(100.0, lo + 1.0)
+        vmin = float(np.percentile(finite, lo))
+        vmax = float(np.percentile(finite, hi))
         if abs(vmax - vmin) < 1e-8:
             vmax = vmin + 1
         return combined, vmin, vmax
@@ -688,7 +709,7 @@ class DeviceMapWindow(QMainWindow):
         if cmap is None:
             return
         self.colorbar = pg.ColorBarItem(
-            values=(vmin, vmax), colorMap=cmap,
+            interactive=False, values=(vmin, vmax), colorMap=cmap,
             label=METRIC_ZLABELS.get(self.metric, ""))
         self.glw.addItem(self.colorbar, row=0, col=1)
 

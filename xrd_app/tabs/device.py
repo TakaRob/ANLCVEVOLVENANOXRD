@@ -12,8 +12,9 @@ TAB_META = {
     "scan_dependent": True,
     "general": (
         "Spatial maps across the full bin grid with switchable metrics: integrated "
-        "intensity, lattice strain (Δ2θ), chi orientation, azimuthal breadth "
-        "(χ FWHM), and strain breadth. Chi-range filter with interactive controls."
+        "intensity, 2θ deviation (Δ2θ from the reference Bragg angle), chi "
+        "orientation, azimuthal breadth (χ FWHM), and radial breadth (Δ2θ FWHM). "
+        "Chi-range filter with interactive controls."
     ),
 }
 

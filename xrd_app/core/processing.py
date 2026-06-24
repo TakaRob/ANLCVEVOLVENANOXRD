@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import csv
 import json
+import time
 from pathlib import Path
 from typing import Callable, Union
 
@@ -243,6 +244,44 @@ def run_peaks(
 
 
 # ── Public: combined (peak + shape in one per-frame pass) ──────────
+def _fmt_duration(seconds: float) -> str:
+    """Human-readable duration ("3h 12m", "8m 5s", "42s", "—" for unknown)."""
+    if seconds == float("inf") or seconds != seconds:  # inf or NaN
+        return "—"
+    seconds = int(seconds)
+    h, rem = divmod(seconds, 3600)
+    m, s = divmod(rem, 60)
+    if h:
+        return f"{h}h {m}m"
+    if m:
+        return f"{m}m {s}s"
+    return f"{s}s"
+
+
+def _features_from_by_bin(by_bin: dict) -> list:
+    """Build the viewer-compatible feature list from a ``{bin: {label: pts}}`` map.
+
+    Shared by both combined paths (per-center-bin loop and the global one-pass).
+    Points are coerced to ints; these per-frame detections carry no per-bin
+    intensities, so ``peak_intensity``/``mean_snr`` are null and
+    ``intensity_profile`` is empty.
+    """
+    features, fid = [], 0
+    for bk in sorted(by_bin, key=lambda k: (int(k.split("_")[0]), int(k.split("_")[1]))):
+        row, col = int(bk.split("_")[0]), int(bk.split("_")[1])
+        for label, pts in by_bin[bk].items():
+            for x, y in pts:
+                fid += 1
+                features.append({
+                    "feature_id": fid, "reflection": label,
+                    "detector_x": int(round(x)), "detector_y": int(round(y)),
+                    "center_bin": bk, "center_row": row, "center_col": col,
+                    "n_bins": 1, "peak_intensity": None, "mean_snr": None,
+                    "intensity_profile": {},
+                })
+    return features
+
+
 def run_combined(
     detector_path: Union[str, Path],
     tth_path: Union[str, Path],
@@ -266,6 +305,7 @@ def run_combined(
     are null and ``intensity_profile`` is empty).
     """
     import json as _json
+    import sys as _sys
     det = io.load_module(detector_path)
     tth_map = io.load_tth_map(tth_path)
     degs, deg_labels = io.load_reflections(reflections_path)
@@ -274,13 +314,57 @@ def run_combined(
             grid_mapping = _json.load(f)
     log(f"  Reflections: {deg_labels}")
 
+    # Identity for output files: a sub-foldered detector.py is identified by its
+    # folder name (e.g. "1x1_global_perframe_uf_voigt"), a flat algo by its stem.
+    _dp = Path(detector_path)
+    algo_name = _dp.parent.name if _dp.stem == "detector" else _dp.stem
+
+    # Fast path: a detector exposing run_full_scan does detection + linking +
+    # verification ONCE over the whole scan (reading each frame ~twice) instead
+    # of the per-center-bin loop below that re-reads a (2r+1)^2 window per bin.
+    if hasattr(det, "run_full_scan"):
+        log("  Using global one-pass (run_full_scan): each frame read once, "
+            "not per-center-bin.")
+        t0 = time.time()
+        # The detector parallelises detection with multiprocessing (fork); its
+        # worker functions pickle by module name, so register the dynamically
+        # loaded module under its name for the duration of the call.
+        _prev_mod = _sys.modules.get(det.__name__)
+        _sys.modules[det.__name__] = det
+        try:
+            by_bin = det.run_full_scan(
+                str(bins_h5), tth_map, degs, deg_labels, grid_mapping,
+                progress=progress, log=log, **params)
+        finally:
+            if _prev_mod is not None:
+                _sys.modules[det.__name__] = _prev_mod
+            else:
+                _sys.modules.pop(det.__name__, None)
+        features = _features_from_by_bin(by_bin)
+        log(f"  Combined complete: {len(features)} features in {len(by_bin)} bins "
+            f"({_fmt_duration(time.time() - t0)})")
+        return {
+            "algorithm": algo_name,
+            "bin_size": 1,
+            "n_features": len(features),
+            "by_bin": by_bin,
+            "features": features,
+        }
+
     with h5py.File(str(bins_h5), "r") as h5f:
         bin_keys = sorted(h5f.keys(),
                           key=lambda k: (int(k.split("_")[0]), int(k.split("_")[1])))
     n_bins = len(bin_keys)
+    radius = int(params.get("spatial_radius", 5))
+    per_bin_frames = (2 * radius + 1) ** 2
     log(f"  Running combined pipeline on {n_bins} bins...")
+    log(f"  (per-frame pass: each bin reads up to {per_bin_frames} neighbor "
+        f"frames at spatial_radius={radius} — this is heavy; expect seconds per "
+        f"bin. Progress + ETA below.)")
 
-    by_bin, features, fid = {}, [], 0
+    by_bin, n_feat = {}, 0
+    t_start = time.time()
+    t_last = t_start
     for i, bk in enumerate(bin_keys):
         try:
             validated = det.run_full_pipeline(
@@ -294,24 +378,31 @@ def run_combined(
             if not ipts:
                 continue
             clean[label] = ipts
-            row, col = int(bk.split("_")[0]), int(bk.split("_")[1])
-            for x, y in ipts:
-                fid += 1
-                features.append({
-                    "feature_id": fid, "reflection": label,
-                    "detector_x": x, "detector_y": y,
-                    "center_bin": bk, "center_row": row, "center_col": col,
-                    "n_bins": 1, "peak_intensity": None, "mean_snr": None,
-                    "intensity_profile": {},
-                })
+            n_feat += len(ipts)
         if clean:
             by_bin[bk] = clean
         if progress is not None:
             progress(i + 1, n_bins)
 
+        # Time-based heartbeat: combined per-frame bins can take several seconds
+        # each, so the step-throttled PROGRESS line above can stay silent for a
+        # long time on a large scan. Emit a human-readable rate + ETA after the
+        # first bin and then every ~10 s so it's clear the run is alive.
+        now = time.time()
+        if i == 0 or now - t_last >= 10.0 or i + 1 == n_bins:
+            t_last = now
+            done = i + 1
+            elapsed = now - t_start
+            rate = done / elapsed if elapsed > 0 else 0.0   # bins/sec
+            eta = (n_bins - done) / rate if rate > 0 else float("inf")
+            log(f"  [combined] {done}/{n_bins} bins ({100 * done / n_bins:.1f}%)"
+                f"  ·  {rate * 60:.1f} bins/min  ·  ETA {_fmt_duration(eta)}"
+                f"  ·  {n_feat} features so far")
+
+    features = _features_from_by_bin(by_bin)
     log(f"  Combined complete: {len(features)} features in {len(by_bin)} bins")
     return {
-        "algorithm": Path(detector_path).stem,
+        "algorithm": algo_name,
         "bin_size": 1,
         "n_features": len(features),
         "by_bin": by_bin,

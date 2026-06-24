@@ -53,6 +53,19 @@
       "source": "cvevolve",
       "dev_bin": "1x1",
       "notes": "Developed on 1x1 (CVEvolve, F2 recall-first)."
+    },
+    {
+      "name": "1x1_global_perframe_uf_voigt",
+      "bin_size": "1x1",
+      "file": "1x1_global_perframe_uf_voigt/detector.py",
+      "role": "detector",
+      "kind": "combined",
+      "pipeline": "perframe-global",
+      "holdout_f1": null,
+      "holdout_f2": null,
+      "source": "manual",
+      "dev_bin": "1x1",
+      "notes": "Whole-scan-efficient sibling of 1x1_perframe_uf_voigt_hybrid. Exposes run_full_scan: detect every frame once, Union-Find link across all frames, Voigt-verify each feature once (~50-100x faster than the per-center-bin loop; days -> ~1-2h). Trade-offs: global (not local) background, verify once-per-feature, no radius-2 local-stack supplement (recall trade-off). Not yet holdout-scored."
     }
   ]
 }

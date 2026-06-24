@@ -836,7 +836,10 @@ def run_combined_cmd(bin_size, scan, algorithm, root):
                      ("reflections", refl), ("grid_mapping", gm)]:
         _require(p, label)
 
-    algo = Path(det).stem
+    # Output identity: a sub-foldered detector.py is named by its folder
+    # (e.g. "1x1_global_perframe_uf_voigt"); a flat algorithm by its file stem.
+    detp = Path(det)
+    algo = detp.parent.name if detp.stem == "detector" else detp.stem
     click.echo(f"[combined] detector: {det}\n[combined] bins: {h5}\n")
     result = processing.run_combined(
         detector_path=det, tth_path=tth, reflections_path=refl,
