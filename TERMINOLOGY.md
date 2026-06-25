@@ -73,6 +73,27 @@ full names everywhere.**
 Note the scan-grid axes are **spatial scan positions**, not angles. In the device
 map they are correctly labeled `Col (scan x)` and `Row (scan y)` — keep that.
 
+### Coordinate source (de-skew at the source)
+
+The per-frame `(row, col)` is assigned **once**, in `core/io.py::generate_grid_mapping`,
+and every downstream stage (binning, peak bin-keys, cross-bin linking, device maps,
+aggregate) inherits it. The grid mapping JSON records which lattice it is on via
+`coordinate_source`:
+
+| `coordinate_source` | How `(row, col)` is assigned | When |
+|---|---|---|
+| `positions_xy` | **De-skewed** from true stage **(X, Y)** snapped to a regular lattice (`assign_grid_from_positions`). The canonical system. | Default, when a position CSV with `Y_Position` exists. |
+| `serpentine` | Legacy X-only turn-counting (`build_scan_grid`). | `--rawgrid` bypass, or CSV has no `Y_Position`. |
+| `synthetic` | Regular boustrophedon raster from `n_cols` (`build_regular_grid`). | No position CSV (`--shape`). |
+
+**Orientation is preserved** vs. the legacy serpentine grid: here `row ↔ X`
+(`corr(row, X) = −1.0`) and `col ↔ Y`, anchored by a reference serpentine pass so
+device maps render upright unchanged. The de-skew only fixes the *column*
+registration that stage backlash skewed (`corr(col, Y)` 0.585 → 1.0); it does not
+transpose or flip the map. A legacy mapping with no `coordinate_source` key is
+treated as `serpentine`. To regenerate a scan on the new coordinates: re-run
+`xrd-app make-bins` / `grid` / `peaks` / `shapes`.
+
 ---
 
 ## 3. Morphology and the "rocking" misnomer

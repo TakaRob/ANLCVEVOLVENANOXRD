@@ -575,6 +575,13 @@ px and the row-to-row offset exceeds 5 px — so only *within-row* (horizontal) 
 survive. Binning sums N² frames, stabilising signal and washing out the offset, so the
 blob re-merges. Conclusion: part of the extra 1×1 features is real weak-peak recovery,
 part is **over-segmentation** of single physical features.
+
+> **Now corrected by default.** De-skew has moved into the coordinate system
+> (`coordinate_source: positions_xy`; `core/io.assign_grid_from_positions`), so the
+> standard 1×1 run plotted here is *already* de-skewed — its single-row fraction now
+> reads ≈34%, not the ≈53% of the old serpentine grid. The over-segmentation above is
+> the mechanism the fix removes; Section **D4** rebuilds the legacy grid with
+> `--rawgrid` to show the 53%→34% before/after directly.
 '''
 
 # %%
@@ -637,85 +644,92 @@ if dom_ref and len(comp) >= 2:
 
 # %% [markdown]
 '''
-## D4 — Deskewed linking: does fixing registration merge the slices?
+## D4 — De-skew at the source: `--rawgrid` (serpentine) vs deskewed coordinates
 
-The slicing comes from `link_peaks` joining bins by their **inferred (row, col) lattice**
-(`ShapeAlgorithms/gaussian.py`), which misregisters across serpentine rows. Here we
-re-link the *same* peaks but by each bin's **true physical (X, Y) stage position**
-(from the position CSV) — a 2-D deskew. Two detections link if their bins are within
-~1.6× the natural scan pitch **and** their detector (x, y) agree within 5 px. We compare
-the single-row ("slice") fraction and kept-feature count, standard vs deskewed, for
-1×1 / 2×2 / 3×3.
+De-skew is no longer an optional post-step — it **is** the coordinate system. The
+per-frame `(row, col)` is snapped once from the true stage `(X, Y)` in
+`core/io.assign_grid_from_positions` (recorded as `coordinate_source: positions_xy`),
+so binning, cross-bin linking, and the device map all inherit a faithful lattice with
+no downstream changes. Here we rebuild the pipeline with **`xrd-app grid --rawgrid`**
+(the legacy serpentine, X-only turn-counting grid) and compare it against the default
+deskewed coordinates — *same detector, same SNR, same linker*, only the coordinates
+differ.
 
-Finding (this dataset): deskew cuts the **1×1** slice fraction sharply (≈53%→33%) and
-merges slices into fewer features — it recovers the ~38% of detections whose same-grain
-partner sat one row away but outside the lattice window. For **2×2 and 3×3 it gives no
-benefit** (≈neutral to slightly worse): binning has already averaged out the serpentine
-backlash, so the lattice linking is already correct and re-linking by *approximate* mean
-position can't beat it. **So deskew is a 1×1-specific remedy** — from 2×2 up, just bin.
-What deskew *cannot* fix at any level is the ~45% of positions with no detection at all
-(SNR dropouts) — those need binning or a lower threshold.
+**Mechanism.** The serpentine raster scans alternate rows in opposite directions, so
+stage backlash misregisters the *column* index between adjacent rows
+(`corr(col, Y)=0.585` on the legacy grid). At 1×1 that fragments a single grain into
+**horizontal slices**. Snapping each frame to its true `(X, Y)` cell fixes the
+registration (`corr(col, Y)→1.0`), so the slices merge.
+
+**Finding (this dataset, from this session's experiments):**
+- **1×1**: single-row fraction **≈53% → ≈34%**; kept features **≈1825 → ≈1655** —
+  slices coalesce into whole grains (fewer, healthier features).
+- **2×2 / 3×3**: within noise of rawgrid (kept ≈310 / ≈213). Binning has already
+  averaged out the backlash, so the legacy lattice was already faithful. Crucially,
+  de-skewing **at the source** does *not* inject the re-quantization regression the
+  old after-the-fact prefilter caused (which inflated 2×2 310→422, 3×3 213→328): it
+  fixes coordinates *before* binning rather than re-rounding an already-correct grid.
+
+So the coordinate fix is a pure win at 1×1 and a no-op (not a regression) when binned.
+The device-map A/B below shows the 1×1 horizontal slices merging into blobs.
+
+> **Cost note.** This cell builds a second, isolated `*_rawgrid` pipeline
+> (grid/bins/peaks/shapes) for 1×1/2×2/3×3 and caches it — the 1×1 rebuild is the slow
+> one (per-frame detection over every scan position). Delete the `*_rawgrid*` files in
+> `Binned/` and `Labels/<scan>/` to reclaim space once you've seen the comparison.
 '''
 
 # %%
-import csv as _csv
-from scipy.spatial import cKDTree
+from xrd_app.core import processing as _proc
 
-# physical (X, Y) per frame, once
-_X, _Y = [], []
-with open(DM.position_csv()) as _f:
-    for _r in _csv.DictReader(_f):
-        _X.append(float(_r["X_Position"])); _Y.append(float(_r["Y_Position"]))
-_X, _Y = np.array(_X), np.array(_Y)
-_REF = {l: round(d, 5) for d, l in zip(DEG_LABELS, DEGS)}
+# Shared inputs for the rawgrid rebuild (resolved once).
+_REFLP = DM.reflections()
+_XDIR = DM.xrd_frames_dir()
+_POS = DM.position_csv()
+_SCANNO = DM.scan_number() or 203
+_SHP = DM.shape_script("gaussian")
 
-def _bin_pos(bs):
-    gm = json.load(open(DM.grid_mapping(bin_size=bs)))["bins"]
-    pos = {}
-    for bk, mem in gm.items():
-        idx = [m for m in mem if m < len(_X)]
-        if idx:
-            pos[bk] = (float(np.mean(_X[idx])), float(np.mean(_Y[idx])))
-    return pos
 
-def _link_deskew(pbb, pos, link_tol=5, space_mult=1.6):
-    """Re-link peaks by true physical (X,Y) position instead of the inferred (row,col)
-    lattice. Spatial neighbours = bins within space_mult × the natural scan pitch
-    (median nearest-neighbour spacing); they link if their detector (x,y) also agree
-    within link_tol px. This is a deliberately simple, robust prototype — a production
-    deskew would calibrate per-axis and correct the serpentine backlash explicitly."""
-    from collections import defaultdict
-    keys = [k for k in pbb if k in pos]
-    P = np.array([pos[k] for k in keys])
-    tree = cKDTree(P)
-    d, _ = tree.query(P, k=2)
-    space_tol = space_mult * float(np.median(d[:, 1]))   # 1.6 × natural pitch
-    nodes, nbk = [], defaultdict(list)
-    for ki, k in enumerate(keys):
-        r, c = map(int, k.split("_"))
-        for pi, p in enumerate(pbb[k]):
-            nbk[ki].append(len(nodes)); nodes.append((k, pi, r, c, p["x"], p["y"], p))
-    par = list(range(len(nodes)))
-    def find(a):
-        while par[a] != a:
-            par[a] = par[par[a]]; a = par[a]
-        return a
-    def union(a, b):
-        ra, rb = find(a), find(b)
-        if ra != rb:
-            par[ra] = rb
-    for ki, kj in tree.query_pairs(space_tol):
-        for a in nbk[ki]:
-            xa, ya = nodes[a][4], nodes[a][5]
-            for b in nbk[kj]:
-                if (xa - nodes[b][4]) ** 2 + (ya - nodes[b][5]) ** 2 <= link_tol * link_tol:
-                    union(a, b)
-    comp = defaultdict(list)
-    for i in range(len(nodes)):
-        comp[find(i)].append(i)
-    return [[nodes[i] for i in idxs] for idxs in comp.values()]
+def _raw_paths(bs):
+    """Isolated output paths for the rawgrid (serpentine, --rawgrid) pipeline so it
+    never clobbers the deskewed artifacts the rest of the report reads."""
+    h5 = Path(DM.binned_h5(bs)); gm = Path(DM.grid_mapping(bin_size=bs))
+    return (h5.with_name(f"{h5.stem}_rawgrid{h5.suffix}"),
+            gm.with_name(f"{gm.stem}_rawgrid{gm.suffix}"),
+            DM.labels_dir() / f"{ALGOS[bs]['detector']}_rawgrid_peaks_{bs}x{bs}.json")
+
+
+def _ensure_rawgrid(bs):
+    """Build grid → bin → peaks → shapes on the legacy serpentine X-only grid
+    (deskew=False, the `--rawgrid` path). Cached: each stage is skipped when its
+    file already exists unless FORCE. Returns (kept_features, n_rows, n_cols)."""
+    h5r, gmr, pjr = _raw_paths(bs)
+    quiet = lambda *a, **k: None
+    if FORCE or not gmr.exists():
+        xio.generate_grid_mapping(_XDIR, _POS, bs, scan_number=_SCANNO,
+                                  output=gmr, deskew=False, log=quiet)
+    if FORCE or not h5r.exists():
+        print(f"  building rawgrid bins {bs}x{bs} (one-off; 1×1 is slow) ...")
+        xio.build_bins(gmr, h5r, bin_size=bs, log=quiet)
+    if FORCE or not pjr.exists():
+        print(f"  detecting rawgrid peaks {bs}x{bs} ...")
+        pres = _proc.run_peaks(
+            bins_h5=h5r, tth_path=DM.tth_map(),
+            detector_path=DM.detector_script(ALGOS[bs]["detector"], bin_size=bs),
+            reflections_path=_REFLP, bin_size=bs,
+            snr_threshold=ALGOS[bs]["snr"], log=quiet)
+        json.dump(pres, open(pjr, "w"))
+    raw_peaks = json.load(open(pjr))
+    sres = _proc.run_shapes(
+        peaks=raw_peaks, tth_path=DM.tth_map(), grid_mapping=gmr,
+        reflections_path=_REFLP, bin_size=bs,
+        link_tolerance=ALGOS[bs]["link"], shape_path=_SHP, log=quiet)
+    g = json.load(open(gmr))
+    return sres["kept"], g["n_bin_rows"], g["n_bin_cols"]
+
 
 def _onerow(kept):
+    """Single-row fraction (%) among multi-bin features — the slicing metric."""
     m = []
     for ftr in kept:
         rs = [int(k.split("_")[0]) for k in ftr.get("spatial_extent", []) if "_" in k]
@@ -723,37 +737,87 @@ def _onerow(kept):
             m.append(1.0 if max(rs) - min(rs) == 0 else 0.0)
     return 100 * float(np.mean(m)) if m else 0.0
 
-from xrd_app.ShapeAlgorithms import gaussian as _G
+
 desk_bs = [b for b in [1, 2, 3] if b in READY]
 rows = []
+raw_kept_cache = {}
 for bs in desk_bs:
-    pbb = DATA[bs]["peaks_by_bin"]
-    if not pbb:
+    if not DATA[bs]["features"]:
         continue
-    nr, nc = DATA[bs]["n_rows"], DATA[bs]["n_cols"]
-    f_std = _G.link_peaks(pbb, nr, nc, 5)
-    k_std, _ = _G.characterize_features(f_std, tth_map=TTH, ref_tth_map=_REF)
-    f_dsk = _link_deskew(pbb, _bin_pos(bs), 5)
-    k_dsk, _ = _G.characterize_features(f_dsk, tth_map=TTH, ref_tth_map=_REF)
-    rows.append((bs, len(k_std), _onerow(k_std), len(k_dsk), _onerow(k_dsk)))
-    print(f"{bs}x{bs}: standard kept={len(k_std)} 1-row={_onerow(k_std):.0f}%  |  "
-          f"deskew kept={len(k_dsk)} 1-row={_onerow(k_dsk):.0f}%")
+    print(f"\n=== D4 rawgrid vs deskew {bs}x{bs} ===")
+    k_raw, nr_raw, nc_raw = _ensure_rawgrid(bs)
+    raw_kept_cache[bs] = (k_raw, nr_raw, nc_raw)
+    k_desk = DATA[bs]["features"]
+    rows.append((bs, len(k_raw), _onerow(k_raw), len(k_desk), _onerow(k_desk)))
+    print(f"  rawgrid : kept={len(k_raw):5d}  1-row={_onerow(k_raw):.0f}%")
+    print(f"  deskew  : kept={len(k_desk):5d}  1-row={_onerow(k_desk):.0f}%")
 
 if rows:
     fig, axes = plt.subplots(1, 2, figsize=(13, 4.5))
     x = np.arange(len(rows)); w = 0.38
     lbl = [f"{r[0]}x{r[0]}" for r in rows]
     ax = axes[0]
-    ax.bar(x - w/2, [r[2] for r in rows], w, label="standard (lattice)", color="#d62728")
+    ax.bar(x - w/2, [r[2] for r in rows], w, label="rawgrid (serpentine)", color="#d62728")
     ax.bar(x + w/2, [r[4] for r in rows], w, label="deskew (true X,Y)", color="#2ca02c")
-    ax.set_xticks(x); ax.set_xticklabels(lbl); ax.set_ylabel("single-row feature fraction (%)")
-    ax.set_title("Slicing: deskew should drop 1×1 sharply"); ax.legend()
+    ax.set_xticks(x); ax.set_xticklabels(lbl)
+    ax.set_ylabel("single-row feature fraction (%)")
+    ax.set_title("Slicing: deskew coords drop 1×1 sharply"); ax.legend()
     ax = axes[1]
-    ax.bar(x - w/2, [r[1] for r in rows], w, label="standard", color="#d62728")
+    ax.bar(x - w/2, [r[1] for r in rows], w, label="rawgrid", color="#d62728")
     ax.bar(x + w/2, [r[3] for r in rows], w, label="deskew", color="#2ca02c")
-    ax.set_xticks(x); ax.set_xticklabels(lbl); ax.set_ylabel("kept features")
-    ax.set_title("Kept-feature count (fewer, merged = healthier)"); ax.legend()
-    show(fig, "D4_deskew_compare.png")
+    ax.set_xticks(x); ax.set_xticklabels(lbl)
+    ax.set_ylabel("kept features")
+    ax.set_title("Kept count (1×1 fewer = slices merged; binned ≈ unchanged)"); ax.legend()
+    show(fig, "D4_rawgrid_vs_deskew.png")
+
+
+# Device-map A/B at 1×1: the serpentine horizontal slices merging into blobs.
+def _count_grid(features, nr, nc, ref):
+    """Per-bin feature COUNT (occupancy) for one reflection — works for shapes
+    (intensity_profile / spatial_extent bins) without needing intensities."""
+    g = np.zeros((nr, nc))
+    for f in features:
+        if f.get("reflection") != ref:
+            continue
+        bins = list(f.get("intensity_profile", {}).keys()) or \
+            f.get("spatial_extent", []) or [f.get("center_bin", "")]
+        for bk in bins:
+            p = str(bk).split("_")
+            if len(p) != 2:
+                continue
+            try:
+                r, c = int(p[0]), int(p[1])
+            except ValueError:
+                continue
+            if 0 <= r < nr and 0 <= c < nc:
+                g[r, c] += 1
+    g[g == 0] = np.nan
+    return g
+
+
+if 1 in raw_kept_cache and DATA.get(1, {}).get("features"):
+    k_raw, nr_raw, nc_raw = raw_kept_cache[1]
+    k_desk = DATA[1]["features"]; nr_d, nc_d = DATA[1]["n_rows"], DATA[1]["n_cols"]
+    _refs_d = [f["reflection"] for f in k_desk]
+    common = {f["reflection"] for f in k_raw} & set(_refs_d)
+    if common:
+        tgt = max(common, key=_refs_d.count)
+        fig, axes = plt.subplots(1, 2, figsize=(13, 5))
+        for ax, feats, nr, nc, title in (
+            (axes[0], k_raw, nr_raw, nc_raw, "rawgrid (serpentine, --rawgrid)"),
+            (axes[1], k_desk, nr_d, nc_d, "deskew (true X,Y — default)"),
+        ):
+            g = _count_grid(feats, nr, nc, tgt)
+            im = ax.imshow(g, cmap="viridis", origin="upper", aspect="equal")
+            fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04, label="features / bin")
+            n = sum(1 for f in feats if f["reflection"] == tgt)
+            ax.set_title(f"{title}\n{nr}×{nc} grid · '{tgt}' ({n} features)")
+            ax.set_xlabel("col (scan x)"); ax.set_ylabel("row (scan y)")
+        fig.suptitle(f"1×1 device map — rawgrid horizontal slices merge into blobs "
+                     f"under deskewed coordinates ('{tgt}')")
+        show(fig, "D4_device_ab_1x1.png")
+    else:
+        print("No reflection shared by the rawgrid and deskew 1×1 features.")
 
 
 # %% [markdown]
@@ -1141,3 +1205,5 @@ else:
 End of report. Edit the CONFIG and ALGORITHM REGISTRY cells and re-run to compare
 detectors, bin sizes, or projects.
 '''
+
+# %%

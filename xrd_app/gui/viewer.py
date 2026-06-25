@@ -144,6 +144,13 @@ def list_shape_catalogs():
     return sorted(Path(RESULTS_DIR).glob(f"*_shapes_{_BIN_SIZE}x{_BIN_SIZE}.json"))
 
 
+def list_shape_catalogs_for(bin_size):
+    """Shape-output JSONs for an arbitrary bin size (used by View 1×1)."""
+    if RESULTS_DIR is None:
+        return []
+    return sorted(Path(RESULTS_DIR).glob(f"*_shapes_{bin_size}x{bin_size}.json"))
+
+
 def load_features_from_shapes(path):
     """(kept, filtered) from a ``*_shapes_*.json`` (carries both arrays)."""
     with open(path) as f:
@@ -281,8 +288,28 @@ class HeatmapView(pg.GraphicsLayoutWidget):
         self._grid_data = None
         self._grid_r_lo = 0
         self._grid_c_lo = 0
+        self._corner_widget = None
         self.plot.scene().sigMouseMoved.connect(self._on_move)
         self.plot.scene().sigMouseClicked.connect(self._on_click)
+
+    def set_corner_widget(self, w):
+        """Host a floating widget pinned to the top-right of the heatmap."""
+        self._corner_widget = w
+        if w is not None:
+            w.setParent(self)
+            self._reposition_corner()
+
+    def _reposition_corner(self):
+        w = self._corner_widget
+        if w is None or not w.isVisible():
+            return
+        w.adjustSize()
+        w.move(max(0, self.width() - w.width() - 8), 8)
+        w.raise_()
+
+    def resizeEvent(self, ev):
+        super().resizeEvent(ev)
+        self._reposition_corner()
 
     def set_click_callback(self, cb):
         self._click_cb = cb
@@ -641,6 +668,50 @@ class _ExpansionWorker(QThread):
         self.finished.emit(self._job_id, feat, members)
 
 
+class _RawIntensityWorker(QThread):
+    """Sample measured intensity from each 1×1 raw frame in a feature footprint.
+
+    For each bin it reads that single raw frame and takes the max / sum in a
+    window around the feature's detector peak — the high-def "what's actually
+    there" layer used when no 1×1 shapes catalog exists to fill the heatmap.
+    """
+
+    progress = pyqtSignal(int, int)
+    finished = pyqtSignal(int, object)
+
+    def __init__(self, job_id, viewer, cells, det_x, det_y, win=4):
+        super().__init__()
+        self._job_id = job_id
+        self._viewer = viewer
+        self._cells = cells
+        self._det_x = det_x
+        self._det_y = det_y
+        self._win = win
+
+    def run(self):
+        v = self._viewer
+        out = {}
+        n = len(self._cells)
+        win = self._win
+        for i, bk in enumerate(self._cells):
+            try:
+                with v.h5_lock:
+                    img = v._get_sub_source().image(bk)
+            except Exception:
+                img = None
+            if img is not None:
+                y0 = max(0, self._det_y - win)
+                y1 = min(img.shape[0], self._det_y + win + 1)
+                x0 = max(0, self._det_x - win)
+                x1 = min(img.shape[1], self._det_x + win + 1)
+                patch = img[y0:y1, x0:x1]
+                if patch.size:
+                    out[bk] = {"intensity": float(patch.max()),
+                               "integrated": float(patch.sum())}
+            self.progress.emit(i + 1, n)
+        self.finished.emit(self._job_id, out)
+
+
 # ── Main Window ────────────────────────────────────────────────────
 
 class FeatureViewer(QMainWindow):
@@ -679,6 +750,24 @@ class FeatureViewer(QMainWindow):
         self._vmax_pct = 98.5
         self._display_metric = "integrated"
         self._detector_other_features = []
+
+        # View 1×1: re-render the selected binned feature's footprint at 1×1
+        # (unbinned) resolution from a 1×1 shapes catalog, for high-def review
+        # and 1×1-vs-binned discrepancy spotting.
+        self._view_1x1 = False
+        self._sel_sub_catalog = None       # "<algo>_shapes_1x1.json" or None
+        self._sub_features = None          # [feat, …] kept+filtered from 1×1 cat
+        self._sub_bin_to_features = {}     # 1×1 bin_key → [feat, …]
+        self._sub_source = None            # io.BinImageSource for 1×1 raw frames
+        self._sub_raw_cache = OrderedDict()
+        self._n_rows_1x1 = None
+        self._n_cols_1x1 = None
+        self._grid_is_1x1 = False          # heatmap currently drawn in 1×1 space
+        self._heat_outline_items = []      # white per-feature outlines (1×1 view)
+        # On-demand "Load intensity from raw" layer (used when no 1×1 catalog):
+        # {bin_key: {"intensity", "integrated"}}, sampled for the current feature.
+        self._sub_raw_intensity = None
+        self._raw_intensity_worker = None
 
         self._explore_mode = False
         self._explore_peaks = []
@@ -799,31 +888,201 @@ class FeatureViewer(QMainWindow):
             self._raw_image_cache.popitem(last=False)
         return image
 
+    def _denoise(self, raw, cache_key):
+        """Apply the active background subtraction to ``raw`` (cached per key)."""
+        algo = self._noise_algo
+        ck = (cache_key, algo)
+        if ck not in self._noise_cache:
+            valid = self._tth_radial_counts > 50
+            profile = compute_radial_profile(raw, self._tth_bin_indices, self._n_tth_bins)
+            fits = fit_all_models(self._tth_centers, profile, valid,
+                                  self._tth_edges[0], self._tth_edges[-1])
+            self._noise_cache[ck] = fits
+        fits = self._noise_cache[ck]
+        if algo in fits:
+            bg = build_background_image(
+                self._tth_map, self._tth_centers, fits[algo]["profile"],
+                self._tth_bin_indices)
+            cleaned = subtract_background(raw, bg,
+                                          strength=self._noise_strength,
+                                          shift=self._noise_shift)
+            return np.clip(cleaned, 0, None)
+        return raw
+
     def _get_display_image(self, bin_key):
         raw = self._load_raw_image(bin_key)
         if raw is None:
             return None
+        return self._denoise(raw, bin_key) if self._noise_enabled else raw
 
-        if self._noise_enabled:
-            algo = self._noise_algo
-            cache_key = (bin_key, algo)
-            if cache_key not in self._noise_cache:
-                valid = self._tth_radial_counts > 50
-                profile = compute_radial_profile(raw, self._tth_bin_indices, self._n_tth_bins)
-                fits = fit_all_models(self._tth_centers, profile, valid,
-                                      self._tth_edges[0], self._tth_edges[-1])
-                self._noise_cache[cache_key] = fits
-            fits = self._noise_cache[cache_key]
-            if algo in fits:
-                bg = build_background_image(
-                    self._tth_map, self._tth_centers, fits[algo]["profile"],
-                    self._tth_bin_indices)
-                cleaned = subtract_background(raw, bg,
-                                              strength=self._noise_strength,
-                                              shift=self._noise_shift)
-                return np.clip(cleaned, 0, None)
+    # ── View 1×1 (high-def sub-bin) data ───────────────────────────
 
-        return raw
+    def _get_sub_display_image(self, bin_key):
+        """Display image for a single 1×1 (unbinned) bin = one raw frame."""
+        raw = self._load_sub_raw_image(bin_key)
+        if raw is None:
+            return None
+        return self._denoise(raw, ("1x1", bin_key)) if self._noise_enabled else raw
+
+    def _get_sub_source(self):
+        """Lazily open the 1×1 raw-frame image source for the current scan."""
+        with self.h5_lock:
+            if self._sub_source is None:
+                self._sub_source = io.open_bin_source(_DM, 1, self._scan)
+            return self._sub_source
+
+    def _load_sub_raw_image(self, bin_key):
+        if bin_key in self._sub_raw_cache:
+            self._sub_raw_cache.move_to_end(bin_key)
+            return self._sub_raw_cache[bin_key]
+        try:
+            with self.h5_lock:
+                image = self._get_sub_source().image(bin_key)
+        except Exception:
+            return None
+        if image is None:
+            return None
+        self._sub_raw_cache[bin_key] = image
+        if len(self._sub_raw_cache) > self._cache_max:
+            self._sub_raw_cache.popitem(last=False)
+        return image
+
+    def _load_sub_catalog(self):
+        """Lazy-load + index the selected 1×1 shapes catalog (kept+filtered)."""
+        if self._sub_features is not None:
+            return self._sub_features
+        feats = []
+        if RESULTS_DIR is not None and self._sel_sub_catalog:
+            p = Path(RESULTS_DIR) / self._sel_sub_catalog
+            if p.exists():
+                try:
+                    kept, filtered = load_features_from_shapes(p)
+                    feats = list(kept) + list(filtered)
+                except Exception:
+                    feats = []
+        self._sub_features = feats
+        self._sub_bin_to_features = defaultdict(list)
+        for f in feats:
+            for bk in f.get("spatial_extent", []):
+                self._sub_bin_to_features[bk].append(f)
+        # 1×1 grid dims for click clamping; fall back to binned · bin_size.
+        self._n_rows_1x1 = self._n_cols_1x1 = None
+        try:
+            with open(_DM.grid_mapping(bin_size=1)) as f:
+                gm = json.load(f)
+            self._n_rows_1x1 = gm.get("n_bin_rows")
+            self._n_cols_1x1 = gm.get("n_bin_cols")
+        except Exception:
+            pass
+        if not self._n_rows_1x1:
+            self._n_rows_1x1 = self._n_rows * self._bin_size
+            self._n_cols_1x1 = self._n_cols * self._bin_size
+        return feats
+
+    def _reset_sub_state(self):
+        """Drop cached 1×1 catalog / source / images (on scan or bin change)."""
+        with self.h5_lock:
+            if self._sub_source is not None:
+                try:
+                    self._sub_source.close()
+                except Exception:
+                    pass
+                self._sub_source = None
+        self._sub_raw_cache.clear()
+        self._sub_features = None
+        self._sub_bin_to_features = {}
+        self._sub_raw_intensity = None
+        self._n_rows_1x1 = self._n_cols_1x1 = None
+
+    def _populate_sub_catalog_combo(self):
+        """Fill the 1×1 shapes-catalog dropdown; default to newest."""
+        self.sub_catalog_combo.blockSignals(True)
+        self.sub_catalog_combo.clear()
+        cats = list_shape_catalogs_for(1)
+        if cats:
+            names = {p.name for p in cats}
+            for p in cats:
+                self.sub_catalog_combo.addItem(p.name, p.name)
+            if self._sel_sub_catalog not in names:
+                self._sel_sub_catalog = cats[-1].name
+            i = self.sub_catalog_combo.findData(self._sel_sub_catalog)
+            self.sub_catalog_combo.setCurrentIndex(i if i >= 0 else len(cats) - 1)
+        else:
+            self.sub_catalog_combo.addItem("(no 1×1 shapes catalog)", None)
+            self._sel_sub_catalog = None
+        self.sub_catalog_combo.blockSignals(False)
+
+    def _on_sub_catalog_changed(self, _idx):
+        self._sel_sub_catalog = self.sub_catalog_combo.currentData()
+        self._sub_features = None          # force reload + re-index
+        self._sub_raw_intensity = None     # catalog changed → drop sampled layer
+        self._load_sub_catalog()
+        if self._view_1x1:
+            self._on_feature_changed()
+        self._save_state()
+
+    # ── On-demand raw-intensity layer (no-catalog fallback) ────────
+
+    _MAX_RAW_SAMPLE_CELLS = 600  # cap so a whole-device feature can't stall IO
+
+    def _update_raw_btn_visibility(self):
+        """Show the 'Load intensity from raw' button only when it's useful:
+        1×1 view on, no shapes catalog, and nothing sampled yet."""
+        btn = getattr(self, "raw_intensity_btn", None)
+        if btn is None:
+            return
+        show = (self._view_1x1 and self._bin_size != 1
+                and not self._sub_features and not self._sub_raw_intensity)
+        btn.setVisible(show)
+        if show:
+            self.heatmap_canvas._reposition_corner()
+
+    def _on_load_raw_intensity(self):
+        feat = self._current_feature()
+        if feat is None:
+            return
+        bs = self._bin_size
+        seen, cells = set(), []
+        for bk in feat.get("spatial_extent", []):
+            for s in io.subbin_keys(bk, bs):
+                if s not in seen:
+                    seen.add(s)
+                    cells.append(s)
+        if not cells:
+            return
+        if len(cells) > self._MAX_RAW_SAMPLE_CELLS:
+            QMessageBox.information(
+                self, "Region too large",
+                f"This feature covers {len(cells)} 1×1 scans — too many to sample "
+                f"quickly from raw frames (limit {self._MAX_RAW_SAMPLE_CELLS}).\n\n"
+                "Pick a smaller feature, or build a 1×1 shapes catalog.")
+            return
+        self.raw_intensity_btn.setEnabled(False)
+        self.raw_intensity_btn.setText(f"Loading 0/{len(cells)}…")
+        self._next_job_id += 1
+        job = self._next_job_id
+        w = _RawIntensityWorker(job, self, cells, int(feat["detector_x"]),
+                                int(feat["detector_y"]))
+        w.progress.connect(self._on_raw_intensity_progress)
+        w.finished.connect(self._on_raw_intensity_done)
+        self._raw_intensity_worker = w   # keep a ref so it isn't GC'd
+        w.start()
+
+    def _on_raw_intensity_progress(self, i, n):
+        self.raw_intensity_btn.setText(f"Loading {i}/{n}…")
+
+    def _on_raw_intensity_done(self, _job_id, result):
+        self.raw_intensity_btn.setEnabled(True)
+        self.raw_intensity_btn.setText("Load intensity from raw")
+        if not result:
+            self.raw_intensity_btn.setText("No raw frames found")
+            return
+        self._sub_raw_intensity = result
+        feat = self._current_feature()
+        if feat is not None:
+            self._render_heatmap(feat)
+            self._render_isometric(feat)
+        self._update_raw_btn_visibility()   # hides it now that data is loaded
 
     # ── UI ─────────────────────────────────────────────────────────
 
@@ -868,6 +1127,23 @@ class FeatureViewer(QMainWindow):
         self.explore_cb.setStyleSheet("QCheckBox { color: #f0a030; }")
         self.explore_cb.stateChanged.connect(self._on_explore_toggled)
         cb_bar.addWidget(self.explore_cb)
+
+        # View 1×1: same feature footprint, redrawn at unbinned resolution.
+        self.view1x1_cb = QCheckBox("View 1×1")
+        self.view1x1_cb.setToolTip(
+            "Re-render this feature's area at 1×1 (unbinned) resolution from a "
+            "1×1 shapes catalog.\nClick a cell to load that single scan's raw "
+            "frame; distinct 1×1 features are outlined in white.")
+        self.view1x1_cb.setStyleSheet("QCheckBox { color: #4ec9ff; }")
+        self.view1x1_cb.setEnabled(self._bin_size != 1)
+        self.view1x1_cb.stateChanged.connect(self._on_view1x1_toggled)
+        cb_bar.addWidget(self.view1x1_cb)
+        self.sub_catalog_combo = QComboBox()
+        self.sub_catalog_combo.setMinimumWidth(170)
+        self.sub_catalog_combo.setToolTip("Which 1×1 shapes catalog to compare against")
+        self.sub_catalog_combo.activated.connect(self._on_sub_catalog_changed)
+        self.sub_catalog_combo.setVisible(False)
+        cb_bar.addWidget(self.sub_catalog_combo)
         cb_bar.addStretch()
         # Heatmap contrast: the colormap spans [min%, max%] percentiles of the
         # grid values (the colorbar on the right is just a legend for that range).
@@ -888,6 +1164,23 @@ class FeatureViewer(QMainWindow):
         self.heatmap_canvas = HeatmapView()
         self.heatmap_canvas.set_click_callback(self._on_heatmap_click)
         self.heatmap_canvas.set_hover_callback(self._on_heatmap_hover)
+        # Floating top-right action: sample measured intensity from raw frames
+        # when there's no 1×1 shapes catalog to fill the high-def heatmap.
+        self.raw_intensity_btn = QPushButton("Load intensity from raw")
+        self.raw_intensity_btn.setToolTip(
+            "No 1×1 shapes catalog — sample measured peak intensity from each\n"
+            "1×1 raw frame in this feature's footprint to fill the heatmap.")
+        self.raw_intensity_btn.setCursor(Qt.PointingHandCursor)
+        self.raw_intensity_btn.setStyleSheet(
+            "QPushButton { background: rgba(40,80,100,220); color: #d8f4ff; "
+            "border: 1px solid #4ec9ff; border-radius: 3px; padding: 3px 8px; "
+            "font-size: 0.8em; }"
+            "QPushButton:hover { background: rgba(60,110,135,235); }"
+            "QPushButton:disabled { background: rgba(50,50,50,220); color: #888; "
+            "border-color: #555; }")
+        self.raw_intensity_btn.clicked.connect(self._on_load_raw_intensity)
+        self.heatmap_canvas.set_corner_widget(self.raw_intensity_btn)
+        self.raw_intensity_btn.hide()
         left_splitter.addWidget(self.heatmap_canvas)
 
         self.iso_canvas = IsometricCanvas()
@@ -1187,6 +1480,18 @@ class FeatureViewer(QMainWindow):
         self._raw_image_cache.clear()
         self._image_cache.clear()
         self._noise_cache.clear()
+        self._reset_sub_state()
+        self.view1x1_cb.blockSignals(True)
+        self.view1x1_cb.setEnabled(self._bin_size != 1)
+        if self._bin_size == 1 and self._view_1x1:
+            self.view1x1_cb.setChecked(False)
+            self._view_1x1 = False
+            self.sub_catalog_combo.setVisible(False)
+            self._grid_is_1x1 = False
+        self.view1x1_cb.blockSignals(False)
+        if self._view_1x1:
+            self._populate_sub_catalog_combo()
+            self._load_sub_catalog()
         self._clear_explore_rects()
         self._pending_features = []
         self._explore_feature = None
@@ -1529,17 +1834,25 @@ class FeatureViewer(QMainWindow):
             self.info_label.setText("No feature selected")
             return
         self._highlight_bin = None
+        self._sub_raw_intensity = None   # sampled layer is per-feature
         self._update_info(feat)
         self._render_heatmap(feat)
         self._render_isometric(feat)
         self._render_location(feat)
-        self._selected_bin = feat.get("center_bin")
         if self._explore_mode:
             self._explore_bin = feat.get("center_bin")
             self._clear_explore_rects()
         self._region_shown = False
         self.region_btn.setText("Show region features")
-        self._load_detector_image(feat["center_bin"], feat)
+        if self._view_1x1 and self._bin_size != 1:
+            # Land on the central 1×1 scan of the feature's footprint.
+            sub = self._center_subbin(feat)
+            center_key = f"{sub[0]}_{sub[1]}" if sub else feat.get("center_bin")
+            self._selected_bin = center_key
+            self._load_detector_image_1x1(center_key, feat)
+        else:
+            self._selected_bin = feat.get("center_bin")
+            self._load_detector_image(feat["center_bin"], feat)
 
     # ── Device location mini-map ──────────────────────────────────────
 
@@ -1720,6 +2033,12 @@ class FeatureViewer(QMainWindow):
     # ── Heatmap ────────────────────────────────────────────────────
 
     def _render_heatmap(self, feat):
+        if self._view_1x1 and self._bin_size != 1:
+            self._render_heatmap_1x1(feat)
+            return
+        self._clear_heat_outlines()
+        self._grid_is_1x1 = False
+        self._update_raw_btn_visibility()
         hv = self.heatmap_canvas
         Z, z_max, bounds = self._build_feature_grid(feat)
         if Z is None:
@@ -1755,6 +2074,176 @@ class FeatureViewer(QMainWindow):
             f"Spatial heatmap — intensity = {mode_str}<br>"
             f"{ref} #{feat.get('feature_id', '?')}, {cat}, {feat['n_bins']} bins",
             color="w", size="9pt")
+
+    # ── View 1×1 rendering ─────────────────────────────────────────
+
+    def _active_grid(self, feat):
+        """Dispatch the heatmap/iso grid builder by current view mode."""
+        if self._view_1x1 and self._bin_size != 1:
+            return self._build_feature_grid_1x1(feat)
+        return self._build_feature_grid(feat)
+
+    def _center_subbin(self, feat):
+        """The binned feature's centre bin mapped to its central 1×1 bin."""
+        cb = self._parse_bin(feat.get("center_bin", ""))
+        if cb is None:
+            return None
+        r, c = cb
+        bs = self._bin_size
+        return (r * bs + bs // 2, c * bs + bs // 2)
+
+    def _build_feature_grid_1x1(self, feat):
+        """Intensity grid over the feature's footprint at 1×1 resolution.
+
+        The region is the binned feature's spatial extent expanded to 1×1 bins
+        (plus a one-binned-cell margin); cells are filled from the 1×1 shapes
+        catalog (same reflection), so empty cells mark where 1×1 detection found
+        nothing. Returns (Z, z_max, bounds) in 1×1 grid coords, or (None,)*3.
+        """
+        extent = feat.get("spatial_extent", [])
+        if not extent:
+            return None, None, None
+        self._load_sub_catalog()
+        bs = self._bin_size
+        ref = feat.get("reflection")
+        sub_cells = []
+        for bk in extent:
+            sub_cells.extend(io.subbin_keys(bk, bs))
+        rows = [int(k.split("_")[0]) for k in sub_cells]
+        cols = [int(k.split("_")[1]) for k in sub_cells]
+        if not rows:
+            return None, None, None
+        pad = bs
+        r_lo, r_hi = min(rows) - pad, max(rows) + pad
+        c_lo, c_hi = min(cols) - pad, max(cols) + pad
+        nr = r_hi - r_lo + 1
+        nc = c_hi - c_lo + 1
+        Z = np.zeros((nr, nc))
+        if self._sub_raw_intensity:
+            # Measured layer sampled from raw frames (no-catalog fallback).
+            for bk, entry in self._sub_raw_intensity.items():
+                pr = bk.split("_")
+                if len(pr) != 2:
+                    continue
+                r, c = int(pr[0]), int(pr[1])
+                ri, ci = r - r_lo, c - c_lo
+                if 0 <= ri < nr and 0 <= ci < nc:
+                    Z[ri, ci] = self._get_profile_value(entry)
+        else:
+            for f in self._sub_features or []:
+                if ref is not None and f.get("reflection") != ref:
+                    continue
+                for bk, entry in f.get("intensity_profile", {}).items():
+                    pr = bk.split("_")
+                    if len(pr) != 2:
+                        continue
+                    r, c = int(pr[0]), int(pr[1])
+                    ri, ci = r - r_lo, c - c_lo
+                    if 0 <= ri < nr and 0 <= ci < nc:
+                        Z[ri, ci] = max(Z[ri, ci], self._get_profile_value(entry))
+        z_max = float(Z.max()) if Z.max() > 0 else 1.0
+        return Z, z_max, (r_lo, r_hi, c_lo, c_hi)
+
+    def _region_sub_feats(self, feat, bounds):
+        """Distinct same-reflection 1×1 features with a cell inside ``bounds``."""
+        r_lo, r_hi, c_lo, c_hi = bounds
+        ref = feat.get("reflection")
+        seen, out = set(), []
+        for f in self._sub_features or []:
+            if ref is not None and f.get("reflection") != ref:
+                continue
+            fid = f.get("feature_id", id(f))
+            if fid in seen:
+                continue
+            for bk in f.get("spatial_extent", []):
+                pr = bk.split("_")
+                if len(pr) == 2:
+                    r, c = int(pr[0]), int(pr[1])
+                    if r_lo <= r <= r_hi and c_lo <= c <= c_hi:
+                        seen.add(fid)
+                        out.append(f)
+                        break
+        return out
+
+    def _clear_heat_outlines(self):
+        for it in self._heat_outline_items:
+            try:
+                self.heatmap_canvas.plot.removeItem(it)
+            except Exception:
+                pass
+        self._heat_outline_items = []
+
+    _MAX_OUTLINE_RECTS = 400  # guard against huge features (whole-device blobs)
+
+    def _draw_1x1_outlines(self, feat, bounds):
+        """Outline each distinct 1×1 feature's cells in white (only if >1)."""
+        self._clear_heat_outlines()
+        feats = self._region_sub_feats(feat, bounds)
+        if len(feats) < 2:
+            return
+        r_lo, r_hi, c_lo, c_hi = bounds
+        for f in feats:
+            if len(self._heat_outline_items) >= self._MAX_OUTLINE_RECTS:
+                break  # too many cells to outline cleanly; skip the rest
+            for bk in f.get("spatial_extent", []):
+                pr = bk.split("_")
+                if len(pr) != 2:
+                    continue
+                r, c = int(pr[0]), int(pr[1])
+                if not (r_lo <= r <= r_hi and c_lo <= c <= c_hi):
+                    continue
+                rect = QGraphicsRectItem(c - 0.5, r - 0.5, 1, 1)
+                pen = QPen(_qcolor("w"))
+                pen.setCosmetic(True)
+                pen.setWidthF(1.5)
+                rect.setPen(pen)
+                rect.setBrush(QBrush(Qt.NoBrush))
+                rect.setZValue(7)
+                self.heatmap_canvas.plot.addItem(rect)
+                self._heat_outline_items.append(rect)
+
+    def _render_heatmap_1x1(self, feat):
+        hv = self.heatmap_canvas
+        Z, z_max, bounds = self._build_feature_grid_1x1(feat)
+        self._grid_is_1x1 = True
+        if Z is None or bounds is None:
+            self._clear_heat_outlines()
+            hv.img.clear()
+            hv._grid_data = None
+            hv.set_markers(None, None)
+            self._update_heatmap_colorbar(None, None, None)
+            hv.plot.setTitle("No 1×1 data in region", color="w", size="9pt")
+            self._update_raw_btn_visibility()
+            return
+        r_lo, r_hi, c_lo, c_hi = bounds
+        grid = np.where(Z > 0, Z, np.nan)
+        hv._grid_data = grid
+        hv._grid_r_lo = r_lo
+        hv._grid_c_lo = c_lo
+        nr, nc = grid.shape
+
+        cmap = _get_cmap(self._cmap_name)
+        vmin, vmax = self._heat_levels(grid, z_max)
+        rgba = _scalar_to_rgba(grid, vmin, vmax, cmap)
+        hv.img.setImage(rgba, autoLevels=False)
+        hv.img.setRect(QRectF(c_lo - 0.5, r_lo - 0.5, nc, nr))
+        self._update_heatmap_colorbar(cmap, vmin, vmax)
+
+        self._draw_1x1_outlines(feat, bounds)
+        center = self._center_subbin(feat)
+        highlight = self._parse_bin(self._highlight_bin)
+        hv.set_markers(center, highlight)
+
+        mode_str = "peak pixel" if self._display_metric == "intensity" else "area under curve"
+        if self._sub_raw_intensity:
+            src_str = f"raw measured ({len(self._sub_raw_intensity)} scans)"
+        else:
+            src_str = f"{len(self._region_sub_feats(feat, bounds))} 1×1 feature(s)"
+        hv.plot.setTitle(
+            f"1×1 high-def — intensity = {mode_str}<br>"
+            f"{feat['reflection']} #{feat.get('feature_id', '?')} area · {src_str}",
+            color="w", size="9pt")
+        self._update_raw_btn_visibility()
 
     @staticmethod
     def _parse_bin(bin_key):
@@ -1813,7 +2302,7 @@ class FeatureViewer(QMainWindow):
         ax.set_facecolor("#1a1a1a")
         self.iso_canvas.fig.patch.set_facecolor("#1a1a1a")
 
-        Z, z_max, bounds = self._build_feature_grid(feat)
+        Z, z_max, bounds = self._active_grid(feat)
         if Z is None:
             ax.set_title("No profile data", color="white", fontsize=9)
             self.iso_canvas.draw_idle()
@@ -2009,7 +2498,10 @@ class FeatureViewer(QMainWindow):
     def _update_heatmap_marker(self):
         """Move the cyan selection marker without rebuilding the heatmap image."""
         feat = self._explore_feature if self._explore_mode else self._current_feature()
-        center = self._parse_bin(feat.get("center_bin", "")) if feat else None
+        if self._grid_is_1x1 and self._view_1x1 and feat is not None:
+            center = self._center_subbin(feat)
+        else:
+            center = self._parse_bin(feat.get("center_bin", "")) if feat else None
         highlight = self._parse_bin(self._highlight_bin)
         self.heatmap_canvas.set_markers(center, highlight)
 
@@ -2077,6 +2569,9 @@ class FeatureViewer(QMainWindow):
         feat = self._explore_feature if self._explore_mode else self._current_feature()
         if feat is None:
             return
+        if self._grid_is_1x1 and self._view_1x1:
+            self._on_heatmap_click_1x1(row, col, feat)
+            return
         if 0 <= row < self._n_rows and 0 <= col < self._n_cols:
             bin_key = f"{row}_{col}"
             # Toggle: clicking same bin deselects (no highlight, all solid)
@@ -2093,6 +2588,94 @@ class FeatureViewer(QMainWindow):
             self._load_detector_image(bin_key, feat)
             self._update_iso_alpha()
             self._update_heatmap_marker()
+
+    def _on_heatmap_click_1x1(self, row, col, feat):
+        """Click a 1×1 cell: load that single scan's raw frame + show metadata."""
+        nr = self._n_rows_1x1 or 10 ** 9
+        nc = self._n_cols_1x1 or 10 ** 9
+        if not (0 <= row < nr and 0 <= col < nc):
+            return
+        bin_key = f"{row}_{col}"
+        if bin_key == self._highlight_bin:          # toggle off
+            self._highlight_bin = None
+            self._update_heatmap_marker()
+            return
+        self._highlight_bin = bin_key
+        self._selected_bin = bin_key
+        self._load_detector_image_1x1(bin_key, feat)
+        self._update_info_1x1(bin_key)
+        self._update_heatmap_marker()
+        self._render_isometric(feat)
+
+    def _load_detector_image_1x1(self, bin_key, feat):
+        """Detector panel = the one raw frame for this 1×1 bin (one scan)."""
+        self._clear_explore_rects()
+        cleaned = self._get_sub_display_image(bin_key)
+        dv = self.detector_canvas
+        if cleaned is None:
+            dv.clear_image()
+            dv.set_title(f"1×1 bin {bin_key} — raw frame not found")
+            return
+        display = cleaned.copy()
+        if self._log_scale:
+            display = np.log1p(np.clip(display, 0, None))
+        vmin, vmax = self._percentiles(display)
+        dv.show_image(display, vmin, vmax, self._cmap_name,
+                      self.reverse_cb.isChecked())
+
+        # 1×1 features detected in this scan: white circles + IDs.
+        self._detector_other_features = []
+        for other in self._sub_bin_to_features.get(bin_key, []):
+            prof = other.get("intensity_profile", {}).get(bin_key, {})
+            ox = int(prof.get("det_x", other.get("detector_x", 0)))
+            oy = int(prof.get("det_y", other.get("detector_y", 0)))
+            self._detector_other_features.append({**other, "detector_x": ox,
+                                                  "detector_y": oy})
+            dv.add_overlay(_circle_item(ox, oy, 14, "w", width=1.5))
+            dv.add_overlay(_label_item(
+                ox + 18, oy - 10,
+                f"#{other.get('feature_id', '')} {other.get('reflection', '')}", "w"))
+
+        # The parent binned feature's peak, for reference (lime).
+        dv.add_overlay(_circle_item(feat["detector_x"], feat["detector_y"], 15,
+                                    "lime", width=2))
+        if self._show_tth_overlay:
+            self._add_tth_overlay()
+        self._selected_bin = bin_key
+        dv.set_title(f"1×1 raw frame — bin {bin_key} (single scan)")
+
+    def _update_info_1x1(self, bin_key):
+        """Right-panel metadata for a clicked 1×1 scan."""
+        parts = bin_key.split("_")
+        r, c = (parts + ["?", "?"])[:2]
+        feats = self._sub_bin_to_features.get(bin_key, [])
+        lines = [
+            "1×1 view (unbinned)",
+            f"Scan bin:   {bin_key}",
+            f"Location:   row {r}, col {c}",
+            "",
+        ]
+        if feats:
+            lines.append(f"1×1 feature(s) here: {len(feats)}")
+            for f in feats:
+                prof = f.get("intensity_profile", {}).get(bin_key, {})
+                lines.append(
+                    f"  #{f.get('feature_id', '?')} {f.get('reflection', '')}  "
+                    f"χ={f.get('chi_deg', 0):.0f}°  {f.get('n_bins', '?')}bins  "
+                    f"SNR={f.get('mean_snr', 0):.1f}")
+                if prof:
+                    lines.append(
+                        f"     I={prof.get('intensity', '?')}  "
+                        f"integ={prof.get('integrated', '?')}  "
+                        f"@({prof.get('det_x', '?')},{prof.get('det_y', '?')})")
+        else:
+            lines.append("No 1×1 feature detected in this scan")
+        if self._sub_raw_intensity and bin_key in self._sub_raw_intensity:
+            m = self._sub_raw_intensity[bin_key]
+            lines.append("")
+            lines.append(f"Raw @peak:  I={m.get('intensity', 0):.0f}  "
+                         f"integ={m.get('integrated', 0):.0f}")
+        self.info_label.setText("\n".join(lines))
 
     # ── Visualization controls ─────────────────────────────────────
 
@@ -2115,6 +2698,29 @@ class FeatureViewer(QMainWindow):
         feat = self._current_feature()
         if feat:
             self._render_isometric(feat)
+
+    def _on_view1x1_toggled(self, state):
+        on = bool(state)
+        if on and self._bin_size == 1:
+            self.view1x1_cb.blockSignals(True)
+            self.view1x1_cb.setChecked(False)
+            self.view1x1_cb.blockSignals(False)
+            return
+        self._view_1x1 = on
+        self.sub_catalog_combo.setVisible(on)
+        if on:
+            self._populate_sub_catalog_combo()
+            self._load_sub_catalog()
+        else:
+            self._clear_heat_outlines()
+            self._grid_is_1x1 = False
+            self._sub_raw_intensity = None
+            self.raw_intensity_btn.setVisible(False)
+        self._highlight_bin = None
+        feat = self._current_feature()
+        if feat is not None:
+            self._on_feature_changed()
+        self._save_state()
 
     # ── Pending features & scoring ────────────────────────────────
 
@@ -2833,7 +3439,11 @@ class FeatureViewer(QMainWindow):
         if feat is None:
             return
         bin_key = self._selected_bin or feat.get("center_bin")
-        if bin_key:
+        if not bin_key:
+            return
+        if self._view_1x1 and self._bin_size != 1:
+            self._load_detector_image_1x1(bin_key, feat)
+        else:
             self._load_detector_image(bin_key, feat)
 
     # ── State persistence ("cookies") ──────────────────────────────
@@ -2888,6 +3498,8 @@ class FeatureViewer(QMainWindow):
             "noise_shift": self._noise_shift,
             "scan_catalog": self._sel_scan_catalog,
             "feature_catalog": self._sel_feature_catalog,
+            "view_1x1": self.view1x1_cb.isChecked(),
+            "sub_catalog": self._sel_sub_catalog,
         }
         whole = self._load_state()
         scans = whole.get("scans")
@@ -2918,6 +3530,9 @@ class FeatureViewer(QMainWindow):
         self.expand_cb.setChecked(st.get("expand_boundary", True))
         self.fill_cb.setChecked(st.get("fill_surface", False))
         self.tth_cb.setChecked(st.get("tth_overlay", False))
+        self._sel_sub_catalog = st.get("sub_catalog")
+        if st.get("view_1x1") and self._bin_size != 1:
+            self.view1x1_cb.setChecked(True)  # triggers _on_view1x1_toggled
         if "vmin_pct" in st:
             self.vmin_slider.setValue(int(st["vmin_pct"] * 10))
         if "vmax_pct" in st:
@@ -2998,6 +3613,12 @@ class FeatureViewer(QMainWindow):
             if self._h5f is not None:
                 self._h5f.close()
                 self._h5f = None
+            if self._sub_source is not None:
+                try:
+                    self._sub_source.close()
+                except Exception:
+                    pass
+                self._sub_source = None
         super().closeEvent(event)
 
     def resizeEvent(self, event):  # noqa: N802 (Qt signature)

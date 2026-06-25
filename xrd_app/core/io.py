@@ -323,6 +323,105 @@ def load_positions(csv_path: Union[str, Path], n_total: int) -> np.ndarray:
     return frame_x
 
 
+def load_positions_xy(csv_path: Union[str, Path], n_total: int):
+    """Read X *and* Y positions from the scan position CSV → (frame_x, frame_y).
+
+    Companion to :func:`load_positions` (X-only, kept for back-compat). Both
+    arrays are padded/truncated to ``n_total``. A ``frame_y`` that is all-NaN
+    means the CSV has no ``Y_Position`` column — callers should then fall back to
+    the serpentine (X-only) grid.
+    """
+    x, y = [], []
+    with open(csv_path) as f:
+        reader = csv.DictReader(f)
+        has_y = bool(reader.fieldnames) and "Y_Position" in reader.fieldnames
+        for row in reader:
+            x.append(float(row["X_Position"]))
+            if has_y:
+                y.append(float(row["Y_Position"]))
+    frame_x = np.full(n_total, np.nan)
+    frame_y = np.full(n_total, np.nan)
+    nx = min(len(x), n_total)
+    frame_x[:nx] = x[:nx]
+    if has_y:
+        ny = min(len(y), n_total)
+        frame_y[:ny] = y[:ny]
+    return frame_x, frame_y
+
+
+def _interp_nan(v: np.ndarray) -> np.ndarray:
+    """Fill NaNs by linear interpolation over index (no-op if none / all NaN)."""
+    v = np.asarray(v, dtype=float).copy()
+    bad = np.isnan(v)
+    if bad.any() and (~bad).any():
+        v[bad] = np.interp(np.where(bad)[0], np.where(~bad)[0], v[~bad])
+    return v
+
+
+def _scale_to_index(v, sign, n) -> np.ndarray:
+    """Snap a continuous position axis onto ``n`` integer lattice indices.
+
+    Robust to outliers ("whisker" scans) via a 0.2/99.8-percentile span rather
+    than raw min/max, so a single stray frame doesn't compress the rest of the
+    lattice. Ported from ``deskew_peaks.py::regrid``'s inner ``scale``.
+    """
+    v = sign * np.asarray(v, dtype=float)
+    lo, hi = np.percentile(v, 0.2), np.percentile(v, 99.8)
+    if hi <= lo:
+        return np.zeros(len(v), dtype=int)
+    idx = np.round((v - lo) / (hi - lo) * (n - 1))
+    return np.clip(idx, 0, n - 1).astype(int)
+
+
+def assign_grid_from_positions(frame_x, frame_y, log: Callable[[str], None] = print):
+    """De-skewed per-frame ``(row, col)`` from true stage positions (X, Y).
+
+    The canonical coordinate definition (promotes ``deskew_peaks.py::regrid`` from
+    an after-the-fact band-aid to the source of truth). Instead of reconstructing
+    columns by serpentine turn-counting from X alone — which stage backlash + the
+    boustrophedon reversal misregister between adjacent rows, fragmenting one
+    feature into horizontal slices — each frame is snapped to a regular lattice
+    directly from where the beam actually was.
+
+    Orientation is anchored to the existing serpentine grid: a reference
+    serpentine pass establishes which physical axis is row vs col and each axis'
+    sign, so the de-skewed grid keeps today's convention (row ↔ X here) and device
+    maps render upright with no axis-label changes. Row- and col-step are
+    estimated independently, handling anisotropic X/Y steps. Oversampled frames
+    that snap to the same cell merge naturally (expected at 1×1).
+
+    Returns ``(grid_row, grid_col, n_rows, n_cols)``.
+    """
+    n_total = len(frame_x)
+    x = _interp_nan(frame_x)
+    y = _interp_nan(frame_y)
+
+    # Reference serpentine indices: used ONLY to pick the axis mapping + sign
+    # (correlation direction is robust even though its column registration is the
+    # very thing we're fixing) and to size the lattice (n_rows × n_cols).
+    ref_row, ref_col, n_rows, n_cols = build_scan_grid(frame_x, n_total)
+
+    def _corr(a, b):
+        a = np.asarray(a, dtype=float)
+        b = np.asarray(b, dtype=float)
+        if a.std() == 0 or b.std() == 0:
+            return 0.0
+        return float(np.corrcoef(a, b)[0, 1])
+
+    row_is_X = abs(_corr(ref_row, x)) >= abs(_corr(ref_row, y))
+    rowv, colv = (x, y) if row_is_X else (y, x)
+    sr = np.sign(_corr(ref_row, rowv)) or 1.0
+    sc = np.sign(_corr(ref_col, colv)) or 1.0
+    log(f"  axis map: row <- {'X' if row_is_X else 'Y'} (sign {int(sr):+d}), "
+        f"col <- {'Y' if row_is_X else 'X'} (sign {int(sc):+d})")
+
+    grid_row = _scale_to_index(rowv, sr, n_rows)
+    grid_col = _scale_to_index(colv, sc, n_cols)
+    n_rows = int(grid_row.max()) + 1
+    n_cols = int(grid_col.max()) + 1
+    return grid_row, grid_col, n_rows, n_cols
+
+
 def build_scan_grid(frame_x, n_total, kernel=20, order=50):
     """Infer (row, col) for each frame from the serpentine position trace."""
     from scipy.signal import argrelextrema
@@ -387,6 +486,20 @@ def build_bin_mapping(n_rows, n_cols, bin_size, grid_to_frames):
     return mapping, n_br, n_bc
 
 
+def subbin_keys(bin_key, bin_size):
+    """1×1 sub-bin keys covered by a binned ``bin_key`` ('R_C') at ``bin_size``.
+
+    The inverse of :func:`build_bin_mapping`: a binned bin (R, C) aggregates the
+    raw grid cells (bin_size·R + dr, bin_size·C + dc) for dr, dc in [0, bin_size),
+    and since 1×1 bins are raw grid cells, those cells *are* the 1×1 bin keys.
+    Used by the viewer's "View 1×1" mode to map a binned feature's footprint to
+    its high-definition (unbinned) bins. ``bin_size == 1`` returns ``[bin_key]``.
+    """
+    r, c = (int(p) for p in bin_key.split("_"))
+    return [f"{bin_size * r + dr}_{bin_size * c + dc}"
+            for dr in range(bin_size) for dc in range(bin_size)]
+
+
 def generate_grid_mapping(
     xrd_dir: Union[str, Path],
     pos_csv: Optional[Union[str, Path]],
@@ -394,28 +507,52 @@ def generate_grid_mapping(
     scan_number: int = 203,
     output: Optional[Union[str, Path]] = None,
     n_cols: Optional[int] = None,
+    deskew: bool = True,
     log: Callable[[str], None] = print,
 ) -> dict:
     """Build the grid-mapping dict (and optionally write it to ``output``).
 
-    If ``pos_csv`` is provided and exists, the serpentine grid is inferred from
-    the position trace. Otherwise, if ``n_cols`` is given, a regular serpentine
-    grid is synthesized (the no-positions fallback for uniform step rasters).
+    Coordinate source, in priority order:
+      - ``positions_xy`` (default): de-skewed per-frame grid snapped from the true
+        stage (X, Y) — the canonical coordinate system. Used when a position CSV
+        with a ``Y_Position`` column is available and ``deskew`` is True.
+      - ``serpentine``: legacy X-only grid reconstructed by turn-counting. Used
+        when ``deskew`` is False (the ``--rawgrid`` bypass) or the CSV has no
+        ``Y_Position`` column.
+      - ``synthetic``: a regular serpentine raster from ``n_cols`` (no CSV).
+
+    The chosen source is recorded in the output JSON as ``coordinate_source`` so
+    downstream loaders/reports can tell which lattice a mapping is on.
     """
     log(f"Loading scan metadata from {xrd_dir} ...")
     xrd_files, frame_map, n_total = load_xrd_metadata(xrd_dir, scan_number)
     log(f"  {n_total} frames across {len(xrd_files)} H5 files")
 
     have_positions = pos_csv is not None and Path(pos_csv).exists()
-    if have_positions:
-        log("Computing scan grid from positions ...")
+    if have_positions and deskew:
+        frame_x, frame_y = load_positions_xy(pos_csv, n_total)
+        if np.isfinite(frame_y).any():
+            log("Computing de-skewed scan grid from true (X, Y) positions ...")
+            grid_row, grid_col, n_rows, n_cols = assign_grid_from_positions(
+                frame_x, frame_y, log=log)
+            coordinate_source = "positions_xy"
+        else:
+            log("Position CSV has no Y_Position column; falling back to "
+                "serpentine (X-only) grid ...")
+            grid_row, grid_col, n_rows, n_cols = build_scan_grid(frame_x, n_total)
+            coordinate_source = "serpentine"
+        log(f"  Scan grid: {n_rows} rows x {n_cols} cols")
+    elif have_positions:
+        log("Computing serpentine scan grid from X positions (--rawgrid) ...")
         frame_x = load_positions(pos_csv, n_total)
         grid_row, grid_col, n_rows, n_cols = build_scan_grid(frame_x, n_total)
+        coordinate_source = "serpentine"
         log(f"  Scan grid: {n_rows} rows x {n_cols} cols")
     elif n_cols:
         log(f"No position CSV; synthesizing a regular {n_cols}-column serpentine grid ...")
         log("  (assumes a uniform raster; provide positions for irregular scans)")
         grid_row, grid_col, n_rows, n_cols = build_regular_grid(n_total, n_cols)
+        coordinate_source = "synthetic"
         log(f"  Scan grid: {n_rows} rows x {n_cols} cols")
     else:
         raise FileNotFoundError(
@@ -435,6 +572,7 @@ def generate_grid_mapping(
 
     result = {
         "bin_size": bin_size,
+        "coordinate_source": coordinate_source,
         "n_rows": n_rows,
         "n_cols": n_cols,
         "n_bin_rows": n_bin_rows,
@@ -701,8 +839,14 @@ class _RawSource(BinImageSource):
                 xrd_dir, scan_number=scan_no)
             pos = dm.position_csv(scan=scan)
             if pos and Path(pos).exists():
-                frame_x = load_positions(pos, n_total)
-                grid_row, grid_col, n_rows, n_cols2 = build_scan_grid(frame_x, n_total)
+                # De-skew from true (X, Y) when Y is present (matches what
+                # 'xrd-app grid' writes); else fall back to serpentine X-only.
+                frame_x, frame_y = load_positions_xy(pos, n_total)
+                if np.isfinite(frame_y).any():
+                    grid_row, grid_col, n_rows, n_cols2 = assign_grid_from_positions(
+                        frame_x, frame_y)
+                else:
+                    grid_row, grid_col, n_rows, n_cols2 = build_scan_grid(frame_x, n_total)
             elif n_cols:
                 grid_row, grid_col, n_rows, n_cols2 = build_regular_grid(n_total, n_cols)
             else:

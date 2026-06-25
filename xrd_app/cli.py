@@ -547,10 +547,17 @@ def scan_detect(scans_dir, scan_file, deep, root):
 @click.option('--shape', default=None, help='Synthesize a grid with no positions: ROWSxCOLS or COLS')
 @click.option('--xrd-dir', help='Directory of raw per-frame H5 files (defaults to resolved)')
 @click.option('--positions', help='Scan position CSV (defaults to resolved)')
+@click.option('--rawgrid', is_flag=True,
+              help='Bypass (X,Y) de-skew: use the legacy serpentine X-only grid.')
 @click.option('--output', help='Output grid_mapping JSON (defaults to per-scan Metadata dir)')
 @click.option('--root', default='.', help='Project root directory')
-def grid(bin_size, scan, shape, xrd_dir, positions, output, root):
-    """Generate grid_mapping.json assigning raw frames to a spatial bin grid."""
+def grid(bin_size, scan, shape, xrd_dir, positions, rawgrid, output, root):
+    """Generate grid_mapping.json assigning raw frames to a spatial bin grid.
+
+    By default the per-frame (row, col) is de-skewed from the true stage (X, Y)
+    positions (``coordinate_source: positions_xy``). Pass ``--rawgrid`` to bypass
+    the de-skew and reconstruct the legacy serpentine grid from X only.
+    """
     from .core import io
     dm = DataManager(root, scan=scan)
     scan_no = dm.scan_number() or 203
@@ -567,7 +574,8 @@ def grid(bin_size, scan, shape, xrd_dir, positions, output, root):
         raise SystemExit(1)
 
     io.generate_grid_mapping(xdir, pos if Path(pos).exists() else None, bin_size,
-                             scan_number=scan_no, output=out, n_cols=n_cols, log=click.echo)
+                             scan_number=scan_no, output=out, n_cols=n_cols,
+                             deskew=not rawgrid, log=click.echo)
     click.echo(f"Wrote grid_mapping -> {out}")
 
 
@@ -719,12 +727,14 @@ def shapes(bin_size, scan, algorithm, from_peaks, peak_algo, link_tolerance,
 @click.option('--shape-algo', default='gaussian', help='Shape algorithm name')
 @click.option('--snr', type=float, default=4.0, help='SNR threshold for detection')
 @click.option('--shape', 'grid_shape', default=None, help='Synthesize grids: ROWSxCOLS or COLS')
+@click.option('--rawgrid', is_flag=True,
+              help='Bypass (X,Y) de-skew: use the legacy serpentine X-only grid.')
 @click.option('--compression', type=click.Choice(['gzip', 'lz4', 'none']), default='gzip')
 @click.option('--skip-existing', is_flag=True, help='Skip a scan whose shapes already exist')
 @click.option('--root', default='.', help='Project root directory')
 @click.pass_context
 def batch(ctx, scans, all_scans, bin_size, algorithm, shape_algo, snr, grid_shape,
-          compression, skip_existing, root):
+          rawgrid, compression, skip_existing, root):
     """Run grid -> bin -> peaks -> shapes for many scans, each in its own dirs."""
     scan_list = _resolve_scan_list(scans, all_scans, root)
     if not scan_list:
@@ -741,7 +751,8 @@ def batch(ctx, scans, all_scans, bin_size, algorithm, shape_algo, snr, grid_shap
             click.echo("  shapes exist — skipping (--skip-existing)\n")
             continue
         try:
-            ctx.invoke(grid, bin_size=bin_size, scan=name, shape=grid_shape, root=root)
+            ctx.invoke(grid, bin_size=bin_size, scan=name, shape=grid_shape,
+                       rawgrid=rawgrid, root=root)
             ctx.invoke(bin, bin_size=bin_size, scan=name, compression=compression, root=root)
             ctx.invoke(peaks, bin_size=bin_size, scan=name, algorithm=algorithm,
                        snr=snr, root=root)
@@ -792,12 +803,15 @@ def run_pipeline(ctx, bin_size, scan, algorithm, shape_algo, snr, root):
 @click.option('--scan', default=None, help='Scan number/name (defaults to config scan)')
 @click.option('--shape', 'grid_shape', default=None,
               help='Synthesize a grid (no positions): ROWSxCOLS or COLS')
+@click.option('--rawgrid', is_flag=True,
+              help='Bypass (X,Y) de-skew: use the legacy serpentine X-only grid.')
 @click.option('--compression', type=click.Choice(['gzip', 'lz4', 'none']), default='gzip')
 @click.option('--root', default='.', help='Project root directory')
 @click.pass_context
-def make_bins(ctx, bin_size, scan, grid_shape, compression, root):
+def make_bins(ctx, bin_size, scan, grid_shape, rawgrid, compression, root):
     """Build the binned HDF5 for one scan: grid mapping, then bins."""
-    ctx.invoke(grid, bin_size=bin_size, scan=scan, shape=grid_shape, root=root)
+    ctx.invoke(grid, bin_size=bin_size, scan=scan, shape=grid_shape,
+               rawgrid=rawgrid, root=root)
     ctx.invoke(bin, bin_size=bin_size, scan=scan, compression=compression, root=root)
     dm = DataManager(root, scan=scan)
     click.echo(f"\nBins ready: {dm.binned_h5(bin_size)}")
