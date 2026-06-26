@@ -1,0 +1,977 @@
+REGEN START Fri Jun 26 11:07:50 AM CDT 2026
+===== BIN 5x5 : make-bins =====
+Loading scan metadata from /mnt/c/Users/trobson/OneDrive - Argonne National Laboratory/2026-1_Luo/raw_scans/Scan_0203/XRD ...
+  25170 frames across 151 H5 files
+Computing scan grid from layout + true (X, Y) positions ...
+  file-per-row grid (commanded-position columns, position-oriented): 151 x 167 (col <- Y)
+  Scan grid: 151 rows x 167 cols
+Building bin mapping with bin_size=5 ...
+  1045 bins (31 x 34)
+Wrote /mnt/c/Users/trobson/OneDrive - Argonne National Laboratory/2026-1_Luo/TakaTest/TakaProject/Metadata/Scan_0203/grid_mapping_5x5.json (450 KB)
+Wrote grid_mapping -> /mnt/c/Users/trobson/OneDrive - Argonne National Laboratory/2026-1_Luo/TakaTest/TakaProject/Metadata/Scan_0203/grid_mapping_5x5.json
+Building 1045 bin images (5x5) -> /mnt/c/Users/trobson/OneDrive - Argonne National Laboratory/2026-1_Luo/TakaTest/TakaProject/Binned/Scan_0203/xrd_5x5_bins.h5
+  Compression: gzip
+  [100/1045] 76s elapsed, ~718s remaining
+  [200/1045] 161s elapsed, ~679s remaining
+  [300/1045] 234s elapsed, ~582s remaining
+  [400/1045] 317s elapsed, ~512s remaining
+  [500/1045] 392s elapsed, ~427s remaining
+  [600/1045] 464s elapsed, ~344s remaining
+  [700/1045] 548s elapsed, ~270s remaining
+  [800/1045] 609s elapsed, ~186s remaining
+  [900/1045] 677s elapsed, ~109s remaining
+  [1000/1045] 752s elapsed, ~34s remaining
+  [1045/1045] 783s elapsed, ~0s remaining
+Done! /mnt/c/Users/trobson/OneDrive - Argonne National Laboratory/2026-1_Luo/TakaTest/TakaProject/Binned/Scan_0203/xrd_5x5_bins.h5: 875 MB (0.9 GB)
+Wrote bins -> /mnt/c/Users/trobson/OneDrive - Argonne National Laboratory/2026-1_Luo/TakaTest/TakaProject/Binned/Scan_0203/xrd_5x5_bins.h5
+
+Bins ready: /mnt/c/Users/trobson/OneDrive - Argonne National Laboratory/2026-1_Luo/TakaTest/TakaProject/Binned/Scan_0203/xrd_5x5_bins.h5
+  make-bins 5 OK
+===== BIN 5x5 : peaks =====
+[peaks] detector: /mnt/c/Users/trobson/OneDrive - Argonne National Laboratory/2026-1_Luo/xrd_app/PeakAlgorithms/5x5_tophat_band_adaptive_snr.py
+[peaks] bins: /mnt/c/Users/trobson/OneDrive - Argonne National Laboratory/2026-1_Luo/TakaTest/TakaProject/Binned/Scan_0203/xrd_5x5_bins.h5
+
+  Reflections: ['PbI2', '(001)', '(011)', '(111)', '(002)', 'ITO', '(012)', '(112)', '21.30', '22.60', '26.16']
+  Running detector on 1045 bins (5 workers)...
+PROGRESS 10/1045  (10/1045) peaks
+PROGRESS 20/1045  (20/1045) peaks
+PROGRESS 30/1045  (30/1045) peaks
+PROGRESS 40/1045  (40/1045) peaks
+PROGRESS 50/1045  (50/1045) peaks
+PROGRESS 60/1045  (60/1045) peaks
+PROGRESS 70/1045  (70/1045) peaks
+PROGRESS 80/1045  (80/1045) peaks
+PROGRESS 90/1045  (90/1045) peaks
+PROGRESS 100/1045  (100/1045) peaks
+PROGRESS 110/1045  (110/1045) peaks
+PROGRESS 120/1045  (120/1045) peaks
+PROGRESS 130/1045  (130/1045) peaks
+PROGRESS 140/1045  (140/1045) peaks
+PROGRESS 150/1045  (150/1045) peaks
+PROGRESS 160/1045  (160/1045) peaks
+PROGRESS 170/1045  (170/1045) peaks
+PROGRESS 180/1045  (180/1045) peaks
+PROGRESS 190/1045  (190/1045) peaks
+PROGRESS 200/1045  (200/1045) peaks
+PROGRESS 210/1045  (210/1045) peaks
+PROGRESS 220/1045  (220/1045) peaks
+PROGRESS 230/1045  (230/1045) peaks
+PROGRESS 240/1045  (240/1045) peaks
+PROGRESS 250/1045  (250/1045) peaks
+PROGRESS 260/1045  (260/1045) peaks
+PROGRESS 270/1045  (270/1045) peaks
+PROGRESS 280/1045  (280/1045) peaks
+PROGRESS 290/1045  (290/1045) peaks
+PROGRESS 300/1045  (300/1045) peaks
+PROGRESS 310/1045  (310/1045) peaks
+PROGRESS 320/1045  (320/1045) peaks
+PROGRESS 330/1045  (330/1045) peaks
+PROGRESS 340/1045  (340/1045) peaks
+PROGRESS 350/1045  (350/1045) peaks
+PROGRESS 360/1045  (360/1045) peaks
+PROGRESS 370/1045  (370/1045) peaks
+PROGRESS 380/1045  (380/1045) peaks
+PROGRESS 390/1045  (390/1045) peaks
+PROGRESS 400/1045  (400/1045) peaks
+PROGRESS 410/1045  (410/1045) peaks
+PROGRESS 420/1045  (420/1045) peaks
+PROGRESS 430/1045  (430/1045) peaks
+PROGRESS 440/1045  (440/1045) peaks
+PROGRESS 450/1045  (450/1045) peaks
+PROGRESS 460/1045  (460/1045) peaks
+PROGRESS 470/1045  (470/1045) peaks
+PROGRESS 480/1045  (480/1045) peaks
+PROGRESS 490/1045  (490/1045) peaks
+PROGRESS 500/1045  (500/1045) peaks
+PROGRESS 510/1045  (510/1045) peaks
+PROGRESS 520/1045  (520/1045) peaks
+PROGRESS 530/1045  (530/1045) peaks
+PROGRESS 540/1045  (540/1045) peaks
+PROGRESS 550/1045  (550/1045) peaks
+PROGRESS 560/1045  (560/1045) peaks
+PROGRESS 570/1045  (570/1045) peaks
+PROGRESS 580/1045  (580/1045) peaks
+PROGRESS 590/1045  (590/1045) peaks
+PROGRESS 600/1045  (600/1045) peaks
+PROGRESS 610/1045  (610/1045) peaks
+PROGRESS 620/1045  (620/1045) peaks
+PROGRESS 630/1045  (630/1045) peaks
+PROGRESS 640/1045  (640/1045) peaks
+PROGRESS 650/1045  (650/1045) peaks
+PROGRESS 660/1045  (660/1045) peaks
+PROGRESS 670/1045  (670/1045) peaks
+PROGRESS 680/1045  (680/1045) peaks
+PROGRESS 690/1045  (690/1045) peaks
+PROGRESS 700/1045  (700/1045) peaks
+PROGRESS 710/1045  (710/1045) peaks
+PROGRESS 720/1045  (720/1045) peaks
+PROGRESS 730/1045  (730/1045) peaks
+PROGRESS 740/1045  (740/1045) peaks
+PROGRESS 750/1045  (750/1045) peaks
+PROGRESS 760/1045  (760/1045) peaks
+PROGRESS 770/1045  (770/1045) peaks
+PROGRESS 780/1045  (780/1045) peaks
+PROGRESS 790/1045  (790/1045) peaks
+PROGRESS 800/1045  (800/1045) peaks
+PROGRESS 810/1045  (810/1045) peaks
+PROGRESS 820/1045  (820/1045) peaks
+PROGRESS 830/1045  (830/1045) peaks
+PROGRESS 840/1045  (840/1045) peaks
+PROGRESS 850/1045  (850/1045) peaks
+PROGRESS 860/1045  (860/1045) peaks
+PROGRESS 870/1045  (870/1045) peaks
+PROGRESS 880/1045  (880/1045) peaks
+PROGRESS 890/1045  (890/1045) peaks
+PROGRESS 900/1045  (900/1045) peaks
+PROGRESS 910/1045  (910/1045) peaks
+PROGRESS 920/1045  (920/1045) peaks
+PROGRESS 930/1045  (930/1045) peaks
+PROGRESS 940/1045  (940/1045) peaks
+PROGRESS 950/1045  (950/1045) peaks
+PROGRESS 960/1045  (960/1045) peaks
+PROGRESS 970/1045  (970/1045) peaks
+PROGRESS 980/1045  (980/1045) peaks
+PROGRESS 990/1045  (990/1045) peaks
+PROGRESS 1000/1045  (1000/1045) peaks
+PROGRESS 1010/1045  (1010/1045) peaks
+PROGRESS 1020/1045  (1020/1045) peaks
+PROGRESS 1030/1045  (1030/1045) peaks
+PROGRESS 1040/1045  (1040/1045) peaks
+PROGRESS 1045/1045  (1045/1045) peaks
+  Detection complete: 3606 peaks in 1043 bins
+
+Done: 3606 peaks in 1043 bins -> /mnt/c/Users/trobson/OneDrive - Argonne National Laboratory/2026-1_Luo/TakaTest/TakaProject/Labels/Scan_0203/5x5_tophat_band_adaptive_snr_peaks_5x5.json
+  peaks 5 OK
+===== BIN 5x5 : shapes =====
+[shapes] algorithm: /mnt/c/Users/trobson/OneDrive - Argonne National Laboratory/2026-1_Luo/xrd_app/ShapeAlgorithms/gaussian.py
+[shapes] peaks: /mnt/c/Users/trobson/OneDrive - Argonne National Laboratory/2026-1_Luo/TakaTest/TakaProject/Labels/Scan_0203/5x5_tophat_band_adaptive_snr_peaks_5x5.json
+
+  Grid: 31 x 34 = 1054 bins
+  Linking peaks across bins (Union-Find)...
+  292 raw features: 133 multi-bin, 159 single-bin
+PROGRESS 1/2  (1/2) shapes
+  Filtering by gaussian profile + characterizing shapes...
+PROGRESS 2/2  (2/2) shapes
+  Kept (shapes): 121   Filtered: 171
+  Wrote 121 kept features to /mnt/c/Users/trobson/OneDrive - Argonne National Laboratory/2026-1_Luo/TakaTest/TakaProject/Labels/Scan_0203/feature_catalog_5x5.json
+  Wrote 121 kept peaks to /mnt/c/Users/trobson/OneDrive - Argonne National Laboratory/2026-1_Luo/TakaTest/TakaProject/Labels/Scan_0203/kept_peaks_5x5.csv
+  Wrote 171 filtered peaks to /mnt/c/Users/trobson/OneDrive - Argonne National Laboratory/2026-1_Luo/TakaTest/TakaProject/Labels/Scan_0203/filtered_peaks_5x5.csv
+
+Done: 121 shapes kept, 171 filtered -> /mnt/c/Users/trobson/OneDrive - Argonne National Laboratory/2026-1_Luo/TakaTest/TakaProject/Labels/Scan_0203/gaussian_shapes_5x5.json
+  shapes 5 OK
+===== BIN 5x5 COMPLETE Fri Jun 26 11:22:22 AM CDT 2026 =====
+===== BIN 4x4 : make-bins =====
+Loading scan metadata from /mnt/c/Users/trobson/OneDrive - Argonne National Laboratory/2026-1_Luo/raw_scans/Scan_0203/XRD ...
+  25170 frames across 151 H5 files
+Computing scan grid from layout + true (X, Y) positions ...
+  file-per-row grid (commanded-position columns, position-oriented): 151 x 167 (col <- Y)
+  Scan grid: 151 rows x 167 cols
+Building bin mapping with bin_size=4 ...
+  1596 bins (38 x 42)
+Wrote /mnt/c/Users/trobson/OneDrive - Argonne National Laboratory/2026-1_Luo/TakaTest/TakaProject/Metadata/Scan_0203/grid_mapping_4x4.json (456 KB)
+Wrote grid_mapping -> /mnt/c/Users/trobson/OneDrive - Argonne National Laboratory/2026-1_Luo/TakaTest/TakaProject/Metadata/Scan_0203/grid_mapping_4x4.json
+Building 1596 bin images (4x4) -> /mnt/c/Users/trobson/OneDrive - Argonne National Laboratory/2026-1_Luo/TakaTest/TakaProject/Binned/Scan_0203/xrd_4x4_bins.h5
+  Compression: gzip
+  [100/1596] 50s elapsed, ~742s remaining
+  [200/1596] 99s elapsed, ~688s remaining
+  [300/1596] 147s elapsed, ~636s remaining
+  [400/1596] 195s elapsed, ~583s remaining
+  [500/1596] 244s elapsed, ~535s remaining
+  [600/1596] 291s elapsed, ~483s remaining
+  [700/1596] 339s elapsed, ~434s remaining
+  [800/1596] 387s elapsed, ~385s remaining
+  [900/1596] 435s elapsed, ~336s remaining
+  [1000/1596] 483s elapsed, ~288s remaining
+  [1100/1596] 531s elapsed, ~239s remaining
+  [1200/1596] 579s elapsed, ~191s remaining
+  [1300/1596] 619s elapsed, ~141s remaining
+  [1400/1596] 667s elapsed, ~93s remaining
+  [1500/1596] 714s elapsed, ~46s remaining
+  [1596/1596] 759s elapsed, ~0s remaining
+Done! /mnt/c/Users/trobson/OneDrive - Argonne National Laboratory/2026-1_Luo/TakaTest/TakaProject/Binned/Scan_0203/xrd_4x4_bins.h5: 1255 MB (1.2 GB)
+Wrote bins -> /mnt/c/Users/trobson/OneDrive - Argonne National Laboratory/2026-1_Luo/TakaTest/TakaProject/Binned/Scan_0203/xrd_4x4_bins.h5
+
+Bins ready: /mnt/c/Users/trobson/OneDrive - Argonne National Laboratory/2026-1_Luo/TakaTest/TakaProject/Binned/Scan_0203/xrd_4x4_bins.h5
+  make-bins 4 OK
+===== BIN 4x4 : peaks =====
+[peaks] detector: /mnt/c/Users/trobson/OneDrive - Argonne National Laboratory/2026-1_Luo/xrd_app/PeakAlgorithms/5x5_tophat_band_adaptive_snr.py
+[peaks] bins: /mnt/c/Users/trobson/OneDrive - Argonne National Laboratory/2026-1_Luo/TakaTest/TakaProject/Binned/Scan_0203/xrd_4x4_bins.h5
+
+  Reflections: ['PbI2', '(001)', '(011)', '(111)', '(002)', 'ITO', '(012)', '(112)', '21.30', '22.60', '26.16']
+  Running detector on 1596 bins (5 workers)...
+PROGRESS 15/1596  (15/1596) peaks
+PROGRESS 30/1596  (30/1596) peaks
+PROGRESS 45/1596  (45/1596) peaks
+PROGRESS 60/1596  (60/1596) peaks
+PROGRESS 75/1596  (75/1596) peaks
+PROGRESS 90/1596  (90/1596) peaks
+PROGRESS 105/1596  (105/1596) peaks
+PROGRESS 120/1596  (120/1596) peaks
+PROGRESS 135/1596  (135/1596) peaks
+PROGRESS 150/1596  (150/1596) peaks
+PROGRESS 165/1596  (165/1596) peaks
+PROGRESS 180/1596  (180/1596) peaks
+PROGRESS 195/1596  (195/1596) peaks
+PROGRESS 210/1596  (210/1596) peaks
+PROGRESS 225/1596  (225/1596) peaks
+PROGRESS 240/1596  (240/1596) peaks
+PROGRESS 255/1596  (255/1596) peaks
+PROGRESS 270/1596  (270/1596) peaks
+PROGRESS 285/1596  (285/1596) peaks
+PROGRESS 300/1596  (300/1596) peaks
+PROGRESS 315/1596  (315/1596) peaks
+PROGRESS 330/1596  (330/1596) peaks
+PROGRESS 345/1596  (345/1596) peaks
+PROGRESS 360/1596  (360/1596) peaks
+PROGRESS 375/1596  (375/1596) peaks
+PROGRESS 390/1596  (390/1596) peaks
+PROGRESS 405/1596  (405/1596) peaks
+PROGRESS 420/1596  (420/1596) peaks
+PROGRESS 435/1596  (435/1596) peaks
+PROGRESS 450/1596  (450/1596) peaks
+PROGRESS 465/1596  (465/1596) peaks
+PROGRESS 480/1596  (480/1596) peaks
+PROGRESS 495/1596  (495/1596) peaks
+PROGRESS 510/1596  (510/1596) peaks
+PROGRESS 525/1596  (525/1596) peaks
+PROGRESS 540/1596  (540/1596) peaks
+PROGRESS 555/1596  (555/1596) peaks
+PROGRESS 570/1596  (570/1596) peaks
+PROGRESS 585/1596  (585/1596) peaks
+PROGRESS 600/1596  (600/1596) peaks
+PROGRESS 615/1596  (615/1596) peaks
+PROGRESS 630/1596  (630/1596) peaks
+PROGRESS 645/1596  (645/1596) peaks
+PROGRESS 660/1596  (660/1596) peaks
+PROGRESS 675/1596  (675/1596) peaks
+PROGRESS 690/1596  (690/1596) peaks
+PROGRESS 705/1596  (705/1596) peaks
+PROGRESS 720/1596  (720/1596) peaks
+PROGRESS 735/1596  (735/1596) peaks
+PROGRESS 750/1596  (750/1596) peaks
+PROGRESS 765/1596  (765/1596) peaks
+PROGRESS 780/1596  (780/1596) peaks
+PROGRESS 795/1596  (795/1596) peaks
+PROGRESS 810/1596  (810/1596) peaks
+PROGRESS 825/1596  (825/1596) peaks
+PROGRESS 840/1596  (840/1596) peaks
+PROGRESS 855/1596  (855/1596) peaks
+PROGRESS 870/1596  (870/1596) peaks
+PROGRESS 885/1596  (885/1596) peaks
+PROGRESS 900/1596  (900/1596) peaks
+PROGRESS 915/1596  (915/1596) peaks
+PROGRESS 930/1596  (930/1596) peaks
+PROGRESS 945/1596  (945/1596) peaks
+PROGRESS 960/1596  (960/1596) peaks
+PROGRESS 975/1596  (975/1596) peaks
+PROGRESS 990/1596  (990/1596) peaks
+PROGRESS 1005/1596  (1005/1596) peaks
+PROGRESS 1020/1596  (1020/1596) peaks
+PROGRESS 1035/1596  (1035/1596) peaks
+PROGRESS 1050/1596  (1050/1596) peaks
+PROGRESS 1065/1596  (1065/1596) peaks
+PROGRESS 1080/1596  (1080/1596) peaks
+PROGRESS 1095/1596  (1095/1596) peaks
+PROGRESS 1110/1596  (1110/1596) peaks
+PROGRESS 1125/1596  (1125/1596) peaks
+PROGRESS 1140/1596  (1140/1596) peaks
+PROGRESS 1155/1596  (1155/1596) peaks
+PROGRESS 1170/1596  (1170/1596) peaks
+PROGRESS 1185/1596  (1185/1596) peaks
+PROGRESS 1200/1596  (1200/1596) peaks
+PROGRESS 1215/1596  (1215/1596) peaks
+PROGRESS 1230/1596  (1230/1596) peaks
+PROGRESS 1245/1596  (1245/1596) peaks
+PROGRESS 1260/1596  (1260/1596) peaks
+PROGRESS 1275/1596  (1275/1596) peaks
+PROGRESS 1290/1596  (1290/1596) peaks
+PROGRESS 1305/1596  (1305/1596) peaks
+PROGRESS 1320/1596  (1320/1596) peaks
+PROGRESS 1335/1596  (1335/1596) peaks
+PROGRESS 1350/1596  (1350/1596) peaks
+PROGRESS 1365/1596  (1365/1596) peaks
+PROGRESS 1380/1596  (1380/1596) peaks
+PROGRESS 1395/1596  (1395/1596) peaks
+PROGRESS 1410/1596  (1410/1596) peaks
+PROGRESS 1425/1596  (1425/1596) peaks
+PROGRESS 1440/1596  (1440/1596) peaks
+PROGRESS 1455/1596  (1455/1596) peaks
+PROGRESS 1470/1596  (1470/1596) peaks
+PROGRESS 1485/1596  (1485/1596) peaks
+PROGRESS 1500/1596  (1500/1596) peaks
+PROGRESS 1515/1596  (1515/1596) peaks
+PROGRESS 1530/1596  (1530/1596) peaks
+PROGRESS 1545/1596  (1545/1596) peaks
+PROGRESS 1560/1596  (1560/1596) peaks
+PROGRESS 1575/1596  (1575/1596) peaks
+PROGRESS 1590/1596  (1590/1596) peaks
+PROGRESS 1596/1596  (1596/1596) peaks
+  Detection complete: 5188 peaks in 1580 bins
+
+Done: 5188 peaks in 1580 bins -> /mnt/c/Users/trobson/OneDrive - Argonne National Laboratory/2026-1_Luo/TakaTest/TakaProject/Labels/Scan_0203/5x5_tophat_band_adaptive_snr_peaks_4x4.json
+  peaks 4 OK
+===== BIN 4x4 : shapes =====
+[shapes] algorithm: /mnt/c/Users/trobson/OneDrive - Argonne National Laboratory/2026-1_Luo/xrd_app/ShapeAlgorithms/gaussian.py
+[shapes] peaks: /mnt/c/Users/trobson/OneDrive - Argonne National Laboratory/2026-1_Luo/TakaTest/TakaProject/Labels/Scan_0203/5x5_tophat_band_adaptive_snr_peaks_4x4.json
+
+  Grid: 38 x 42 = 1596 bins
+  Linking peaks across bins (Union-Find)...
+  491 raw features: 151 multi-bin, 340 single-bin
+PROGRESS 1/2  (1/2) shapes
+  Filtering by gaussian profile + characterizing shapes...
+PROGRESS 2/2  (2/2) shapes
+  Kept (shapes): 140   Filtered: 351
+  Wrote 140 kept features to /mnt/c/Users/trobson/OneDrive - Argonne National Laboratory/2026-1_Luo/TakaTest/TakaProject/Labels/Scan_0203/feature_catalog_4x4.json
+  Wrote 140 kept peaks to /mnt/c/Users/trobson/OneDrive - Argonne National Laboratory/2026-1_Luo/TakaTest/TakaProject/Labels/Scan_0203/kept_peaks_4x4.csv
+  Wrote 351 filtered peaks to /mnt/c/Users/trobson/OneDrive - Argonne National Laboratory/2026-1_Luo/TakaTest/TakaProject/Labels/Scan_0203/filtered_peaks_4x4.csv
+
+Done: 140 shapes kept, 351 filtered -> /mnt/c/Users/trobson/OneDrive - Argonne National Laboratory/2026-1_Luo/TakaTest/TakaProject/Labels/Scan_0203/gaussian_shapes_4x4.json
+  shapes 4 OK
+===== BIN 4x4 COMPLETE Fri Jun 26 11:37:07 AM CDT 2026 =====
+===== BIN 3x3 : make-bins =====
+Loading scan metadata from /mnt/c/Users/trobson/OneDrive - Argonne National Laboratory/2026-1_Luo/raw_scans/Scan_0203/XRD ...
+  25170 frames across 151 H5 files
+Computing scan grid from layout + true (X, Y) positions ...
+  file-per-row grid (commanded-position columns, position-oriented): 151 x 167 (col <- Y)
+  Scan grid: 151 rows x 167 cols
+Building bin mapping with bin_size=3 ...
+  2841 bins (51 x 56)
+Wrote /mnt/c/Users/trobson/OneDrive - Argonne National Laboratory/2026-1_Luo/TakaTest/TakaProject/Metadata/Scan_0203/grid_mapping_3x3.json (469 KB)
+Wrote grid_mapping -> /mnt/c/Users/trobson/OneDrive - Argonne National Laboratory/2026-1_Luo/TakaTest/TakaProject/Metadata/Scan_0203/grid_mapping_3x3.json
+Building 2841 bin images (3x3) -> /mnt/c/Users/trobson/OneDrive - Argonne National Laboratory/2026-1_Luo/TakaTest/TakaProject/Binned/Scan_0203/xrd_3x3_bins.h5
+  Compression: gzip
+  [100/2841] 31s elapsed, ~861s remaining
+  [200/2841] 62s elapsed, ~815s remaining
+  [300/2841] 92s elapsed, ~783s remaining
+  [400/2841] 123s elapsed, ~751s remaining
+  [500/2841] 153s elapsed, ~717s remaining
+  [600/2841] 183s elapsed, ~683s remaining
+  [700/2841] 213s elapsed, ~650s remaining
+  [800/2841] 243s elapsed, ~620s remaining
+  [900/2841] 274s elapsed, ~591s remaining
+  [1000/2841] 306s elapsed, ~563s remaining
+  [1100/2841] 336s elapsed, ~531s remaining
+  [1200/2841] 366s elapsed, ~500s remaining
+  [1300/2841] 396s elapsed, ~469s remaining
+  [1400/2841] 430s elapsed, ~442s remaining
+  [1500/2841] 460s elapsed, ~412s remaining
+  [1600/2841] 491s elapsed, ~381s remaining
+  [1700/2841] 524s elapsed, ~352s remaining
+  [1800/2841] 555s elapsed, ~321s remaining
+  [1900/2841] 586s elapsed, ~290s remaining
+  [2000/2841] 616s elapsed, ~259s remaining
+  [2100/2841] 647s elapsed, ~228s remaining
+  [2200/2841] 679s elapsed, ~198s remaining
+  [2300/2841] 711s elapsed, ~167s remaining
+  [2400/2841] 741s elapsed, ~136s remaining
+  [2500/2841] 772s elapsed, ~105s remaining
+  [2600/2841] 798s elapsed, ~74s remaining
+  [2700/2841] 830s elapsed, ~43s remaining
+  [2800/2841] 861s elapsed, ~13s remaining
+  [2841/2841] 874s elapsed, ~0s remaining
+Done! /mnt/c/Users/trobson/OneDrive - Argonne National Laboratory/2026-1_Luo/TakaTest/TakaProject/Binned/Scan_0203/xrd_3x3_bins.h5: 2064 MB (2.0 GB)
+Wrote bins -> /mnt/c/Users/trobson/OneDrive - Argonne National Laboratory/2026-1_Luo/TakaTest/TakaProject/Binned/Scan_0203/xrd_3x3_bins.h5
+
+Bins ready: /mnt/c/Users/trobson/OneDrive - Argonne National Laboratory/2026-1_Luo/TakaTest/TakaProject/Binned/Scan_0203/xrd_3x3_bins.h5
+  make-bins 3 OK
+===== BIN 3x3 : peaks =====
+[peaks] detector: /mnt/c/Users/trobson/OneDrive - Argonne National Laboratory/2026-1_Luo/xrd_app/PeakAlgorithms/5x5_tophat_band_adaptive_snr.py
+[peaks] bins: /mnt/c/Users/trobson/OneDrive - Argonne National Laboratory/2026-1_Luo/TakaTest/TakaProject/Binned/Scan_0203/xrd_3x3_bins.h5
+
+  Reflections: ['PbI2', '(001)', '(011)', '(111)', '(002)', 'ITO', '(012)', '(112)', '21.30', '22.60', '26.16']
+  Running detector on 2841 bins (5 workers)...
+PROGRESS 28/2841  (28/2841) peaks
+PROGRESS 56/2841  (56/2841) peaks
+PROGRESS 84/2841  (84/2841) peaks
+PROGRESS 112/2841  (112/2841) peaks
+PROGRESS 140/2841  (140/2841) peaks
+PROGRESS 168/2841  (168/2841) peaks
+PROGRESS 196/2841  (196/2841) peaks
+PROGRESS 224/2841  (224/2841) peaks
+PROGRESS 252/2841  (252/2841) peaks
+PROGRESS 280/2841  (280/2841) peaks
+PROGRESS 308/2841  (308/2841) peaks
+PROGRESS 336/2841  (336/2841) peaks
+PROGRESS 364/2841  (364/2841) peaks
+PROGRESS 392/2841  (392/2841) peaks
+PROGRESS 420/2841  (420/2841) peaks
+PROGRESS 448/2841  (448/2841) peaks
+PROGRESS 476/2841  (476/2841) peaks
+PROGRESS 504/2841  (504/2841) peaks
+PROGRESS 532/2841  (532/2841) peaks
+PROGRESS 560/2841  (560/2841) peaks
+PROGRESS 588/2841  (588/2841) peaks
+PROGRESS 616/2841  (616/2841) peaks
+PROGRESS 644/2841  (644/2841) peaks
+PROGRESS 672/2841  (672/2841) peaks
+PROGRESS 700/2841  (700/2841) peaks
+PROGRESS 728/2841  (728/2841) peaks
+PROGRESS 756/2841  (756/2841) peaks
+PROGRESS 784/2841  (784/2841) peaks
+PROGRESS 812/2841  (812/2841) peaks
+PROGRESS 840/2841  (840/2841) peaks
+PROGRESS 868/2841  (868/2841) peaks
+PROGRESS 896/2841  (896/2841) peaks
+PROGRESS 924/2841  (924/2841) peaks
+PROGRESS 952/2841  (952/2841) peaks
+PROGRESS 980/2841  (980/2841) peaks
+PROGRESS 1008/2841  (1008/2841) peaks
+PROGRESS 1036/2841  (1036/2841) peaks
+PROGRESS 1064/2841  (1064/2841) peaks
+PROGRESS 1092/2841  (1092/2841) peaks
+PROGRESS 1120/2841  (1120/2841) peaks
+PROGRESS 1148/2841  (1148/2841) peaks
+PROGRESS 1176/2841  (1176/2841) peaks
+PROGRESS 1204/2841  (1204/2841) peaks
+PROGRESS 1232/2841  (1232/2841) peaks
+PROGRESS 1260/2841  (1260/2841) peaks
+PROGRESS 1288/2841  (1288/2841) peaks
+PROGRESS 1316/2841  (1316/2841) peaks
+PROGRESS 1344/2841  (1344/2841) peaks
+PROGRESS 1372/2841  (1372/2841) peaks
+PROGRESS 1400/2841  (1400/2841) peaks
+PROGRESS 1428/2841  (1428/2841) peaks
+PROGRESS 1456/2841  (1456/2841) peaks
+PROGRESS 1484/2841  (1484/2841) peaks
+PROGRESS 1512/2841  (1512/2841) peaks
+PROGRESS 1540/2841  (1540/2841) peaks
+PROGRESS 1568/2841  (1568/2841) peaks
+PROGRESS 1596/2841  (1596/2841) peaks
+PROGRESS 1624/2841  (1624/2841) peaks
+PROGRESS 1652/2841  (1652/2841) peaks
+PROGRESS 1680/2841  (1680/2841) peaks
+PROGRESS 1708/2841  (1708/2841) peaks
+PROGRESS 1736/2841  (1736/2841) peaks
+PROGRESS 1764/2841  (1764/2841) peaks
+PROGRESS 1792/2841  (1792/2841) peaks
+PROGRESS 1820/2841  (1820/2841) peaks
+PROGRESS 1848/2841  (1848/2841) peaks
+PROGRESS 1876/2841  (1876/2841) peaks
+PROGRESS 1904/2841  (1904/2841) peaks
+PROGRESS 1932/2841  (1932/2841) peaks
+PROGRESS 1960/2841  (1960/2841) peaks
+PROGRESS 1988/2841  (1988/2841) peaks
+PROGRESS 2016/2841  (2016/2841) peaks
+PROGRESS 2044/2841  (2044/2841) peaks
+PROGRESS 2072/2841  (2072/2841) peaks
+PROGRESS 2100/2841  (2100/2841) peaks
+PROGRESS 2128/2841  (2128/2841) peaks
+PROGRESS 2156/2841  (2156/2841) peaks
+PROGRESS 2184/2841  (2184/2841) peaks
+PROGRESS 2212/2841  (2212/2841) peaks
+PROGRESS 2240/2841  (2240/2841) peaks
+PROGRESS 2268/2841  (2268/2841) peaks
+PROGRESS 2296/2841  (2296/2841) peaks
+PROGRESS 2324/2841  (2324/2841) peaks
+PROGRESS 2352/2841  (2352/2841) peaks
+PROGRESS 2380/2841  (2380/2841) peaks
+PROGRESS 2408/2841  (2408/2841) peaks
+PROGRESS 2436/2841  (2436/2841) peaks
+PROGRESS 2464/2841  (2464/2841) peaks
+PROGRESS 2492/2841  (2492/2841) peaks
+PROGRESS 2520/2841  (2520/2841) peaks
+PROGRESS 2548/2841  (2548/2841) peaks
+PROGRESS 2576/2841  (2576/2841) peaks
+PROGRESS 2604/2841  (2604/2841) peaks
+PROGRESS 2632/2841  (2632/2841) peaks
+PROGRESS 2660/2841  (2660/2841) peaks
+PROGRESS 2688/2841  (2688/2841) peaks
+PROGRESS 2716/2841  (2716/2841) peaks
+PROGRESS 2744/2841  (2744/2841) peaks
+PROGRESS 2772/2841  (2772/2841) peaks
+PROGRESS 2800/2841  (2800/2841) peaks
+PROGRESS 2828/2841  (2828/2841) peaks
+PROGRESS 2841/2841  (2841/2841) peaks
+  Detection complete: 7966 peaks in 2747 bins
+
+Done: 7966 peaks in 2747 bins -> /mnt/c/Users/trobson/OneDrive - Argonne National Laboratory/2026-1_Luo/TakaTest/TakaProject/Labels/Scan_0203/5x5_tophat_band_adaptive_snr_peaks_3x3.json
+  peaks 3 OK
+===== BIN 3x3 : shapes =====
+[shapes] algorithm: /mnt/c/Users/trobson/OneDrive - Argonne National Laboratory/2026-1_Luo/xrd_app/ShapeAlgorithms/gaussian.py
+[shapes] peaks: /mnt/c/Users/trobson/OneDrive - Argonne National Laboratory/2026-1_Luo/TakaTest/TakaProject/Labels/Scan_0203/5x5_tophat_band_adaptive_snr_peaks_3x3.json
+
+  Grid: 51 x 56 = 2856 bins
+  Linking peaks across bins (Union-Find)...
+  1029 raw features: 202 multi-bin, 827 single-bin
+PROGRESS 1/2  (1/2) shapes
+  Filtering by gaussian profile + characterizing shapes...
+PROGRESS 2/2  (2/2) shapes
+  Kept (shapes): 185   Filtered: 844
+  Wrote 185 kept features to /mnt/c/Users/trobson/OneDrive - Argonne National Laboratory/2026-1_Luo/TakaTest/TakaProject/Labels/Scan_0203/feature_catalog_3x3.json
+  Wrote 185 kept peaks to /mnt/c/Users/trobson/OneDrive - Argonne National Laboratory/2026-1_Luo/TakaTest/TakaProject/Labels/Scan_0203/kept_peaks_3x3.csv
+  Wrote 844 filtered peaks to /mnt/c/Users/trobson/OneDrive - Argonne National Laboratory/2026-1_Luo/TakaTest/TakaProject/Labels/Scan_0203/filtered_peaks_3x3.csv
+
+Done: 185 shapes kept, 844 filtered -> /mnt/c/Users/trobson/OneDrive - Argonne National Laboratory/2026-1_Luo/TakaTest/TakaProject/Labels/Scan_0203/gaussian_shapes_3x3.json
+  shapes 3 OK
+===== BIN 3x3 COMPLETE Fri Jun 26 11:55:26 AM CDT 2026 =====
+===== BIN 2x2 : make-bins =====
+Loading scan metadata from /mnt/c/Users/trobson/OneDrive - Argonne National Laboratory/2026-1_Luo/raw_scans/Scan_0203/XRD ...
+  25170 frames across 151 H5 files
+Computing scan grid from layout + true (X, Y) positions ...
+  file-per-row grid (commanded-position columns, position-oriented): 151 x 167 (col <- Y)
+  Scan grid: 151 rows x 167 cols
+Building bin mapping with bin_size=2 ...
+  6361 bins (76 x 84)
+Wrote /mnt/c/Users/trobson/OneDrive - Argonne National Laboratory/2026-1_Luo/TakaTest/TakaProject/Metadata/Scan_0203/grid_mapping_2x2.json (506 KB)
+Wrote grid_mapping -> /mnt/c/Users/trobson/OneDrive - Argonne National Laboratory/2026-1_Luo/TakaTest/TakaProject/Metadata/Scan_0203/grid_mapping_2x2.json
+Building 6361 bin images (2x2) -> /mnt/c/Users/trobson/OneDrive - Argonne National Laboratory/2026-1_Luo/TakaTest/TakaProject/Binned/Scan_0203/xrd_2x2_bins.h5
+  Compression: gzip
+  [100/6361] 18s elapsed, ~1112s remaining
+  [200/6361] 37s elapsed, ~1128s remaining
+  [300/6361] 54s elapsed, ~1099s remaining
+  [400/6361] 72s elapsed, ~1072s remaining
+  [500/6361] 90s elapsed, ~1049s remaining
+  [600/6361] 107s elapsed, ~1029s remaining
+  [700/6361] 125s elapsed, ~1008s remaining
+  [800/6361] 143s elapsed, ~992s remaining
+  [900/6361] 160s elapsed, ~973s remaining
+  [1000/6361] 181s elapsed, ~968s remaining
+  [1100/6361] 205s elapsed, ~983s remaining
+  [1200/6361] 232s elapsed, ~999s remaining
+  [1300/6361] 253s elapsed, ~983s remaining
+  [1400/6361] 271s elapsed, ~959s remaining
+  [1500/6361] 288s elapsed, ~933s remaining
+  [1600/6361] 309s elapsed, ~920s remaining
+  [1700/6361] 330s elapsed, ~904s remaining
+  [1800/6361] 351s elapsed, ~888s remaining
+  [1900/6361] 376s elapsed, ~884s remaining
+  [2000/6361] 398s elapsed, ~868s remaining
+  [2100/6361] 417s elapsed, ~845s remaining
+  [2200/6361] 435s elapsed, ~822s remaining
+  [2300/6361] 452s elapsed, ~799s remaining
+  [2400/6361] 470s elapsed, ~776s remaining
+  [2500/6361] 488s elapsed, ~754s remaining
+  [2600/6361] 505s elapsed, ~731s remaining
+  [2700/6361] 523s elapsed, ~709s remaining
+  [2800/6361] 540s elapsed, ~687s remaining
+  [2900/6361] 558s elapsed, ~666s remaining
+  [3000/6361] 575s elapsed, ~645s remaining
+  [3100/6361] 592s elapsed, ~623s remaining
+  [3200/6361] 609s elapsed, ~602s remaining
+  [3300/6361] 628s elapsed, ~582s remaining
+  [3400/6361] 647s elapsed, ~563s remaining
+  [3500/6361] 668s elapsed, ~546s remaining
+  [3600/6361] 688s elapsed, ~528s remaining
+  [3700/6361] 709s elapsed, ~510s remaining
+  [3800/6361] 727s elapsed, ~490s remaining
+  [3900/6361] 744s elapsed, ~470s remaining
+  [4000/6361] 761s elapsed, ~449s remaining
+  [4100/6361] 778s elapsed, ~429s remaining
+  [4200/6361] 795s elapsed, ~409s remaining
+  [4300/6361] 812s elapsed, ~389s remaining
+  [4400/6361] 828s elapsed, ~369s remaining
+  [4500/6361] 845s elapsed, ~350s remaining
+  [4600/6361] 863s elapsed, ~330s remaining
+  [4700/6361] 880s elapsed, ~311s remaining
+  [4800/6361] 896s elapsed, ~291s remaining
+  [4900/6361] 912s elapsed, ~272s remaining
+  [5000/6361] 928s elapsed, ~253s remaining
+  [5100/6361] 945s elapsed, ~234s remaining
+  [5200/6361] 962s elapsed, ~215s remaining
+  [5300/6361] 978s elapsed, ~196s remaining
+  [5400/6361] 994s elapsed, ~177s remaining
+  [5500/6361] 1011s elapsed, ~158s remaining
+  [5600/6361] 1029s elapsed, ~140s remaining
+  [5700/6361] 1045s elapsed, ~121s remaining
+  [5800/6361] 1062s elapsed, ~103s remaining
+  [5900/6361] 1079s elapsed, ~84s remaining
+  [6000/6361] 1095s elapsed, ~66s remaining
+  [6100/6361] 1109s elapsed, ~47s remaining
+  [6200/6361] 1126s elapsed, ~29s remaining
+  [6300/6361] 1143s elapsed, ~11s remaining
+  [6361/6361] 1153s elapsed, ~0s remaining
+Done! /mnt/c/Users/trobson/OneDrive - Argonne National Laboratory/2026-1_Luo/TakaTest/TakaProject/Binned/Scan_0203/xrd_2x2_bins.h5: 3900 MB (3.8 GB)
+Wrote bins -> /mnt/c/Users/trobson/OneDrive - Argonne National Laboratory/2026-1_Luo/TakaTest/TakaProject/Binned/Scan_0203/xrd_2x2_bins.h5
+
+Bins ready: /mnt/c/Users/trobson/OneDrive - Argonne National Laboratory/2026-1_Luo/TakaTest/TakaProject/Binned/Scan_0203/xrd_2x2_bins.h5
+  make-bins 2 OK
+===== BIN 2x2 : peaks =====
+[peaks] detector: /mnt/c/Users/trobson/OneDrive - Argonne National Laboratory/2026-1_Luo/xrd_app/PeakAlgorithms/5x5_tophat_band_adaptive_snr.py
+[peaks] bins: /mnt/c/Users/trobson/OneDrive - Argonne National Laboratory/2026-1_Luo/TakaTest/TakaProject/Binned/Scan_0203/xrd_2x2_bins.h5
+
+  Reflections: ['PbI2', '(001)', '(011)', '(111)', '(002)', 'ITO', '(012)', '(112)', '21.30', '22.60', '26.16']
+  Running detector on 6361 bins (5 workers)...
+PROGRESS 63/6361  (63/6361) peaks
+PROGRESS 126/6361  (126/6361) peaks
+PROGRESS 189/6361  (189/6361) peaks
+PROGRESS 252/6361  (252/6361) peaks
+PROGRESS 315/6361  (315/6361) peaks
+PROGRESS 378/6361  (378/6361) peaks
+PROGRESS 441/6361  (441/6361) peaks
+PROGRESS 504/6361  (504/6361) peaks
+PROGRESS 567/6361  (567/6361) peaks
+PROGRESS 630/6361  (630/6361) peaks
+PROGRESS 693/6361  (693/6361) peaks
+PROGRESS 756/6361  (756/6361) peaks
+PROGRESS 819/6361  (819/6361) peaks
+PROGRESS 882/6361  (882/6361) peaks
+PROGRESS 945/6361  (945/6361) peaks
+PROGRESS 1008/6361  (1008/6361) peaks
+PROGRESS 1071/6361  (1071/6361) peaks
+PROGRESS 1134/6361  (1134/6361) peaks
+PROGRESS 1197/6361  (1197/6361) peaks
+PROGRESS 1260/6361  (1260/6361) peaks
+PROGRESS 1323/6361  (1323/6361) peaks
+PROGRESS 1386/6361  (1386/6361) peaks
+PROGRESS 1449/6361  (1449/6361) peaks
+PROGRESS 1512/6361  (1512/6361) peaks
+PROGRESS 1575/6361  (1575/6361) peaks
+PROGRESS 1638/6361  (1638/6361) peaks
+PROGRESS 1701/6361  (1701/6361) peaks
+PROGRESS 1764/6361  (1764/6361) peaks
+PROGRESS 1827/6361  (1827/6361) peaks
+PROGRESS 1890/6361  (1890/6361) peaks
+PROGRESS 1953/6361  (1953/6361) peaks
+PROGRESS 2016/6361  (2016/6361) peaks
+PROGRESS 2079/6361  (2079/6361) peaks
+PROGRESS 2142/6361  (2142/6361) peaks
+PROGRESS 2205/6361  (2205/6361) peaks
+PROGRESS 2268/6361  (2268/6361) peaks
+PROGRESS 2331/6361  (2331/6361) peaks
+PROGRESS 2394/6361  (2394/6361) peaks
+PROGRESS 2457/6361  (2457/6361) peaks
+PROGRESS 2520/6361  (2520/6361) peaks
+PROGRESS 2583/6361  (2583/6361) peaks
+PROGRESS 2646/6361  (2646/6361) peaks
+PROGRESS 2709/6361  (2709/6361) peaks
+PROGRESS 2772/6361  (2772/6361) peaks
+PROGRESS 2835/6361  (2835/6361) peaks
+PROGRESS 2898/6361  (2898/6361) peaks
+PROGRESS 2961/6361  (2961/6361) peaks
+PROGRESS 3024/6361  (3024/6361) peaks
+PROGRESS 3087/6361  (3087/6361) peaks
+PROGRESS 3150/6361  (3150/6361) peaks
+PROGRESS 3213/6361  (3213/6361) peaks
+PROGRESS 3276/6361  (3276/6361) peaks
+PROGRESS 3339/6361  (3339/6361) peaks
+PROGRESS 3402/6361  (3402/6361) peaks
+PROGRESS 3465/6361  (3465/6361) peaks
+PROGRESS 3528/6361  (3528/6361) peaks
+PROGRESS 3591/6361  (3591/6361) peaks
+PROGRESS 3654/6361  (3654/6361) peaks
+PROGRESS 3717/6361  (3717/6361) peaks
+PROGRESS 3780/6361  (3780/6361) peaks
+PROGRESS 3843/6361  (3843/6361) peaks
+PROGRESS 3906/6361  (3906/6361) peaks
+PROGRESS 3969/6361  (3969/6361) peaks
+PROGRESS 4032/6361  (4032/6361) peaks
+PROGRESS 4095/6361  (4095/6361) peaks
+PROGRESS 4158/6361  (4158/6361) peaks
+PROGRESS 4221/6361  (4221/6361) peaks
+PROGRESS 4284/6361  (4284/6361) peaks
+PROGRESS 4347/6361  (4347/6361) peaks
+PROGRESS 4410/6361  (4410/6361) peaks
+PROGRESS 4473/6361  (4473/6361) peaks
+PROGRESS 4536/6361  (4536/6361) peaks
+PROGRESS 4599/6361  (4599/6361) peaks
+PROGRESS 4662/6361  (4662/6361) peaks
+PROGRESS 4725/6361  (4725/6361) peaks
+PROGRESS 4788/6361  (4788/6361) peaks
+PROGRESS 4851/6361  (4851/6361) peaks
+PROGRESS 4914/6361  (4914/6361) peaks
+PROGRESS 4977/6361  (4977/6361) peaks
+PROGRESS 5040/6361  (5040/6361) peaks
+PROGRESS 5103/6361  (5103/6361) peaks
+PROGRESS 5166/6361  (5166/6361) peaks
+PROGRESS 5229/6361  (5229/6361) peaks
+PROGRESS 5292/6361  (5292/6361) peaks
+PROGRESS 5355/6361  (5355/6361) peaks
+PROGRESS 5418/6361  (5418/6361) peaks
+PROGRESS 5481/6361  (5481/6361) peaks
+PROGRESS 5544/6361  (5544/6361) peaks
+PROGRESS 5607/6361  (5607/6361) peaks
+PROGRESS 5670/6361  (5670/6361) peaks
+PROGRESS 5733/6361  (5733/6361) peaks
+PROGRESS 5796/6361  (5796/6361) peaks
+PROGRESS 5859/6361  (5859/6361) peaks
+PROGRESS 5922/6361  (5922/6361) peaks
+PROGRESS 5985/6361  (5985/6361) peaks
+PROGRESS 6048/6361  (6048/6361) peaks
+PROGRESS 6111/6361  (6111/6361) peaks
+PROGRESS 6174/6361  (6174/6361) peaks
+PROGRESS 6237/6361  (6237/6361) peaks
+PROGRESS 6300/6361  (6300/6361) peaks
+PROGRESS 6361/6361  (6361/6361) peaks
+  Detection complete: 15054 peaks in 6042 bins
+
+Done: 15054 peaks in 6042 bins -> /mnt/c/Users/trobson/OneDrive - Argonne National Laboratory/2026-1_Luo/TakaTest/TakaProject/Labels/Scan_0203/5x5_tophat_band_adaptive_snr_peaks_2x2.json
+  peaks 2 OK
+===== BIN 2x2 : shapes =====
+[shapes] algorithm: /mnt/c/Users/trobson/OneDrive - Argonne National Laboratory/2026-1_Luo/xrd_app/ShapeAlgorithms/gaussian.py
+[shapes] peaks: /mnt/c/Users/trobson/OneDrive - Argonne National Laboratory/2026-1_Luo/TakaTest/TakaProject/Labels/Scan_0203/5x5_tophat_band_adaptive_snr_peaks_2x2.json
+
+  Grid: 76 x 84 = 6384 bins
+  Linking peaks across bins (Union-Find)...
+  950 raw features: 289 multi-bin, 661 single-bin
+PROGRESS 1/2  (1/2) shapes
+  Filtering by gaussian profile + characterizing shapes...
+PROGRESS 2/2  (2/2) shapes
+  Kept (shapes): 263   Filtered: 687
+  Wrote 263 kept features to /mnt/c/Users/trobson/OneDrive - Argonne National Laboratory/2026-1_Luo/TakaTest/TakaProject/Labels/Scan_0203/feature_catalog_2x2.json
+  Wrote 263 kept peaks to /mnt/c/Users/trobson/OneDrive - Argonne National Laboratory/2026-1_Luo/TakaTest/TakaProject/Labels/Scan_0203/kept_peaks_2x2.csv
+  Wrote 687 filtered peaks to /mnt/c/Users/trobson/OneDrive - Argonne National Laboratory/2026-1_Luo/TakaTest/TakaProject/Labels/Scan_0203/filtered_peaks_2x2.csv
+
+Done: 263 shapes kept, 687 filtered -> /mnt/c/Users/trobson/OneDrive - Argonne National Laboratory/2026-1_Luo/TakaTest/TakaProject/Labels/Scan_0203/gaussian_shapes_2x2.json
+  shapes 2 OK
+===== BIN 2x2 COMPLETE Fri Jun 26 12:22:10 PM CDT 2026 =====
+===== BIN 1x1 : make-bins =====
+Loading scan metadata from /mnt/c/Users/trobson/OneDrive - Argonne National Laboratory/2026-1_Luo/raw_scans/Scan_0203/XRD ...
+  25170 frames across 151 H5 files
+Computing scan grid from layout + true (X, Y) positions ...
+  file-per-row grid (commanded-position columns, position-oriented): 151 x 167 (col <- Y)
+  Scan grid: 151 rows x 167 cols
+Building bin mapping with bin_size=1 ...
+  25170 bins (151 x 167)
+Wrote /mnt/c/Users/trobson/OneDrive - Argonne National Laboratory/2026-1_Luo/TakaTest/TakaProject/Metadata/Scan_0203/grid_mapping_1x1.json (725 KB)
+Wrote grid_mapping -> /mnt/c/Users/trobson/OneDrive - Argonne National Laboratory/2026-1_Luo/TakaTest/TakaProject/Metadata/Scan_0203/grid_mapping_1x1.json
+Building 25170 bin images (1x1) -> /mnt/c/Users/trobson/OneDrive - Argonne National Laboratory/2026-1_Luo/TakaTest/TakaProject/Binned/Scan_0203/xrd_1x1_bins.h5
+  Compression: gzip
+  [100/25170] 8s elapsed, ~2044s remaining
+  [200/25170] 16s elapsed, ~1950s remaining
+  [300/25170] 23s elapsed, ~1898s remaining
+  [400/25170] 30s elapsed, ~1863s remaining
+  [500/25170] 37s elapsed, ~1841s remaining
+  [600/25170] 45s elapsed, ~1831s remaining
+  [700/25170] 52s elapsed, ~1813s remaining
+  [800/25170] 59s elapsed, ~1808s remaining
+  [900/25170] 67s elapsed, ~1805s remaining
+  [1000/25170] 75s elapsed, ~1802s remaining
+  [1100/25170] 82s elapsed, ~1802s remaining
+  [1200/25170] 91s elapsed, ~1811s remaining
+  [1300/25170] 99s elapsed, ~1811s remaining
+  [1400/25170] 107s elapsed, ~1810s remaining
+  [1500/25170] 115s elapsed, ~1820s remaining
+  [1600/25170] 123s elapsed, ~1815s remaining
+  [1700/25170] 132s elapsed, ~1816s remaining
+  [1800/25170] 139s elapsed, ~1804s remaining
+  [1900/25170] 147s elapsed, ~1795s remaining
+  [2000/25170] 154s elapsed, ~1788s remaining
+  [2100/25170] 162s elapsed, ~1777s remaining
+  [2200/25170] 169s elapsed, ~1765s remaining
+  [2300/25170] 177s elapsed, ~1757s remaining
+  [2400/25170] 185s elapsed, ~1754s remaining
+  [2500/25170] 193s elapsed, ~1747s remaining
+  [2600/25170] 201s elapsed, ~1741s remaining
+  [2700/25170] 208s elapsed, ~1733s remaining
+  [2800/25170] 216s elapsed, ~1723s remaining
+  [2900/25170] 224s elapsed, ~1721s remaining
+  [3000/25170] 231s elapsed, ~1707s remaining
+  [3100/25170] 238s elapsed, ~1698s remaining
+  [3200/25170] 246s elapsed, ~1688s remaining
+  [3300/25170] 253s elapsed, ~1680s remaining
+  [3400/25170] 262s elapsed, ~1675s remaining
+  [3500/25170] 270s elapsed, ~1670s remaining
+  [3600/25170] 277s elapsed, ~1661s remaining
+  [3700/25170] 284s elapsed, ~1650s remaining
+  [3800/25170] 291s elapsed, ~1639s remaining
+  [3900/25170] 299s elapsed, ~1629s remaining
+  [4000/25170] 306s elapsed, ~1618s remaining
+  [4100/25170] 313s elapsed, ~1609s remaining
+  [4200/25170] 321s elapsed, ~1602s remaining
+  [4300/25170] 328s elapsed, ~1593s remaining
+  [4400/25170] 335s elapsed, ~1583s remaining
+  [4500/25170] 342s elapsed, ~1573s remaining
+  [4600/25170] 350s elapsed, ~1564s remaining
+  [4700/25170] 357s elapsed, ~1555s remaining
+  [4800/25170] 364s elapsed, ~1546s remaining
+  [4900/25170] 372s elapsed, ~1537s remaining
+  [5000/25170] 379s elapsed, ~1528s remaining
+  [5100/25170] 386s elapsed, ~1519s remaining
+  [5200/25170] 394s elapsed, ~1512s remaining
+  [5300/25170] 402s elapsed, ~1506s remaining
+  [5400/25170] 409s elapsed, ~1498s remaining
+  [5500/25170] 416s elapsed, ~1489s remaining
+  [5600/25170] 424s elapsed, ~1481s remaining
+  [5700/25170] 432s elapsed, ~1476s remaining
+  [5800/25170] 440s elapsed, ~1470s remaining
+  [5900/25170] 448s elapsed, ~1462s remaining
+  [6000/25170] 455s elapsed, ~1453s remaining
+  [6100/25170] 462s elapsed, ~1444s remaining
+  [6200/25170] 469s elapsed, ~1435s remaining
+  [6300/25170] 476s elapsed, ~1427s remaining
+  [6400/25170] 484s elapsed, ~1419s remaining
+  [6500/25170] 491s elapsed, ~1410s remaining
+  [6600/25170] 498s elapsed, ~1402s remaining
+  [6700/25170] 506s elapsed, ~1396s remaining
+  [6800/25170] 514s elapsed, ~1389s remaining
+  [6900/25170] 522s elapsed, ~1383s remaining
+  [7000/25170] 530s elapsed, ~1376s remaining
+  [7100/25170] 538s elapsed, ~1369s remaining
+  [7200/25170] 546s elapsed, ~1363s remaining
+  [7300/25170] 554s elapsed, ~1357s remaining
+  [7400/25170] 563s elapsed, ~1352s remaining
+  [7500/25170] 570s elapsed, ~1344s remaining
+  [7600/25170] 578s elapsed, ~1337s remaining
+  [7700/25170] 587s elapsed, ~1331s remaining
+  [7800/25170] 595s elapsed, ~1324s remaining
+  [7900/25170] 602s elapsed, ~1317s remaining
+  [8000/25170] 610s elapsed, ~1310s remaining
+  [8100/25170] 619s elapsed, ~1304s remaining
+  [8200/25170] 626s elapsed, ~1296s remaining
+  [8300/25170] 635s elapsed, ~1291s remaining
+  [8400/25170] 643s elapsed, ~1283s remaining
+  [8500/25170] 651s elapsed, ~1276s remaining
+  [8600/25170] 658s elapsed, ~1268s remaining
+  [8700/25170] 666s elapsed, ~1261s remaining
+  [8800/25170] 674s elapsed, ~1254s remaining
+  [8900/25170] 682s elapsed, ~1248s remaining
+  [9000/25170] 690s elapsed, ~1240s remaining
+  [9100/25170] 699s elapsed, ~1234s remaining
+  [9200/25170] 707s elapsed, ~1227s remaining
+  [9300/25170] 715s elapsed, ~1220s remaining
+  [9400/25170] 722s elapsed, ~1212s remaining
+  [9500/25170] 730s elapsed, ~1205s remaining
+  [9600/25170] 738s elapsed, ~1197s remaining
+  [9700/25170] 745s elapsed, ~1189s remaining
+  [9800/25170] 753s elapsed, ~1181s remaining
+  [9900/25170] 761s elapsed, ~1173s remaining
+  [10000/25170] 768s elapsed, ~1166s remaining
+  [10100/25170] 776s elapsed, ~1158s remaining
+  [10200/25170] 784s elapsed, ~1150s remaining
+  [10300/25170] 791s elapsed, ~1142s remaining
+  [10400/25170] 799s elapsed, ~1135s remaining
+  [10500/25170] 807s elapsed, ~1128s remaining
+  [10600/25170] 815s elapsed, ~1121s remaining
+  [10700/25170] 824s elapsed, ~1115s remaining
+  [10800/25170] 832s elapsed, ~1107s remaining
+  [10900/25170] 839s elapsed, ~1098s remaining
+  [11000/25170] 846s elapsed, ~1090s remaining
+  [11100/25170] 853s elapsed, ~1082s remaining
+  [11200/25170] 861s elapsed, ~1074s remaining
+  [11300/25170] 868s elapsed, ~1065s remaining
+  [11400/25170] 875s elapsed, ~1057s remaining
+  [11500/25170] 883s elapsed, ~1049s remaining
+  [11600/25170] 890s elapsed, ~1041s remaining
+  [11700/25170] 897s elapsed, ~1033s remaining
+  [11800/25170] 904s elapsed, ~1025s remaining
+  [11900/25170] 912s elapsed, ~1017s remaining
+  [12000/25170] 919s elapsed, ~1009s remaining
+  [12100/25170] 926s elapsed, ~1001s remaining
+  [12200/25170] 934s elapsed, ~993s remaining
+  [12300/25170] 942s elapsed, ~985s remaining
+  [12400/25170] 949s elapsed, ~978s remaining
+  [12500/25170] 957s elapsed, ~970s remaining
+  [12600/25170] 965s elapsed, ~963s remaining
+  [12700/25170] 973s elapsed, ~955s remaining
+  [12800/25170] 980s elapsed, ~947s remaining
+  [12900/25170] 988s elapsed, ~940s remaining
+  [13000/25170] 996s elapsed, ~932s remaining
+  [13100/25170] 1004s elapsed, ~925s remaining
+  [13200/25170] 1011s elapsed, ~917s remaining
+  [13300/25170] 1019s elapsed, ~909s remaining
+  [13400/25170] 1026s elapsed, ~902s remaining
+  [13500/25170] 1034s elapsed, ~894s remaining
+  [13600/25170] 1042s elapsed, ~887s remaining
+  [13700/25170] 1050s elapsed, ~879s remaining
+  [13800/25170] 1058s elapsed, ~872s remaining
+  [13900/25170] 1066s elapsed, ~864s remaining
+  [14000/25170] 1075s elapsed, ~858s remaining
+  [14100/25170] 1083s elapsed, ~850s remaining
+  [14200/25170] 1090s elapsed, ~842s remaining
+  [14300/25170] 1098s elapsed, ~835s remaining
+  [14400/25170] 1106s elapsed, ~827s remaining
+  [14500/25170] 1114s elapsed, ~820s remaining
+  [14600/25170] 1122s elapsed, ~812s remaining
+  [14700/25170] 1130s elapsed, ~805s remaining
+  [14800/25170] 1138s elapsed, ~797s remaining
+  [14900/25170] 1146s elapsed, ~790s remaining
+  [15000/25170] 1153s elapsed, ~782s remaining
+  [15100/25170] 1161s elapsed, ~774s remaining
+  [15200/25170] 1169s elapsed, ~767s remaining
+  [15300/25170] 1176s elapsed, ~759s remaining
+  [15400/25170] 1185s elapsed, ~752s remaining
+  [15500/25170] 1192s elapsed, ~744s remaining
+  [15600/25170] 1200s elapsed, ~736s remaining
+  [15700/25170] 1208s elapsed, ~729s remaining
+  [15800/25170] 1215s elapsed, ~721s remaining
+  [15900/25170] 1223s elapsed, ~713s remaining
+  [16000/25170] 1231s elapsed, ~705s remaining
+  [16100/25170] 1239s elapsed, ~698s remaining
+  [16200/25170] 1247s elapsed, ~690s remaining
+  [16300/25170] 1254s elapsed, ~683s remaining
+  [16400/25170] 1262s elapsed, ~675s remaining
+  [16500/25170] 1270s elapsed, ~667s remaining
+  [16600/25170] 1277s elapsed, ~659s remaining
+  [16700/25170] 1284s elapsed, ~651s remaining
+  [16800/25170] 1292s elapsed, ~644s remaining
+  [16900/25170] 1299s elapsed, ~636s remaining
+  [17000/25170] 1306s elapsed, ~628s remaining
+  [17100/25170] 1313s elapsed, ~620s remaining
+  [17200/25170] 1320s elapsed, ~612s remaining
+  [17300/25170] 1327s elapsed, ~604s remaining
+  [17400/25170] 1334s elapsed, ~596s remaining
+  [17500/25170] 1342s elapsed, ~588s remaining
+  [17600/25170] 1349s elapsed, ~580s remaining
+  [17700/25170] 1356s elapsed, ~572s remaining
+  [17800/25170] 1363s elapsed, ~564s remaining
+  [17900/25170] 1371s elapsed, ~557s remaining
+  [18000/25170] 1378s elapsed, ~549s remaining
+  [18100/25170] 1385s elapsed, ~541s remaining
+  [18200/25170] 1392s elapsed, ~533s remaining
+  [18300/25170] 1401s elapsed, ~526s remaining
+  [18400/25170] 1408s elapsed, ~518s remaining
+  [18500/25170] 1416s elapsed, ~510s remaining
+  [18600/25170] 1426s elapsed, ~504s remaining
+  [18700/25170] 1435s elapsed, ~496s remaining
+  [18800/25170] 1443s elapsed, ~489s remaining
+  [18900/25170] 1451s elapsed, ~481s remaining
+  [19000/25170] 1459s elapsed, ~474s remaining
+  [19100/25170] 1468s elapsed, ~466s remaining
+  [19200/25170] 1475s elapsed, ~459s remaining
+  [19300/25170] 1482s elapsed, ~451s remaining
+  [19400/25170] 1489s elapsed, ~443s remaining
+  [19500/25170] 1497s elapsed, ~435s remaining
+  [19600/25170] 1505s elapsed, ~428s remaining
+  [19700/25170] 1513s elapsed, ~420s remaining
+  [19800/25170] 1521s elapsed, ~413s remaining
+  [19900/25170] 1529s elapsed, ~405s remaining
+  [20000/25170] 1537s elapsed, ~397s remaining
+  [20100/25170] 1545s elapsed, ~390s remaining
+  [20200/25170] 1554s elapsed, ~382s remaining
+  [20300/25170] 1562s elapsed, ~375s remaining
+  [20400/25170] 1571s elapsed, ~367s remaining
+  [20500/25170] 1579s elapsed, ~360s remaining
+  [20600/25170] 1587s elapsed, ~352s remaining
+  [20700/25170] 1595s elapsed, ~344s remaining
+  [20800/25170] 1604s elapsed, ~337s remaining
+  [20900/25170] 1611s elapsed, ~329s remaining
+  [21000/25170] 1618s elapsed, ~321s remaining
+  [21100/25170] 1625s elapsed, ~314s remaining
+  [21200/25170] 1633s elapsed, ~306s remaining
+  [21300/25170] 1641s elapsed, ~298s remaining
+  [21400/25170] 1648s elapsed, ~290s remaining
+  [21500/25170] 1655s elapsed, ~283s remaining
+  [21600/25170] 1663s elapsed, ~275s remaining
+  [21700/25170] 1671s elapsed, ~267s remaining
+  [21800/25170] 1678s elapsed, ~259s remaining
+  [21900/25170] 1686s elapsed, ~252s remaining
+  [22000/25170] 1693s elapsed, ~244s remaining
+  [22100/25170] 1700s elapsed, ~236s remaining
+  [22200/25170] 1708s elapsed, ~228s remaining
+  [22300/25170] 1716s elapsed, ~221s remaining
+  [22400/25170] 1723s elapsed, ~213s remaining
+  [22500/25170] 1732s elapsed, ~205s remaining
+  [22600/25170] 1740s elapsed, ~198s remaining
+  [22700/25170] 1749s elapsed, ~190s remaining
+  [22800/25170] 1757s elapsed, ~183s remaining
+  [22900/25170] 1765s elapsed, ~175s remaining
+  [23000/25170] 1773s elapsed, ~167s remaining
+  [23100/25170] 1781s elapsed, ~160s remaining
+  [23200/25170] 1788s elapsed, ~152s remaining
+  [23300/25170] 1796s elapsed, ~144s remaining
+  [23400/25170] 1803s elapsed, ~136s remaining
+  [23500/25170] 1810s elapsed, ~129s remaining
+  [23600/25170] 1817s elapsed, ~121s remaining
+  [23700/25170] 1825s elapsed, ~113s remaining
+  [23800/25170] 1832s elapsed, ~105s remaining
+  [23900/25170] 1839s elapsed, ~98s remaining
+  [24000/25170] 1848s elapsed, ~90s remaining
+  [24100/25170] 1856s elapsed, ~82s remaining
+  [24200/25170] 1864s elapsed, ~75s remaining
+  [24300/25170] 1871s elapsed, ~67s remaining
+  [24400/25170] 1879s elapsed, ~59s remaining
+  [24500/25170] 1886s elapsed, ~52s remaining
+  [24600/25170] 1893s elapsed, ~44s remaining
+  [24700/25170] 1900s elapsed, ~36s remaining
+  [24800/25170] 1909s elapsed, ~28s remaining
+  [24900/25170] 1917s elapsed, ~21s remaining

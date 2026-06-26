@@ -82,9 +82,15 @@ aggregate) inherits it. The grid mapping JSON records which lattice it is on via
 
 | `coordinate_source` | How `(row, col)` is assigned | When |
 |---|---|---|
-| `positions_xy` | **De-skewed** from true stage **(X, Y)** snapped to a regular lattice (`assign_grid_from_positions`). The canonical system. | Default, when a position CSV with `Y_Position` exists. |
+| `file_per_row` | From the one-file-per-scan-row HDF5 layout: `row` = file index, `col` = within-file rank (the **commanded** fast-axis position), serpentine-aware. Exact dimensions, one cell per frame, no merges. When a real position CSV exists the **(X, Y)** are used only to orient the axes (no re-snapping). | Default for a clean one-file-per-row raster (with *or* without a position CSV). |
+| `positions_xy` | Turn-counted position snap (`assign_grid_from_positions` fallback): both axes snapped onto a `build_scan_grid` lattice from real (X, Y). | Real position CSV but the scan is **not** one-file-per-row (fly-scans, multi-row files, irregular). |
 | `serpentine` | Legacy X-only turn-counting (`build_scan_grid`). | `--rawgrid` bypass, or CSV has no `Y_Position`. |
-| `synthetic` | Regular boustrophedon raster from `n_cols` (`build_regular_grid`). | No position CSV (`--shape`). |
+| `synthetic` | Regular boustrophedon raster from `n_cols` (`build_regular_grid`). | No CSV and not file-per-row, with explicit `--shape`. |
+| `perrow_offset_deprecated` | **DEPRECATED** "triangle" method (`core/deskew_legacy.py`): file-per-row rows + a rigid per-row integer column offset from the encoder (X, Y). Amplifies serpentine *backlash* (even/odd-row divergence is an encoder artefact, not geometry) → fragments features into a parallelogram. Kept only for comparison via `grid --deskew-method perrow_offset`. | Never by default. |
+
+> **Why columns align by *commanded* position, not the encoder.** On these scans the even/odd serpentine rows' encoder Y diverges (growing to ±33 cols) — that's stage **backlash**, not real geometry. Snapping columns to the raw encoder (the deprecated `perrow_offset`) throws a feature's adjacent rows tens of columns apart and fragments it. `file_per_row` aligns by within-file rank (where the stage was *told* to go), keeping features intact. The old `positions_xy` global-scale also mis-handled this by *clipping* outlier-Y frames onto the edge column (a false hot blob).
+
+**Missing position CSV.** The SOCKETSERVER-derived `scan_NNNN_position.csv` (µm; *not* TETRAMM, which is too coarse) is sometimes absent. `xrd-app grid` then **recreates** it from the file-per-row layout (`xrd-app recreate-positions`; tagged with a `# xrd-app coordinate_source=file_per_row` marker so loaders don't mistake it for a real export) and builds a `file_per_row` grid — so downstream never zero-pads positions. Absolute µm scale of a recreated CSV is nominal (`--step-x/--step-y`); the lattice is exact.
 
 **Orientation is preserved** vs. the legacy serpentine grid: here `row ↔ X`
 (`corr(row, X) = −1.0`) and `col ↔ Y`, anchored by a reference serpentine pass so

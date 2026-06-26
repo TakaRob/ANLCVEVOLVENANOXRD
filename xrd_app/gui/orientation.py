@@ -37,15 +37,18 @@ _DM = None
 _BIN_SIZE = 3
 RESULTS_DIR = None
 HOLDOUT_DIR = None
+CATALOG_PATH = None   # selected feature-map JSON; None → canonical per-bin file
 
 
-def configure(project_root=".", bin_size=3, scan=None):
-    global _DM, _BIN_SIZE, RESULTS_DIR, HOLDOUT_DIR
+def configure(project_root=".", bin_size=3, scan=None, catalog=None):
+    global _DM, _BIN_SIZE, RESULTS_DIR, HOLDOUT_DIR, CATALOG_PATH, WEIGHT_MODE
     global DEGS, DEG_LABELS, LABELED_DEGS
     _DM = DataManager(project_root, scan=scan)
     _BIN_SIZE = bin_size
     RESULTS_DIR = _DM.results_dir()
     HOLDOUT_DIR = _DM.holdout_dir
+    CATALOG_PATH = catalog
+    WEIGHT_MODE = "count"   # fresh build starts on a plain head-count
     # Honor the per-scan/selected reflections file (fall back to defaults).
     try:
         from ..core import io as _io
@@ -76,8 +79,14 @@ COLORMAPS = [
 
 # ── Data loading ──────────────────────────────────────────────────
 def load_features():
-    with open(RESULTS_DIR / f"feature_catalog_{_BIN_SIZE}x{_BIN_SIZE}.json") as f:
-        return json.load(f)
+    """Kept-feature list from the selected feature map (or the canonical
+    per-bin ``feature_catalog_NxN.json`` when none is selected). Accepts a plain
+    list or a shapes file with a ``kept`` array — both store identical features.
+    """
+    path = CATALOG_PATH or (RESULTS_DIR / f"feature_catalog_{_BIN_SIZE}x{_BIN_SIZE}.json")
+    with open(path) as f:
+        data = json.load(f)
+    return data.get("kept", []) if isinstance(data, dict) else data
 
 
 def load_tth_map():
@@ -107,6 +116,50 @@ def compute_chi_map(shape, beam_center):
     return np.degrees(np.arctan2(ys - by, xs - bx))
 
 
+# ── Feature weighting ─────────────────────────────────────────────
+# Clumps (KDE clusters), the ring-density gradient, and the hover histograms
+# can each weight a feature by more than a plain head-count. The active mode is
+# a module global so the existing global-state functions (clustering / density)
+# need no extra threading — the window sets it before re-clustering.
+WEIGHT_MODES = [
+    ("count",     "Count — each feature = 1"),
+    ("area",      "Area — large features win (n_bins)"),
+    ("intensity", "Intensity — bright features win (peak)"),
+    ("bright_big", "Peak × spread × area — bright, large, spread win"),
+]
+WEIGHT_LABELS = {k: v.split(" — ")[0] for k, v in WEIGHT_MODES}
+WEIGHT_MODE = "count"
+
+
+def _feature_area(f):
+    return float(f.get("n_bins") or len(f.get("intensity_profile") or {}) or 1)
+
+
+def _feature_spread(f):
+    """Angular/strain spread of a feature (χ FWHM + Δ2θ FWHM), floored to 1."""
+    s = float(f.get("rocking_fwhm") or 0.0) + float(f.get("strain_breadth") or 0.0)
+    return s if s > 0 else 1.0
+
+
+def feature_weight(f, mode=None):
+    """Weight a feature contributes to a clump / histogram under ``mode``.
+
+    count      → 1 (head-count, the original behaviour)
+    area       → n_bins, so physically large features dominate
+    intensity  → peak intensity, so a small bright spot can outweigh a big faint one
+    bright_big → peak × spread × area, so bright *and* large *and* spread-out win
+    """
+    mode = mode or WEIGHT_MODE
+    if mode == "area":
+        return max(_feature_area(f), 0.0)
+    if mode == "intensity":
+        return max(float(f.get("peak_intensity") or 0.0), 0.0)
+    if mode == "bright_big":
+        inten = max(float(f.get("peak_intensity") or 0.0), 0.0)
+        return inten * _feature_spread(f) * max(_feature_area(f), 1.0)
+    return 1.0   # count (default / unknown)
+
+
 # ── Clustering ────────────────────────────────────────────────────
 def cluster_features_by_chi(features, bandwidth=5.0):
     """Group features by KDE over chi, split at valleys. Returns (clusters, valleys)."""
@@ -121,11 +174,13 @@ def cluster_features_by_chi(features, bandwidth=5.0):
         return [_make_cluster([x[1] for x in items], [x[0] for x in items])], []
 
     chis = np.array([x[0] for x in items])
+    ws = np.array([feature_weight(x[1]) for x in items], dtype=float)
+    total_w = float(ws.sum())
     grid = np.linspace(-180, 179, 360)
     kde = np.zeros(360)
-    for c in chis:
+    for c, w in zip(chis, ws):
         diff = (grid - c + 180) % 360 - 180
-        kde += np.exp(-0.5 * (diff / bandwidth) ** 2)
+        kde += w * np.exp(-0.5 * (diff / bandwidth) ** 2)
 
     pad = max(4, int(bandwidth * 2))
     kde_ext = np.concatenate([kde[-pad:], kde, kde[:pad]])
@@ -151,7 +206,7 @@ def cluster_features_by_chi(features, bandwidth=5.0):
         g = groups[idx]
         if not g:
             continue
-        cl = _make_cluster([x[1] for x in g], [x[0] for x in g], n)
+        cl = _make_cluster([x[1] for x in g], [x[0] for x in g], total_w)
         cl["chi_lo"] = float(v_norm[idx - 1] - 180)
         cl["chi_hi"] = float(v_norm[idx] - 180)
         cl["wraps"] = v_norm[idx - 1] > v_norm[idx]
@@ -160,7 +215,10 @@ def cluster_features_by_chi(features, bandwidth=5.0):
 
 
 def _make_cluster(feats, chi_vals, total=None):
-    total = total or len(feats)
+    # ``total`` is the reflection's total weight (for the weighted percentage);
+    # falls back to this clump's own weight (→ 100%) for single-cluster cases.
+    cl_w = float(sum(feature_weight(f) for f in feats))
+    total = total if total else cl_w
     chi_min, chi_max = min(chi_vals), max(chi_vals)
     if chi_max - chi_min > 180:
         shifted = [c + 360 if c < 0 else c for c in chi_vals]
@@ -183,8 +241,8 @@ def _make_cluster(feats, chi_vals, total=None):
     return {
         "chi_center": round(center, 1), "chi_span": round(span, 1),
         "chi_lo": chi_lo, "chi_hi": chi_hi, "wraps": wraps,
-        "pct": round(100.0 * len(feats) / total, 1),
-        "features": feats, "n": len(feats),
+        "pct": round(100.0 * cl_w / total, 1) if total else 0.0,
+        "features": feats, "n": len(feats), "weight": round(cl_w, 1),
     }
 
 
@@ -217,11 +275,13 @@ def build_density_overlay(tth_map, chi_map, features_by_ref, active_refs,
     for ref in active_refs:
         if ref not in LABELED_DEGS:
             continue
-        chi_vals = [f["chi_deg"] for f in features_by_ref.get(ref, [])
-                    if f.get("chi_deg") is not None]
-        if not chi_vals:
+        pairs = [(f["chi_deg"], feature_weight(f))
+                 for f in features_by_ref.get(ref, []) if f.get("chi_deg") is not None]
+        if not pairs:
             continue
-        hist, _ = np.histogram(chi_vals, bins=np.arange(-180, 181, 1))
+        chi_arr = np.array([p[0] for p in pairs])
+        w_arr = np.array([p[1] for p in pairs], dtype=float)
+        hist, _ = np.histogram(chi_arr, bins=np.arange(-180, 181, 1), weights=w_arr)
         smooth = gaussian_filter1d(hist.astype(float), sigma=sigma, mode="wrap")
         densities[ref] = smooth
         global_max = max(global_max, smooth.max())
@@ -425,6 +485,18 @@ class OrientationMapWindow(QMainWindow):
         self.contrast_hi.setToolTip("Upper percentile — colormap top maps here")
         xr.addWidget(self.contrast_hi)
         sl.addLayout(xr)
+        wr = QHBoxLayout()
+        wr.addWidget(QLabel("Weight by"))
+        self.weight_combo = QComboBox()
+        for key, label in WEIGHT_MODES:
+            self.weight_combo.addItem(label, key)
+        i = self.weight_combo.findData(WEIGHT_MODE)
+        self.weight_combo.setCurrentIndex(i if i >= 0 else 0)
+        self.weight_combo.setToolTip(
+            "How much each feature contributes to clumps and histograms: a "
+            "head-count, or weighted by area / intensity / peak×spread×area.")
+        wr.addWidget(self.weight_combo)
+        sl.addLayout(wr)
         tg = QHBoxLayout()
         self.arcs_cb = QCheckBox("Arcs"); self.arcs_cb.setChecked(True)
         self.bounds_cb = QCheckBox("Bounds"); self.bounds_cb.setChecked(True)
@@ -459,6 +531,7 @@ class OrientationMapWindow(QMainWindow):
         self.cmap_combo.currentTextChanged.connect(self._on_cmap_changed)
         self.contrast_lo.valueChanged.connect(lambda _v: self._render_main())
         self.contrast_hi.valueChanged.connect(lambda _v: self._render_main())
+        self.weight_combo.currentIndexChanged.connect(self._on_weight_changed)
         for c in (self.arcs_cb, self.bounds_cb, self.markers_cb, self.labels_cb):
             c.toggled.connect(self._on_toggle)
 
@@ -491,11 +564,57 @@ class OrientationMapWindow(QMainWindow):
         self._cmap_name = name
         self._render_main()
 
+    def _on_weight_changed(self, _idx):
+        global WEIGHT_MODE
+        WEIGHT_MODE = self.weight_combo.currentData() or "count"
+        # Weights change the KDE → re-cluster, repaint, and refresh histograms.
+        self._cluster_all()          # also rebuilds the sector-id map
+        self._render_main()
+        if self._locked_sector is not None:
+            self._restore_locked()   # redraw pinned histograms under new weights
+
     def _on_toggle(self):
         self._show_arcs = self.arcs_cb.isChecked()
         self._show_boundaries = self.bounds_cb.isChecked()
         self._show_markers = self.markers_cb.isChecked()
         self._show_labels = self.labels_cb.isChecked()
+        self._render_main()
+
+    # ── view-state carry-over (across a feature-catalog switch) ──
+    def get_view_state(self):
+        """Selected layers + weighting + colormap, so a catalog switch keeps them."""
+        return {
+            "hidden_layers": [r for r, cb in self._ref_checks.items()
+                              if not cb.isChecked()],
+            "weight": self.weight_combo.currentData(),
+            "cmap": self._cmap_name,
+        }
+
+    def apply_view_state(self, state):
+        """Re-apply a saved view state; reflections absent from this catalog and
+        unknown weight/colormap values are ignored (new reflections stay on)."""
+        if not state:
+            return
+        global WEIGHT_MODE
+        hidden = set(state.get("hidden_layers", []))
+        for ref, cb in self._ref_checks.items():
+            cb.blockSignals(True)
+            cb.setChecked(ref not in hidden)
+            cb.blockSignals(False)
+        self._active_refs = {r for r, cb in self._ref_checks.items() if cb.isChecked()}
+        cmap = state.get("cmap")
+        if cmap and self.cmap_combo.findText(cmap) >= 0:
+            self.cmap_combo.blockSignals(True)
+            self.cmap_combo.setCurrentText(cmap)
+            self.cmap_combo.blockSignals(False)
+            self._cmap_name = cmap
+        w = state.get("weight")
+        if w and self.weight_combo.findData(w) >= 0:
+            self.weight_combo.blockSignals(True)
+            self.weight_combo.setCurrentIndex(self.weight_combo.findData(w))
+            self.weight_combo.blockSignals(False)
+            WEIGHT_MODE = w
+        self._cluster_all()      # weighting may have changed; also rebuilds sectors
         self._render_main()
 
     # ── rendering ──
@@ -692,25 +811,28 @@ class OrientationMapWindow(QMainWindow):
         self.az_hist.clear()
         ref_idx = DEG_LABELS.index(ref) if ref in DEG_LABELS else 0
         color = ARC_COLORS[ref_idx % len(ARC_COLORS)]
-        all_chis = [f["chi_deg"] for f in self._by_ref.get(ref, []) if f.get("chi_deg") is not None]
-        cl_chis = [f["chi_deg"] for f in cluster["features"] if f.get("chi_deg") is not None]
-        if not all_chis:
+        all_pairs = [(f["chi_deg"], feature_weight(f))
+                     for f in self._by_ref.get(ref, []) if f.get("chi_deg") is not None]
+        cl_pairs = [(f["chi_deg"], feature_weight(f))
+                    for f in cluster["features"] if f.get("chi_deg") is not None]
+        if not all_pairs:
             return
+        all_chis = [c for c, _ in all_pairs]
         chi_min, chi_max = min(all_chis), max(all_chis)
         wraps = (chi_max - chi_min) > 180
+        _wrap = (lambda c: c + 360 if c < 0 else c) if wraps else (lambda c: c)
+        all_plot = [_wrap(c) for c, _ in all_pairs]; all_w = [w for _, w in all_pairs]
+        cl_plot = [_wrap(c) for c, _ in cl_pairs]; cl_w = [w for _, w in cl_pairs]
         if wraps:
-            all_plot = [c + 360 if c < 0 else c for c in all_chis]
-            cl_plot = [c + 360 if c < 0 else c for c in cl_chis]
             lo_plot = cluster["chi_lo"] + (360 if cluster["chi_lo"] < 0 else 0)
             hi_plot = cluster["chi_hi"] + (360 if cluster["chi_hi"] < 0 else 0)
         else:
-            all_plot, cl_plot = list(all_chis), list(cl_chis)
             lo_plot, hi_plot = cluster["chi_lo"], cluster["chi_hi"]
 
         edges = np.arange(min(all_plot) - 5, max(all_plot) + 10, 5)
         centers = (edges[:-1] + edges[1:]) / 2
-        h_all, _ = np.histogram(all_plot, bins=edges)
-        h_cl, _ = np.histogram(cl_plot, bins=edges)
+        h_all, _ = np.histogram(all_plot, bins=edges, weights=all_w)
+        h_cl, _ = np.histogram(cl_plot, bins=edges, weights=cl_w or None)
         self.az_hist.addItem(pg.BarGraphItem(x=centers, height=h_all, width=4.5,
                                              brush=(204, 204, 204, 130), pen=None))
         self.az_hist.addItem(pg.BarGraphItem(x=centers, height=h_cl, width=4.5,
@@ -719,7 +841,7 @@ class OrientationMapWindow(QMainWindow):
             self.az_hist.addItem(pg.InfiniteLine(pos=v, angle=90,
                                  pen=pg.mkPen(color, width=0.8, style=Qt.DashLine)))
         self.az_hist.setLabel("bottom", "χ (°) — bottom→top")
-        self.az_hist.setLabel("left", "Count")
+        self.az_hist.setLabel("left", WEIGHT_LABELS.get(WEIGHT_MODE, "Count"))
         self.az_hist.setTitle(f"{ref} — azimuthal ({cluster['pct']:.0f}%, "
                               f"{cluster['chi_span']:.0f}° span)")
 
@@ -728,11 +850,13 @@ class OrientationMapWindow(QMainWindow):
         ref_idx = DEG_LABELS.index(ref) if ref in DEG_LABELS else 0
         color = ARC_COLORS[ref_idx % len(ARC_COLORS)]
         ref_tth = LABELED_DEGS.get(ref)
-        delta_tths = []
+        delta_tths, d_weights = [], []
         for f in cluster["features"]:
+            w = feature_weight(f)
             for entry in f.get("intensity_profile", {}).values():
                 if isinstance(entry, dict) and "tth" in entry and ref_tth is not None:
                     delta_tths.append(entry["tth"] - ref_tth)
+                    d_weights.append(w)
         if not delta_tths:
             t = pg.TextItem("No Δ2θ data", color="#aaa", anchor=(0.5, 0.5))
             self.arc_hist.addItem(t); t.setPos(0, 0)
@@ -741,7 +865,7 @@ class OrientationMapWindow(QMainWindow):
         n_bins = min(25, max(8, len(delta_tths) // 3))
         edges = np.linspace(d_arr.min() - 0.005, d_arr.max() + 0.005, n_bins + 1)
         centers = (edges[:-1] + edges[1:]) / 2
-        hist, _ = np.histogram(d_arr, bins=edges)
+        hist, _ = np.histogram(d_arr, bins=edges, weights=np.array(d_weights))
         bw = (edges[1] - edges[0]) * 0.85
         if hist.max() > 0:
             cmap = mcm.get_cmap(self._cmap_name)
@@ -760,7 +884,7 @@ class OrientationMapWindow(QMainWindow):
                               pen=pg.mkPen(color, width=1.2)))
         self.arc_hist.getViewBox().invertX(True)
         self.arc_hist.setLabel("bottom", "Δ2θ (°)")
-        self.arc_hist.setLabel("left", "Count")
+        self.arc_hist.setLabel("left", WEIGHT_LABELS.get(WEIGHT_MODE, "Count"))
         self.arc_hist.setTitle(f"{ref} — Δ2θ ({cluster['n']} feats, "
                                f"{len(delta_tths)} meas, mean {mean_d:+.4f}°)")
 
@@ -772,9 +896,9 @@ class OrientationMapWindow(QMainWindow):
 
 
 # ── Entry point ───────────────────────────────────────────────────
-def build_window(project_root=".", scan=None, bin_size=3):
+def build_window(project_root=".", scan=None, bin_size=3, catalog=None):
     """Construct the orientation map without an event loop (for embedding)."""
-    configure(project_root=project_root, bin_size=bin_size, scan=scan)
+    configure(project_root=project_root, bin_size=bin_size, scan=scan, catalog=catalog)
     return OrientationMapWindow()
 
 

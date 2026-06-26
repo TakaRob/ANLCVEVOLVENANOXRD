@@ -1,6 +1,6 @@
 import numpy as np
 from xrd_app.core.io import build_regular_grid
-from xrd_app.core.processing import link_peaks
+from xrd_app.ShapeAlgorithms.gaussian import link_peaks
 
 def test_build_regular_grid():
     # Test uniform raster synthesis

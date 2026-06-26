@@ -17,7 +17,9 @@ from __future__ import annotations
 
 import csv
 import json
+import os
 import time
+import multiprocessing as mp
 from pathlib import Path
 from typing import Callable, Union
 
@@ -68,45 +70,89 @@ def detect_peaks_with_intensity(image, tth_map, degs, deg_labels, tth_data, det,
     return kept, cleaned
 
 
+# Worker-process state for parallel per-bin detection. The parent sets _DET_CTX
+# before the Pool is created so forked children inherit the (read-only) detector,
+# maps and params; each worker opens its own HDF5 handle via the initializer.
+_DET_CTX: dict = {}
+_DET_STATE: dict = {}
+
+
+def _detect_worker_init():
+    _DET_STATE["h5"] = h5py.File(_DET_CTX["h5_path"], "r")
+
+
+def _detect_one_bin(bk):
+    """Detect peaks in a single bin — the exact body of the serial loop, so the
+    serial and parallel paths produce identical results. Returns (bk, peaks)."""
+    c = _DET_CTX
+    image = np.clip(_DET_STATE["h5"][bk][:].astype(np.float64), 0, 1e9)
+    peaks, cleaned = detect_peaks_with_intensity(
+        image, c["tth_map"], c["degs"], c["deg_labels"], c["tth_data"],
+        c["det"], c["snr"])
+    if peaks:
+        for p in peaks:
+            r = 3
+            y0 = max(0, p['y'] - r); y1 = min(cleaned.shape[0], p['y'] + r + 1)
+            x0 = max(0, p['x'] - r); x1 = min(cleaned.shape[1], p['x'] + r + 1)
+            p['cleaned_intensity'] = float(np.max(cleaned[y0:y1, x0:x1]))
+    return bk, peaks
+
+
 def run_detection_all_bins(h5_path, tth_map, degs, deg_labels, det,
                            snr_threshold=DEFAULT_SNR, log: Callable[[str], None] = print,
-                           progress: Callable[[int, int], None] = None):
+                           progress: Callable[[int, int], None] = None,
+                           n_workers: int = None):
     """Detect peaks in every bin and return {bin_key: [peak_dicts]}.
+
+    Per-bin detection is CPU-bound and independent, so it runs across cores
+    (``n_workers``, default ``cpu_count-1``). Results are consumed in sorted-key
+    order, and serial and parallel both call :func:`_detect_one_bin`, so the
+    output is identical to the old serial loop. Falls back to serial on 1 worker
+    or if the pool can't start.
 
     ``progress(i, n)`` is called after each bin so callers (the CLI / GUI) can
     show an ``(i/n)`` count for long jobs.
     """
     tth_data = det.precompute_tth(tth_map)
     all_detections = {}
-    n_total_peaks = 0
 
     with h5py.File(str(h5_path), "r") as h5f:
         bin_keys = sorted(h5f.keys(),
                           key=lambda k: (int(k.split("_")[0]), int(k.split("_")[1])))
-        n_bins = len(bin_keys)
-        log(f"  Running detector on {n_bins} bins...")
+    n_bins = len(bin_keys)
+    nw = n_workers if n_workers is not None else max(1, (os.cpu_count() or 2) - 1)
+    log(f"  Running detector on {n_bins} bins ({nw} worker{'s' if nw != 1 else ''})...")
 
-        for i, bk in enumerate(bin_keys):
-            image = np.clip(h5f[bk][:].astype(np.float64), 0, 1e9)
-            peaks, cleaned = detect_peaks_with_intensity(
-                image, tth_map, degs, deg_labels, tth_data, det, snr_threshold)
+    global _DET_CTX
+    _DET_CTX = dict(det=det, tth_map=tth_map, degs=degs, deg_labels=deg_labels,
+                    tth_data=tth_data, snr=snr_threshold, h5_path=str(h5_path))
 
+    def _consume(it):
+        for i, (bk, peaks) in enumerate(it):
             if peaks:
-                # Also measure the cleaned-image intensity at peak position
-                for p in peaks:
-                    r = 3
-                    y0 = max(0, p['y'] - r)
-                    y1 = min(cleaned.shape[0], p['y'] + r + 1)
-                    x0 = max(0, p['x'] - r)
-                    x1 = min(cleaned.shape[1], p['x'] + r + 1)
-                    p['cleaned_intensity'] = float(np.max(cleaned[y0:y1, x0:x1]))
-
                 all_detections[bk] = peaks
-                n_total_peaks += len(peaks)
-
             if progress is not None:
                 progress(i + 1, n_bins)
 
+    used_parallel = False
+    if nw > 1:
+        try:
+            ctxmp = mp.get_context("fork")
+            with ctxmp.Pool(nw, initializer=_detect_worker_init) as pool:
+                _consume(pool.imap(_detect_one_bin, bin_keys, chunksize=8))
+            used_parallel = True
+        except Exception as e:   # pragma: no cover — degrade to serial
+            log(f"  parallel detection failed ({e}); serial fallback")
+            all_detections.clear()
+    if not used_parallel:
+        with h5py.File(str(h5_path), "r") as h5f:
+            _DET_STATE["h5"] = h5f
+            try:
+                _consume(_detect_one_bin(bk) for bk in bin_keys)
+            finally:
+                _DET_STATE.pop("h5", None)
+
+    n_total_peaks = sum(len(v) for v in all_detections.values())
     log(f"  Detection complete: {n_total_peaks} peaks in {len(all_detections)} bins")
     return all_detections
 
@@ -212,6 +258,7 @@ def run_peaks(
     snr_threshold: float = DEFAULT_SNR,
     progress: Callable[[int, int], None] = None,
     log: Callable[[str], None] = print,
+    n_workers: int = None,
 ) -> dict:
     """Phase 1 only: run a detector over every bin → per-bin peaks.
 
@@ -229,7 +276,8 @@ def run_peaks(
     log(f"  Reflections: {deg_labels}")
 
     all_detections = run_detection_all_bins(
-        bins_h5, tth_map, degs, deg_labels, det, snr_threshold, log, progress)
+        bins_h5, tth_map, degs, deg_labels, det, snr_threshold, log, progress,
+        n_workers=n_workers)
 
     peaks_by_bin = {bk: _coerce(peaks) for bk, peaks in all_detections.items()}
     n_peaks = sum(len(v) for v in peaks_by_bin.values())

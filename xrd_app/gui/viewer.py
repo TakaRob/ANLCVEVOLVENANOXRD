@@ -57,6 +57,7 @@ from ..core.algorithms import (
     subtract_background,
 )
 from ..core import io
+from ..core import catalogs
 from ..config import DataManager
 
 
@@ -130,93 +131,49 @@ def group_by_reflection(features):
 #   Feature Catalog = a shape output "<algo>_shapes_<NxN>.json"  (Shape Finding)
 # A shapes file records, in its lineage, the peaks file it was derived from.
 
+# Discovery + lineage delegate to core.catalogs (handles bin-in-middle names,
+# in-file/manifest lineage, and the flat scan dir + one level of subdirs).
+
 def list_peak_catalogs():
     """Peak-set JSONs (scan catalogs) for the current bin size, sorted by name."""
-    if RESULTS_DIR is None:
-        return []
-    return sorted(Path(RESULTS_DIR).glob(f"*_peaks_{_BIN_SIZE}x{_BIN_SIZE}.json"))
+    return catalogs.list_catalogs(RESULTS_DIR, "peaks", _BIN_SIZE) if RESULTS_DIR else []
 
 
 def list_shape_catalogs():
-    """Shape-output JSONs (feature catalogs) for the current bin size, sorted."""
-    if RESULTS_DIR is None:
-        return []
-    return sorted(Path(RESULTS_DIR).glob(f"*_shapes_{_BIN_SIZE}x{_BIN_SIZE}.json"))
+    """Feature catalogs (shapes / combined / plain feature lists) for this bin."""
+    return catalogs.feature_sources(RESULTS_DIR, _BIN_SIZE) if RESULTS_DIR else []
 
 
 def list_shape_catalogs_for(bin_size):
-    """Shape-output JSONs for an arbitrary bin size (used by View 1×1)."""
-    if RESULTS_DIR is None:
+    """Feature catalogs for an arbitrary bin size (used by View 1×1)."""
+    return catalogs.feature_sources(RESULTS_DIR, bin_size) if RESULTS_DIR else []
+
+
+def shapes_for_peaks(peaks_name):
+    """Feature catalogs derived from a peak set (by lineage), for this scan dir."""
+    if RESULTS_DIR is None or not peaks_name:
         return []
-    return sorted(Path(RESULTS_DIR).glob(f"*_shapes_{bin_size}x{bin_size}.json"))
+    return catalogs.shapes_for_peaks(RESULTS_DIR, Path(RESULTS_DIR) / peaks_name)
 
 
 def load_features_from_shapes(path):
-    """(kept, filtered) from a ``*_shapes_*.json`` (carries both arrays)."""
-    with open(path) as f:
-        data = json.load(f)
-    return data.get("kept", []), data.get("filtered", [])
+    """(kept, filtered) from any feature catalog (shapes/combined/plain list)."""
+    return catalogs.load_features_any(path)
 
 
-def peaks_to_features(peaks_by_bin):
-    """Convert a peaks-by-bin map into point-features (no shape filtering).
-
-    Each detected peak becomes a single-bin feature so the viewer can render a
-    peak set the same way it renders kept shapes. Returns (features, []).
-    """
-    feats = []
-    fid = 0
-    for bk, peaks in peaks_by_bin.items():
-        try:
-            r, c = int(bk.split("_")[0]), int(bk.split("_")[1])
-        except (ValueError, IndexError):
-            continue
-        for p in peaks:
-            fid += 1
-            inten = float(p.get("cleaned_intensity", p.get("intensity", 0)) or 0)
-            integ = float(p.get("integrated_intensity", inten) or inten)
-            x, y = int(p.get("x", 0)), int(p.get("y", 0))
-            feats.append({
-                "feature_id": fid,
-                "reflection": p.get("label", "unknown"),
-                "detector_x": x,
-                "detector_y": y,
-                "peak_intensity": inten,
-                "mean_snr": float(p.get("snr", 0) or 0),
-                "n_bins": 1,
-                "spatial_extent": [bk],
-                "center_bin": bk,
-                "center_row": r,
-                "center_col": c,
-                "intensity_profile": {bk: {
-                    "intensity": round(inten, 1),
-                    "integrated": round(integ, 1),
-                    "det_x": x, "det_y": y,
-                }},
-                "reason": "raw peak (no shape filtering)",
-            })
-    return feats, []
+# Re-exported from core.catalogs so existing call sites keep working.
+peaks_to_features = catalogs.peaks_to_features
 
 
 def load_features_from_peaks(path):
     """(features, []) from a ``*_peaks_*.json`` rendered as point-features."""
-    with open(path) as f:
-        data = json.load(f)
-    pbb = data.get("peaks_by_bin", data)
-    return peaks_to_features(pbb)
+    return catalogs.load_features_any(path)
 
 
 def shape_catalog_peak_source(path):
-    """Filename of the peak set a shapes catalog was derived from (lineage)."""
-    try:
-        with open(path) as f:
-            data = json.load(f)
-    except Exception:
-        return None
-    lin = data.get("lineage")
-    if isinstance(lin, dict):
-        return lin.get("peak_source_file")
-    return None
+    """Filename of the peak set a feature catalog was derived from (lineage)."""
+    lin = catalogs.read_lineage(path, RESULTS_DIR)
+    return lin.get("peak_source_file") if isinstance(lin, dict) else None
 
 
 # ── pyqtgraph helpers ──────────────────────────────────────────────
@@ -300,7 +257,9 @@ class HeatmapView(pg.GraphicsLayoutWidget):
             self._reposition_corner()
 
     def _reposition_corner(self):
-        w = self._corner_widget
+        # resizeEvent can fire from inside super().__init__() (before __init__
+        # sets _corner_widget) — tolerate the attribute not existing yet.
+        w = getattr(self, "_corner_widget", None)
         if w is None or not w.isVisible():
             return
         w.adjustSize()
@@ -310,6 +269,11 @@ class HeatmapView(pg.GraphicsLayoutWidget):
     def resizeEvent(self, ev):
         super().resizeEvent(ev)
         self._reposition_corner()
+
+    def fit_to_rect(self, x, y, w, h, padding=0.12):
+        """Center + zoom the view on a data rect (the selected feature's
+        footprint) so the shape is framed without manual scrolling."""
+        self.plot.getViewBox().setRange(QRectF(x, y, w, h), padding=padding)
 
     def set_click_callback(self, cb):
         self._click_cb = cb
@@ -799,27 +763,19 @@ class FeatureViewer(QMainWindow):
     def _load_selected_features(self):
         """(kept, filtered) for the current catalog selection.
 
-        Precedence: chosen Feature Catalog (shapes) → chosen Scan Catalog
-        (peaks rendered as points) → legacy ``feature_catalog_<NxN>.json``.
+        Feature Catalog (shapes/combined/plain list) takes precedence; else the
+        Scan Catalog (peaks) rendered as points; else **blank** — no silent
+        fallback to a stray ``feature_catalog`` when nothing valid is selected.
         """
-        if RESULTS_DIR is not None and self._sel_feature_catalog:
-            p = Path(RESULTS_DIR) / self._sel_feature_catalog
-            if p.exists():
-                try:
-                    return load_features_from_shapes(p)
-                except Exception:
-                    pass
-        if RESULTS_DIR is not None and self._sel_scan_catalog:
-            p = Path(RESULTS_DIR) / self._sel_scan_catalog
-            if p.exists():
-                try:
-                    return load_features_from_peaks(p)
-                except Exception:
-                    pass
-        try:
-            return load_features()
-        except Exception:
-            return [], []
+        for sel in (self._sel_feature_catalog, self._sel_scan_catalog):
+            if RESULTS_DIR is not None and sel:
+                p = Path(RESULTS_DIR) / sel
+                if p.exists():
+                    try:
+                        return catalogs.load_features_any(p)
+                    except Exception:
+                        pass
+        return [], []   # blank until a valid scan + feature catalog is chosen
 
     def _load_data(self):
         kept, filtered = self._load_selected_features()
@@ -1243,9 +1199,8 @@ class FeatureViewer(QMainWindow):
             self.scan_combo = None
         bar.addWidget(QLabel("<b>Bin:</b>"))
         self.bin_combo = QComboBox()
-        self.bin_combo.addItems([f"{b}x{b}" for b in (1, 3, 4, 5)])
-        self.bin_combo.setCurrentText(f"{self._bin_size}x{self._bin_size}")
         bar.addWidget(self.bin_combo)
+        self._populate_bin_combo()
         bar.addWidget(QLabel("<b>Scan Catalog:</b>"))
         self.scan_catalog_combo = QComboBox()
         self.scan_catalog_combo.setMinimumWidth(190)
@@ -1326,6 +1281,55 @@ class FeatureViewer(QMainWindow):
             if src in peaks:
                 self._sel_scan_catalog = src
 
+    def _feature_catalog_choices(self):
+        """Feature catalogs to offer: those derived from the selected scan catalog
+        (by lineage), plus lineage-less plain ``feature_catalog`` lists for this
+        bin so they stay reachable."""
+        if RESULTS_DIR is None:
+            return []
+        feats = (shapes_for_peaks(self._sel_scan_catalog)
+                 if self._sel_scan_catalog else list_shape_catalogs())
+        names = {p.name for p in feats}
+        for p in catalogs.list_catalogs(RESULTS_DIR, "feature", _BIN_SIZE):
+            if p.name not in names:
+                feats.append(p)
+        return feats
+
+    def _populate_bin_combo(self):
+        """Bin sizes to offer = those that actually have catalogs for this scan
+        (so 2×2 etc. appear when present), else the standard set; always include
+        the current bin so it stays selectable."""
+        bins = catalogs.available_bins(RESULTS_DIR) if RESULTS_DIR else []
+        if not bins:
+            bins = [1, 2, 3, 4, 5]
+        if self._bin_size not in bins:
+            bins = sorted(set(bins) | {self._bin_size})
+        self.bin_combo.blockSignals(True)
+        self.bin_combo.clear()
+        self.bin_combo.addItems([f"{b}x{b}" for b in bins])
+        self.bin_combo.setCurrentText(f"{self._bin_size}x{self._bin_size}")
+        self.bin_combo.blockSignals(False)
+
+    def _carry_lineage(self, prev_scan_cat, prev_feat_cat, new_bin):
+        """Carry a scan/feature catalog selection to ``new_bin`` by lineage key.
+
+        Leaves a selection as ``None`` (→ blank view) when the same lineage has
+        no catalog at the new bin.
+        """
+        rd = RESULTS_DIR
+        self._sel_scan_catalog = None
+        self._sel_feature_catalog = None
+        if rd is None:
+            return
+        if prev_scan_cat:
+            m = catalogs.match_across_bin(rd, "peaks", Path(rd) / prev_scan_cat, new_bin)
+            self._sel_scan_catalog = m.name if m else None
+        if prev_feat_cat:
+            kind = (catalogs.parse_name(prev_feat_cat) or {}).get("kind")
+            m = (catalogs.match_across_bin(rd, kind, Path(rd) / prev_feat_cat, new_bin)
+                 if kind else None)
+            self._sel_feature_catalog = m.name if m else None
+
     def _populate_catalog_combos(self):
         """Fill both catalog dropdowns for the current scan + bin size."""
         for combo in (self.scan_catalog_combo, self.feature_catalog_combo):
@@ -1339,9 +1343,9 @@ class FeatureViewer(QMainWindow):
         i = self.scan_catalog_combo.findData(self._sel_scan_catalog)
         self.scan_catalog_combo.setCurrentIndex(i if i >= 0 else 0)
 
-        shapes = list_shape_catalogs()
+        feats = self._feature_catalog_choices()
         self.feature_catalog_combo.addItem("(none — peaks only)", None)
-        for p in shapes:
+        for p in feats:
             self.feature_catalog_combo.addItem(p.name, p.name)
         j = self.feature_catalog_combo.findData(self._sel_feature_catalog)
         self.feature_catalog_combo.setCurrentIndex(j if j >= 0 else 0)
@@ -1364,18 +1368,12 @@ class FeatureViewer(QMainWindow):
         self._apply_feature_selection()
 
     def _on_scan_catalog_changed(self, _idx):
-        """Pick a scan catalog (peaks). Clearing the feature catalog shows points."""
+        """Pick a scan catalog (peaks) → narrow the Feature Catalog list to the
+        shapes derived from it and select the first match (blank if none)."""
         self._sel_scan_catalog = self.scan_catalog_combo.currentData()
-        # Choosing a peak set that doesn't match the current feature catalog's
-        # lineage means the user wants the raw peaks: drop the feature catalog.
-        if self._sel_feature_catalog:
-            src = shape_catalog_peak_source(
-                Path(RESULTS_DIR) / self._sel_feature_catalog)
-            if src != self._sel_scan_catalog:
-                self._sel_feature_catalog = None
-                self.feature_catalog_combo.blockSignals(True)
-                self.feature_catalog_combo.setCurrentIndex(0)
-                self.feature_catalog_combo.blockSignals(False)
+        feats = self._feature_catalog_choices()
+        self._sel_feature_catalog = feats[0].name if feats else None
+        self._populate_catalog_combos()
         self._apply_feature_selection()
 
     def _apply_feature_selection(self):
@@ -1447,13 +1445,18 @@ class FeatureViewer(QMainWindow):
     def _reload(self, scan, bin_size=None):
         """Re-read all data for ``scan`` + bin size in place and refresh views."""
         old_scan, old_bin = self._scan, self._bin_size
+        prev_scan_cat, prev_feat_cat = self._sel_scan_catalog, self._sel_feature_catalog
         bin_size = bin_size if bin_size is not None else self._bin_size
         self.load_btn.setEnabled(False)
         try:
             configure(project_root=str(_DM.root), bin_size=bin_size, scan=scan)
-            # Resolve the new scan's saved catalog choice before loading features.
             self._scan, self._bin_size = scan, bin_size
-            self._init_catalog_selection()
+            if scan == old_scan and (prev_scan_cat or prev_feat_cat):
+                # Same scan, new bin: carry the chosen lineage; blank if absent.
+                self._carry_lineage(prev_scan_cat, prev_feat_cat, bin_size)
+            else:
+                # New scan: resolve its own saved catalog choice.
+                self._init_catalog_selection()
             self._load_data()
         except Exception as e:
             self._scan, self._bin_size = old_scan, old_bin
@@ -1468,6 +1471,7 @@ class FeatureViewer(QMainWindow):
                                 f"\n\n{e}")
             return
 
+        self._populate_bin_combo()
         self._populate_catalog_combos()
         # Drop stale per-scan state and image caches.
         with self.h5_lock:
@@ -2061,6 +2065,7 @@ class FeatureViewer(QMainWindow):
         rgba = _scalar_to_rgba(grid, vmin, vmax, cmap)
         hv.img.setImage(rgba, autoLevels=False)
         hv.img.setRect(QRectF(c_lo - 0.5, r_lo - 0.5, nc, nr))
+        hv.fit_to_rect(c_lo - 0.5, r_lo - 0.5, nc, nr)
         self._update_heatmap_colorbar(cmap, vmin, vmax)
 
         center = self._parse_bin(feat.get("center_bin", ""))
@@ -2227,6 +2232,7 @@ class FeatureViewer(QMainWindow):
         rgba = _scalar_to_rgba(grid, vmin, vmax, cmap)
         hv.img.setImage(rgba, autoLevels=False)
         hv.img.setRect(QRectF(c_lo - 0.5, r_lo - 0.5, nc, nr))
+        hv.fit_to_rect(c_lo - 0.5, r_lo - 0.5, nc, nr)
         self._update_heatmap_colorbar(cmap, vmin, vmax)
 
         self._draw_1x1_outlines(feat, bounds)

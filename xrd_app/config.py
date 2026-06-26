@@ -29,10 +29,27 @@ from __future__ import annotations
 import json
 import os
 import re
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Optional
 
 import yaml
+
+
+@lru_cache(maxsize=8)
+def _position_csv_listing(root_str: str) -> tuple:
+    """Cached ``*.csv`` filenames in a positions directory (one listing per dir).
+
+    The shared positions dir lives on a slow networked mount, and the loose
+    filename fallback in :meth:`DataManager._find_position_in_root` would
+    otherwise re-list it for every CSV-less scan in a batch. Cached for the
+    process lifetime; restart to pick up newly-arrived files.
+    """
+    root = Path(root_str)
+    if not root.is_dir():
+        return ()
+    return tuple(sorted(p.name for p in root.iterdir()
+                        if p.is_file() and p.suffix.lower() == ".csv"))
 
 CONFIG_FILENAME = "config.yaml"
 
@@ -281,15 +298,22 @@ class DataManager:
             json.dump(registry, f, indent=2)
         return p
 
-    def discover_scans(self) -> list:
+    def discover_scans(self, usable_only: bool = False) -> list:
         """List ``Scan_NNNN`` names known to this project.
 
         Prefers the Raw/scans.json registry; falls back to scanning the per-scan
-        subdirectories under ``Binned/`` and ``Labels/``.
+        subdirectories under ``Binned/`` and ``Labels/``. With ``usable_only``,
+        drops registry scans that have no frames (incomplete / no ``XRD/`` files)
+        so batch runs skip them.
         """
         reg = self.scans_registry()
         if reg:
-            return sorted(reg.keys(), key=lambda n: self.scan_number_of(n) or 0)
+            names = sorted(reg.keys(), key=lambda n: self.scan_number_of(n) or 0)
+            if usable_only:
+                names = [n for n in names
+                         if (reg[n].get("n_files") or 0) > 0
+                         and (reg[n].get("n_frames") or 0) > 0]
+            return names
         found = set()
         for base in (self.binned_dir_root, self.labels_dir_root):
             if base.is_dir():
@@ -358,8 +382,8 @@ class DataManager:
         num = self.scan_number_of(name)
         pos_root = self.config.get("data_sources", "position_root")
         if pos_root and num is not None:
-            cand = self._abs(pos_root) / f"scan_{num:04d}_position.csv"
-            if cand.exists():
+            cand = self._find_position_in_root(self._abs(pos_root), num)
+            if cand:
                 return cand
         if name == self.scan_name_of(self.config.get("scan", "name")):
             single = self.config.get("data_sources", "position_csv")
@@ -370,6 +394,33 @@ class DataManager:
             if local.exists():
                 return local
         return self.metadata_dir / "positions.csv"
+
+    @staticmethod
+    def _find_position_in_root(root: Path, num: int) -> Optional[Path]:
+        """Locate scan ``num``'s position CSV inside a shared positions directory.
+
+        The beamline writes one ``scan_NNNN_position.csv`` per scan into a common
+        dir (e.g. ``Processed/SOCKETSERVER/``). Naming varies across exports —
+        ``scan_``/``Scan_``, zero-padded or not — and beamline mounts are
+        case-sensitive, so we try the common exact names first, then fall back to
+        a loose, case-insensitive scan over ``*position*.csv`` files that carry
+        this scan number as a delimited token. Returns the match, or None.
+        """
+        if not root.is_dir():
+            return None
+        for nm in (f"scan_{num:04d}_position.csv", f"Scan_{num:04d}_position.csv",
+                   f"scan_{num}_position.csv", f"Scan_{num}_position.csv"):
+            if (root / nm).exists():
+                return root / nm
+        # Loose fallback: any *position*.csv whose name carries this scan number
+        # (0-padded or not) as its own token, matched case-insensitively. Uses a
+        # cached directory listing so a batch over many CSV-less scans pays the
+        # (slow, networked) listing once, not per scan.
+        token = re.compile(rf"(?<!\d)0*{num}(?!\d)")
+        for nm in _position_csv_listing(str(root)):
+            if "position" in nm.lower() and token.search(nm):
+                return root / nm
+        return None
 
     def _asset(self, name: str) -> Path:
         """Path to a file bundled with the package (shared defaults)."""

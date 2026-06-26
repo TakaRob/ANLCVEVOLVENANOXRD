@@ -36,14 +36,16 @@ _DM = None
 _BIN_SIZE = 3
 RESULTS_DIR = None
 HOLDOUT_DIR = None
+CATALOG_PATH = None   # selected feature-map JSON; None → canonical per-bin file
 
 
-def configure(project_root=".", bin_size=3, scan=None):
-    global _DM, _BIN_SIZE, RESULTS_DIR, HOLDOUT_DIR
+def configure(project_root=".", bin_size=3, scan=None, catalog=None):
+    global _DM, _BIN_SIZE, RESULTS_DIR, HOLDOUT_DIR, CATALOG_PATH
     _DM = DataManager(project_root, scan=scan)
     _BIN_SIZE = bin_size
     RESULTS_DIR = _DM.results_dir()
     HOLDOUT_DIR = _DM.holdout_dir
+    CATALOG_PATH = catalog
 
 
 REFLECTIONS = []
@@ -99,8 +101,17 @@ METRIC_2D_TITLES = {
 
 
 def load_features():
-    with open(RESULTS_DIR / f"feature_catalog_{_BIN_SIZE}x{_BIN_SIZE}.json") as f:
-        return json.load(f)
+    """Kept-feature list from the selected feature map (or the canonical
+    per-bin ``feature_catalog_NxN.json`` when none is selected).
+
+    Accepts either a plain list (``feature_catalog_NxN.json``) or a shapes file
+    carrying a ``kept`` array (``*_shapes_NxN.json``) — both store identical
+    feature dicts, so a shapes catalog renders here as its kept features.
+    """
+    path = CATALOG_PATH or (RESULTS_DIR / f"feature_catalog_{_BIN_SIZE}x{_BIN_SIZE}.json")
+    with open(path) as f:
+        data = json.load(f)
+    return data.get("kept", []) if isinstance(data, dict) else data
 
 
 def load_grid_info():
@@ -766,6 +777,45 @@ class DeviceMapWindow(QMainWindow):
                 self.features, self.n_rows, self.n_cols, metric=key)
         self._redraw()
 
+    # ----- view-state carry-over (across a feature-catalog switch) -----
+    def get_view_state(self):
+        """Selected layers + outline metric, so a catalog switch keeps them."""
+        return {
+            "metric": self.metric,
+            "hidden_layers": [r for r, cb in self.layer_cbs.items()
+                              if not cb.isChecked()],
+            "points": self.labels_cb.isChecked(),
+        }
+
+    def apply_view_state(self, state):
+        """Re-apply a saved view state. Reflections not in this catalog and
+        unknown metric keys are ignored; new reflections default to visible."""
+        if not state:
+            return
+        hidden = set(state.get("hidden_layers", []))
+        for ref, cb in self.layer_cbs.items():
+            cb.blockSignals(True)
+            cb.setChecked(ref not in hidden)
+            cb.blockSignals(False)
+        self.visible_refs = [r for r in REFLECTIONS if self.layer_cbs[r].isChecked()]
+        if "points" in state:
+            self.labels_cb.blockSignals(True)
+            self.labels_cb.setChecked(bool(state["points"]))
+            self.labels_cb.blockSignals(False)
+            self.show_labels = bool(state["points"])
+        m = state.get("metric")
+        if m and self.metric_combo.findData(m) >= 0:
+            self.metric_combo.blockSignals(True)
+            self.metric_combo.setCurrentIndex(self.metric_combo.findData(m))
+            self.metric_combo.blockSignals(False)
+            self.metric_desc_label.setText(METRIC_DESCRIPTIONS.get(m, ""))
+            self.metric = m
+            if m != "none":
+                self.current_grids = build_device_grids(
+                    self.features, self.n_rows, self.n_cols, metric=m)
+        self._draw_chi_histogram()
+        self._redraw()
+
     # ----- chi range filter -------------------------------------------
     def _update_chi_visuals(self):
         self._draw_chi_histogram()
@@ -1003,10 +1053,10 @@ class DeviceMapWindow(QMainWindow):
             self.hover_label.setText("Hover over a feature to see details")
 
 
-def build_window(project_root=".", scan=None, bin_size=3):
+def build_window(project_root=".", scan=None, bin_size=3, catalog=None):
     """Construct the device map without an event loop (for embedding as a tab)."""
     global REFLECTIONS, REF_COLORS
-    configure(project_root=project_root, bin_size=bin_size, scan=scan)
+    configure(project_root=project_root, bin_size=bin_size, scan=scan, catalog=catalog)
 
     features = load_features()
     REFLECTIONS = sorted(set(f["reflection"] for f in features))

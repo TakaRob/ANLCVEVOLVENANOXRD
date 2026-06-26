@@ -296,11 +296,35 @@ def radial_profile(image: np.ndarray, tth_map: np.ndarray, n_bins: int = 600):
 # ─────────────────────────────────────────────────────────────────────
 # Grid mapping generation (port of generate_grid_mapping.py)
 # ─────────────────────────────────────────────────────────────────────
+def scan_h5_files(xrd_dir: Union[str, Path], scan_number: int) -> list:
+    """Sorted, non-empty ``scan_NNNN_*.h5`` frame files for ``scan_number``.
+
+    Matched case-insensitively and tolerant of (non-)zero-padding so it works on
+    case-sensitive beamline mounts and across export naming (``scan_0203_*.h5`` /
+    ``Scan_203_*.h5``). The trailing ``_`` after the number prevents ``203`` from
+    matching ``2030``.
+    """
+    d = Path(xrd_dir)
+    if not d.is_dir():
+        return []
+    pat = _re.compile(rf"scan[_-]?0*{scan_number}_.*\.h5$", _re.IGNORECASE)
+    files = [p for p in d.iterdir()
+             if p.is_file() and pat.match(p.name) and p.stat().st_size > 0]
+    return sorted(files, key=lambda p: p.name.lower())
+
+
+def has_raw_frames(xrd_dir: Union[str, Path], scan_number: int) -> bool:
+    """True if ``xrd_dir`` holds at least one non-empty frame file for the scan.
+
+    Cheap completeness probe (no HDF5 open) for skipping incomplete scans — many
+    ``Scan_NNNN/`` dirs on the beamline mount have no ``XRD/`` files yet.
+    """
+    return len(scan_h5_files(xrd_dir, scan_number)) > 0
+
+
 def load_xrd_metadata(xrd_dir: Union[str, Path], scan_number: int = 203):
     """List raw scan H5 files and build a flat frame index."""
-    from scipy.signal import argrelextrema  # noqa: F401  (kept import locality clear)
-    xrd_files = sorted(Path(xrd_dir).glob(f"scan_{scan_number:04d}_*.h5"))
-    xrd_files = [f for f in xrd_files if f.stat().st_size > 0]
+    xrd_files = scan_h5_files(xrd_dir, scan_number)
     frame_map = []
     for fi, fp in enumerate(xrd_files):
         with h5py.File(fp, "r") as f:
@@ -310,11 +334,32 @@ def load_xrd_metadata(xrd_dir: Union[str, Path], scan_number: int = 203):
     return [str(f) for f in xrd_files], frame_map, len(frame_map)
 
 
+# A recreated (file-per-row) position CSV carries this as its first line, so we
+# can tell a synthetic reconstruction apart from a real SOCKETSERVER export.
+RECREATED_CSV_MARKER = "# xrd-app coordinate_source=file_per_row"
+
+
+def _uncommented(fh):
+    """Yield CSV lines, dropping any leading ``#`` comment/marker lines."""
+    for line in fh:
+        if not line.lstrip().startswith("#"):
+            yield line
+
+
+def is_recreated_csv(csv_path: Union[str, Path]) -> bool:
+    """True if ``csv_path`` is a synthetic file-per-row CSV we wrote (has the marker)."""
+    try:
+        with open(csv_path) as f:
+            return f.readline().lstrip().startswith(RECREATED_CSV_MARKER)
+    except OSError:
+        return False
+
+
 def load_positions(csv_path: Union[str, Path], n_total: int) -> np.ndarray:
     """Read X positions from the scan position CSV, padded/truncated to n_total."""
     x = []
     with open(csv_path) as f:
-        reader = csv.DictReader(f)
+        reader = csv.DictReader(_uncommented(f))
         for row in reader:
             x.append(float(row["X_Position"]))
     frame_x = np.full(n_total, np.nan)
@@ -333,7 +378,7 @@ def load_positions_xy(csv_path: Union[str, Path], n_total: int):
     """
     x, y = [], []
     with open(csv_path) as f:
-        reader = csv.DictReader(f)
+        reader = csv.DictReader(_uncommented(f))
         has_y = bool(reader.fieldnames) and "Y_Position" in reader.fieldnames
         for row in reader:
             x.append(float(row["X_Position"]))
@@ -373,22 +418,33 @@ def _scale_to_index(v, sign, n) -> np.ndarray:
     return np.clip(idx, 0, n - 1).astype(int)
 
 
-def assign_grid_from_positions(frame_x, frame_y, log: Callable[[str], None] = print):
-    """De-skewed per-frame ``(row, col)`` from true stage positions (X, Y).
+def _corr(a, b) -> float:
+    """Pearson r, but 0 for a constant input (avoids NaN in axis detection)."""
+    a = np.asarray(a, dtype=float)
+    b = np.asarray(b, dtype=float)
+    if a.std() == 0 or b.std() == 0:
+        return 0.0
+    return float(np.corrcoef(a, b)[0, 1])
 
-    The canonical coordinate definition (promotes ``deskew_peaks.py::regrid`` from
-    an after-the-fact band-aid to the source of truth). Instead of reconstructing
-    columns by serpentine turn-counting from X alone — which stage backlash + the
-    boustrophedon reversal misregister between adjacent rows, fragmenting one
-    feature into horizontal slices — each frame is snapped to a regular lattice
-    directly from where the beam actually was.
 
-    Orientation is anchored to the existing serpentine grid: a reference
-    serpentine pass establishes which physical axis is row vs col and each axis'
-    sign, so the de-skewed grid keeps today's convention (row ↔ X here) and device
-    maps render upright with no axis-label changes. Row- and col-step are
-    estimated independently, handling anisotropic X/Y steps. Oversampled frames
-    that snap to the same cell merge naturally (expected at 1×1).
+def assign_grid_from_positions(frame_x, frame_y, frame_map=None,
+                               log: Callable[[str], None] = print):
+    """Per-frame ``(row, col)`` for a scan, using true stage positions (X, Y).
+
+    For a clean one-file-per-row raster (``frame_map`` provided) the grid comes
+    straight from the acquisition layout — **rows = HDF5 file index, columns =
+    within-file rank (the *commanded* fast-axis position)** — and the real (X, Y)
+    are used *only* to orient the axes to the historical device-map convention.
+    Columns are deliberately **not** re-snapped to the encoder readout: the
+    even/odd-row position divergence on these scans is serpentine *backlash* (an
+    encoder artefact at the same commanded position), so "correcting" it would
+    scatter a feature's rows across columns and fragment it. Aligning by commanded
+    rank keeps features intact, gives exact dimensions, and never merges frames.
+
+    When ``frame_map`` is absent or the scan is *not* one-file-per-row (fly-scans,
+    multi-row files, irregular rasters), it falls back to snapping both axes onto a
+    serpentine turn-counted lattice from the positions (the de-skew used for scans
+    where file index ≠ scan row).
 
     Returns ``(grid_row, grid_col, n_rows, n_cols)``.
     """
@@ -396,29 +452,47 @@ def assign_grid_from_positions(frame_x, frame_y, log: Callable[[str], None] = pr
     x = _interp_nan(frame_x)
     y = _interp_nan(frame_y)
 
-    # Reference serpentine indices: used ONLY to pick the axis mapping + sign
-    # (correlation direction is robust even though its column registration is the
-    # very thing we're fixing) and to size the lattice (n_rows × n_cols).
-    ref_row, ref_col, n_rows, n_cols = build_scan_grid(frame_x, n_total)
+    file_per_row = frame_map is not None and is_file_per_row(frame_map)[0]
+    if not file_per_row:
+        # Irregular / non-file-per-row scan: snap both axes onto a turn-counted
+        # lattice (best effort when file index ≠ scan row).
+        ref_row, ref_col, n_rows, n_cols = build_scan_grid(frame_x, n_total)
+        row_is_X = abs(_corr(ref_row, x)) >= abs(_corr(ref_row, y))
+        rowv, colv = (x, y) if row_is_X else (y, x)
+        sr = np.sign(_corr(ref_row, rowv)) or 1.0
+        sc = np.sign(_corr(ref_col, colv)) or 1.0
+        log(f"  de-skew (turn-counted, non-file-per-row): row <- "
+            f"{'X' if row_is_X else 'Y'} (sign {int(sr):+d}), "
+            f"col <- {'Y' if row_is_X else 'X'} (sign {int(sc):+d})")
+        grid_row = _scale_to_index(rowv, sr, n_rows)
+        grid_col = _scale_to_index(colv, sc, n_cols)
+        return grid_row, grid_col, int(grid_row.max()) + 1, int(grid_col.max()) + 1
 
-    def _corr(a, b):
-        a = np.asarray(a, dtype=float)
-        b = np.asarray(b, dtype=float)
-        if a.std() == 0 or b.std() == 0:
-            return 0.0
-        return float(np.corrcoef(a, b)[0, 1])
-
+    # File-per-row: rows & columns straight from the layout (commanded position).
+    ref_row, ref_col, n_rows, n_cols = build_grid_from_frame_map(
+        frame_map, log=lambda *a: None)
     row_is_X = abs(_corr(ref_row, x)) >= abs(_corr(ref_row, y))
     rowv, colv = (x, y) if row_is_X else (y, x)
-    sr = np.sign(_corr(ref_row, rowv)) or 1.0
-    sc = np.sign(_corr(ref_col, colv)) or 1.0
-    log(f"  axis map: row <- {'X' if row_is_X else 'Y'} (sign {int(sr):+d}), "
-        f"col <- {'Y' if row_is_X else 'X'} (sign {int(sc):+d})")
+    grid_row = ref_row.astype(int)
+    grid_col = ref_col.astype(int)
 
-    grid_row = _scale_to_index(rowv, sr, n_rows)
-    grid_col = _scale_to_index(colv, sc, n_cols)
+    # Orient to the historical device-map convention. The file/serpentine
+    # acquisition direction (ref_col) can point opposite to the physical axis the
+    # previous coordinate system used, which would mirror the device map. Anchor
+    # row & column direction to the serpentine reconstruction's signs (what the
+    # legacy positions_xy grid used) — correlation *sign* is robust even though
+    # that lattice's size is not — so the device map keeps its orientation.
+    serp_row, serp_col, _, _ = build_scan_grid(frame_x, n_total)
+    if _corr(grid_row, rowv) * _corr(serp_row, rowv) < 0:
+        grid_row = grid_row.max() - grid_row
+    if _corr(grid_col, colv) * _corr(serp_col, colv) < 0:
+        grid_col = grid_col.max() - grid_col
+    grid_row -= grid_row.min()
+    grid_col -= grid_col.min()
     n_rows = int(grid_row.max()) + 1
     n_cols = int(grid_col.max()) + 1
+    log(f"  file-per-row grid (commanded-position columns, position-oriented): "
+        f"{n_rows} x {n_cols} (col <- {'Y' if row_is_X else 'X'})")
     return grid_row, grid_col, n_rows, n_cols
 
 
@@ -468,6 +542,120 @@ def build_regular_grid(n_total, n_cols):
     return row, col, n_rows, n_cols
 
 
+def file_row_layout(frame_map):
+    """Frames-per-file from a grid-mapping ``frame_map`` (list of [file_idx, frame_idx]).
+
+    Returns ``(n_files, counts)`` where ``counts[fi]`` is the number of frames in
+    file ``fi``. The acquisition writes one HDF5 file per scan row, so this is the
+    raw material for :func:`build_grid_from_frame_map`.
+    """
+    counts: dict = {}
+    for fi, _fj in frame_map:
+        counts[fi] = counts.get(fi, 0) + 1
+    n_files = (max(counts) + 1) if counts else 0
+    return n_files, [counts.get(fi, 0) for fi in range(n_files)]
+
+
+def is_file_per_row(frame_map, min_uniform_frac: float = 0.9):
+    """Detect the one-file-per-scan-row layout from ``frame_map``.
+
+    True when ≥ ``min_uniform_frac`` of files share the modal frame count (one
+    short/partial row at the end is fine). Returns ``(ok, n_files, mode_count)``.
+    A non-uniform result means we cannot trust file index = scan row, and the
+    caller should fall back (regular raster / explicit shape) rather than emit a
+    ragged grid.
+    """
+    n_files, counts = file_row_layout(frame_map)
+    if n_files < 2:
+        return False, n_files, (counts[0] if counts else 0)
+    vals, freq = np.unique(np.array(counts), return_counts=True)
+    mode_count = int(vals[int(np.argmax(freq))])
+    uniform = float(np.mean(np.array(counts) == mode_count))
+    return uniform >= min_uniform_frac, n_files, mode_count
+
+
+def build_grid_from_frame_map(frame_map, serpentine: bool = True,
+                              log: Callable[[str], None] = print):
+    """Assign (row, col) straight from the one-file-per-row acquisition layout.
+
+    ``row`` = the frame's HDF5 file index (each file is one scan row); ``col`` =
+    the frame's position within that file, reversed on alternate rows for the
+    serpentine raster. This needs **no position CSV and no TETRAMM/SOCKETSERVER
+    stream** — the file/frame structure already encodes the lattice, and on this
+    beamline's scans it reconstructs a cleaner grid than the position-trace turn
+    counter (exact dimensions, one cell per frame, no re-quantization merges).
+
+    Returns ``(grid_row, grid_col, n_rows, n_cols)``.
+    """
+    n_files, counts = file_row_layout(frame_map)
+    n_total = len(frame_map)
+    grid_row = np.zeros(n_total, dtype=int)
+    grid_col = np.zeros(n_total, dtype=int)
+    # frame_map is in global frame order, grouped by file; walk it tracking the
+    # running within-file index so we don't assume a fixed frames-per-file.
+    seen: dict = {}
+    for gi, (fi, _fj) in enumerate(frame_map):
+        j = seen.get(fi, 0)
+        seen[fi] = j + 1
+        c = (counts[fi] - 1 - j) if (serpentine and fi % 2 == 1) else j
+        grid_row[gi] = fi
+        grid_col[gi] = c
+    n_rows = int(grid_row.max()) + 1
+    n_cols = int(grid_col.max()) + 1
+    log(f"  file-per-row grid: {n_rows} rows x {n_cols} cols "
+        f"({n_total} frames, serpentine={serpentine})")
+    return grid_row, grid_col, n_rows, n_cols
+
+
+def recreate_positions_csv(
+    xrd_dir: Union[str, Path],
+    output: Union[str, Path],
+    scan_number: int = 203,
+    step_x: float = 1.0,
+    step_y: float = 1.0,
+    serpentine: bool = True,
+    log: Callable[[str], None] = print,
+) -> dict:
+    """Reconstruct a per-frame position CSV from the one-file-per-row layout.
+
+    For scans whose SOCKETSERVER-derived ``*_position.csv`` is missing. Assigns
+    each frame a ``(row, col)`` from the file/frame structure
+    (:func:`build_grid_from_frame_map`) and writes the standard
+    ``Trigger,X_Position,Y_Position`` CSV so the rest of the pipeline (and the
+    external ptycho preprocessor) has positions instead of zero-padding.
+
+    Orientation matches the real scans: **X = slow per-row axis**, **Y = fast
+    within-row sweep**. Steps are nominal µm (the lattice is exact; only the
+    absolute scale is synthetic — pass ``step_x``/``step_y`` if you know them).
+    The file is tagged with :data:`RECREATED_CSV_MARKER` so loaders can tell it
+    apart from a real export. Returns ``{path, n_rows, n_cols, n_total}``.
+    """
+    xrd_files, frame_map, n_total = load_xrd_metadata(xrd_dir, scan_number)
+    ok, n_files, mode_count = is_file_per_row(frame_map)
+    if not ok:
+        raise ValueError(
+            f"Cannot recreate positions: frames-per-file is non-uniform "
+            f"({n_files} files, modal {mode_count}/file) — this scan is not a "
+            "clean one-file-per-row raster, and TETRAMM/SOCKETSERVER auto-extraction "
+            "is not available. Provide a position CSV or pass --shape ROWSxCOLS.")
+    grid_row, grid_col, n_rows, n_cols = build_grid_from_frame_map(
+        frame_map, serpentine=serpentine, log=log)
+
+    output = Path(output)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    tmp = output.with_suffix(output.suffix + ".tmp")
+    with open(tmp, "w", newline="") as f:
+        f.write(RECREATED_CSV_MARKER +
+                f" n_rows={n_rows} n_cols={n_cols} step_x={step_x} step_y={step_y}\n")
+        w = csv.writer(f)
+        w.writerow(["Trigger", "X_Position", "Y_Position"])
+        for gi in range(n_total):
+            w.writerow([gi + 1, grid_row[gi] * step_x, grid_col[gi] * step_y])
+    os.replace(tmp, output)
+    log(f"Recreated positions ({n_total} frames, {n_rows}x{n_cols}) -> {output}")
+    return {"path": output, "n_rows": n_rows, "n_cols": n_cols, "n_total": n_total}
+
+
 def build_bin_mapping(n_rows, n_cols, bin_size, grid_to_frames):
     """Group the per-pixel grid into bin_size x bin_size spatial bins."""
     n_br = (n_rows + bin_size - 1) // bin_size
@@ -508,34 +696,53 @@ def generate_grid_mapping(
     output: Optional[Union[str, Path]] = None,
     n_cols: Optional[int] = None,
     deskew: bool = True,
+    deskew_method: str = "commanded",
     log: Callable[[str], None] = print,
 ) -> dict:
     """Build the grid-mapping dict (and optionally write it to ``output``).
 
     Coordinate source, in priority order:
-      - ``positions_xy`` (default): de-skewed per-frame grid snapped from the true
-        stage (X, Y) — the canonical coordinate system. Used when a position CSV
-        with a ``Y_Position`` column is available and ``deskew`` is True.
-      - ``serpentine``: legacy X-only grid reconstructed by turn-counting. Used
-        when ``deskew`` is False (the ``--rawgrid`` bypass) or the CSV has no
-        ``Y_Position`` column.
-      - ``synthetic``: a regular serpentine raster from ``n_cols`` (no CSV).
+      - ``file_per_row`` (default for real positions on a clean one-file-per-row
+        raster): rows = file index, columns = within-file rank (commanded
+        position), oriented by the real (X, Y). The canonical system.
+      - ``positions_xy``: turn-counted position snap — used for *irregular* scans
+        (file index ≠ scan row) when a real position CSV is available.
+      - ``serpentine``: legacy X-only grid by turn-counting (``--rawgrid`` bypass,
+        or the CSV has no ``Y_Position``).
+      - ``synthetic``: a regular serpentine raster from ``n_cols`` (last resort).
 
-    The chosen source is recorded in the output JSON as ``coordinate_source`` so
-    downstream loaders/reports can tell which lattice a mapping is on.
+    ``deskew_method`` selects the column assignment for file-per-row scans:
+    ``"commanded"`` (default, align by rank) or ``"perrow_offset"`` (DEPRECATED —
+    the per-row encoder offset / "triangle" method, kept only for comparison; see
+    :mod:`xrd_app.core.deskew_legacy`).
+
+    A CSV we recreated ourselves (tagged with :data:`RECREATED_CSV_MARKER`) is not
+    treated as real positions — it routes to ``file_per_row``. The chosen source is
+    recorded in the output JSON as ``coordinate_source``.
     """
     log(f"Loading scan metadata from {xrd_dir} ...")
     xrd_files, frame_map, n_total = load_xrd_metadata(xrd_dir, scan_number)
     log(f"  {n_total} frames across {len(xrd_files)} H5 files")
 
-    have_positions = pos_csv is not None and Path(pos_csv).exists()
+    have_positions = (pos_csv is not None and Path(pos_csv).exists()
+                      and not is_recreated_csv(pos_csv))
     if have_positions and deskew:
         frame_x, frame_y = load_positions_xy(pos_csv, n_total)
         if np.isfinite(frame_y).any():
-            log("Computing de-skewed scan grid from true (X, Y) positions ...")
-            grid_row, grid_col, n_rows, n_cols = assign_grid_from_positions(
-                frame_x, frame_y, log=log)
-            coordinate_source = "positions_xy"
+            fpr = is_file_per_row(frame_map)[0]
+            if fpr and deskew_method == "perrow_offset":
+                from .deskew_legacy import assign_grid_perrow_offset
+                log("Computing scan grid (DEPRECATED perrow_offset method) ...")
+                grid_row, grid_col, n_rows, n_cols = assign_grid_perrow_offset(
+                    frame_x, frame_y, frame_map, log=log)
+                coordinate_source = "perrow_offset_deprecated"
+            else:
+                log("Computing scan grid from layout + true (X, Y) positions ...")
+                grid_row, grid_col, n_rows, n_cols = assign_grid_from_positions(
+                    frame_x, frame_y, frame_map=frame_map, log=log)
+                # Clean file-per-row raster → commanded-position columns
+                # (file_per_row); irregular scans → turn-counted snap (positions_xy).
+                coordinate_source = "file_per_row" if fpr else "positions_xy"
         else:
             log("Position CSV has no Y_Position column; falling back to "
                 "serpentine (X-only) grid ...")
@@ -548,17 +755,29 @@ def generate_grid_mapping(
         grid_row, grid_col, n_rows, n_cols = build_scan_grid(frame_x, n_total)
         coordinate_source = "serpentine"
         log(f"  Scan grid: {n_rows} rows x {n_cols} cols")
-    elif n_cols:
-        log(f"No position CSV; synthesizing a regular {n_cols}-column serpentine grid ...")
-        log("  (assumes a uniform raster; provide positions for irregular scans)")
-        grid_row, grid_col, n_rows, n_cols = build_regular_grid(n_total, n_cols)
-        coordinate_source = "synthetic"
-        log(f"  Scan grid: {n_rows} rows x {n_cols} cols")
     else:
-        raise FileNotFoundError(
-            f"No position CSV found ({pos_csv}) and no --shape/n_cols given. "
-            "Provide a position CSV or specify the raster shape to synthesize one."
-        )
+        # No real position CSV. Prefer the one-file-per-row layout (cleaner and
+        # exact for these scans); fall back to a synthesized raster only if the
+        # frame counts aren't uniform enough to trust file index = scan row.
+        fpr_ok, n_files, mode_count = is_file_per_row(frame_map)
+        if fpr_ok:
+            log("No position CSV; reconstructing grid from the one-file-per-row "
+                "layout ...")
+            grid_row, grid_col, n_rows, n_cols = build_grid_from_frame_map(
+                frame_map, log=log)
+            coordinate_source = "file_per_row"
+        elif n_cols:
+            log(f"No position CSV; synthesizing a regular {n_cols}-column serpentine grid ...")
+            log("  (assumes a uniform raster; provide positions for irregular scans)")
+            grid_row, grid_col, n_rows, n_cols = build_regular_grid(n_total, n_cols)
+            coordinate_source = "synthetic"
+            log(f"  Scan grid: {n_rows} rows x {n_cols} cols")
+        else:
+            raise FileNotFoundError(
+                f"No position CSV ({pos_csv}) and the scan is not a clean "
+                f"one-file-per-row raster ({n_files} files, modal {mode_count} "
+                "frames/file). Provide a position CSV or pass --shape ROWSxCOLS."
+            )
 
     grid_to_frames = {}
     for gi in range(n_total):
@@ -838,21 +1057,28 @@ class _RawSource(BinImageSource):
             self._xrd_files, self._frame_map, n_total = load_xrd_metadata(
                 xrd_dir, scan_number=scan_no)
             pos = dm.position_csv(scan=scan)
-            if pos and Path(pos).exists():
+            has_real_pos = pos and Path(pos).exists() and not is_recreated_csv(pos)
+            if has_real_pos:
                 # De-skew from true (X, Y) when Y is present (matches what
                 # 'xrd-app grid' writes); else fall back to serpentine X-only.
                 frame_x, frame_y = load_positions_xy(pos, n_total)
                 if np.isfinite(frame_y).any():
                     grid_row, grid_col, n_rows, n_cols2 = assign_grid_from_positions(
-                        frame_x, frame_y)
+                        frame_x, frame_y, frame_map=self._frame_map)
                 else:
                     grid_row, grid_col, n_rows, n_cols2 = build_scan_grid(frame_x, n_total)
+            elif is_file_per_row(self._frame_map)[0]:
+                # No real CSV: reconstruct from the one-file-per-row layout (matches
+                # 'xrd-app grid' with no positions).
+                grid_row, grid_col, n_rows, n_cols2 = build_grid_from_frame_map(
+                    self._frame_map, log=lambda *a: None)
             elif n_cols:
                 grid_row, grid_col, n_rows, n_cols2 = build_regular_grid(n_total, n_cols)
             else:
                 raise FileNotFoundError(
-                    "No grid mapping, no position CSV, and no raster shape — "
-                    "cannot assign raw frames to bins. Run 'xrd-app grid' or link positions.")
+                    "No grid mapping, no usable position CSV, and the scan is not a "
+                    "clean one-file-per-row raster — cannot assign raw frames to bins. "
+                    "Run 'xrd-app grid' or 'xrd-app recreate-positions'.")
             grid_to_frames = {}
             for gi in range(n_total):
                 grid_to_frames.setdefault(

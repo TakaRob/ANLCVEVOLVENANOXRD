@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from ..gui import device_map
-from ._embed import BinnedTab
+from ._embed import LineageCatalogTab
 
 TAB_META = {
     "title": "Device View",
@@ -20,7 +20,7 @@ TAB_META = {
 
 
 def make_tab(project_root=".", scan=None, bin_size=3):
-    return BinnedTab(device_map.build_window, project_root, scan=scan, bin_size=bin_size)
+    return LineageCatalogTab(device_map.build_window, project_root, scan=scan, bin_size=bin_size)
 
 
 if __name__ == "__main__":

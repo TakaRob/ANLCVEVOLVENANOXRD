@@ -549,14 +549,24 @@ def scan_detect(scans_dir, scan_file, deep, root):
 @click.option('--positions', help='Scan position CSV (defaults to resolved)')
 @click.option('--rawgrid', is_flag=True,
               help='Bypass (X,Y) de-skew: use the legacy serpentine X-only grid.')
+@click.option('--deskew-method', type=click.Choice(['commanded', 'perrow_offset']),
+              default='commanded',
+              help='Column assignment for file-per-row scans: commanded (default, '
+                   'align by rank) or perrow_offset (DEPRECATED "triangle" method, '
+                   'for comparison only).')
 @click.option('--output', help='Output grid_mapping JSON (defaults to per-scan Metadata dir)')
 @click.option('--root', default='.', help='Project root directory')
-def grid(bin_size, scan, shape, xrd_dir, positions, rawgrid, output, root):
+def grid(bin_size, scan, shape, xrd_dir, positions, rawgrid, deskew_method, output, root):
     """Generate grid_mapping.json assigning raw frames to a spatial bin grid.
 
-    By default the per-frame (row, col) is de-skewed from the true stage (X, Y)
-    positions (``coordinate_source: positions_xy``). Pass ``--rawgrid`` to bypass
-    the de-skew and reconstruct the legacy serpentine grid from X only.
+    Coordinate source (auto-selected, recorded in the output JSON):
+    a real position CSV → de-skewed ``positions_xy`` (or ``--rawgrid`` for the
+    legacy serpentine X-only grid); no CSV → reconstructed from the one-file-per-
+    row layout (``file_per_row``); ``--shape`` → ``synthetic`` raster.
+
+    When no position CSV exists it is **recreated** from the file-per-row layout
+    (so downstream never zero-pads positions); pass ``--shape`` to synthesize a
+    raster instead.
     """
     from .core import io
     dm = DataManager(root, scan=scan)
@@ -567,16 +577,78 @@ def grid(bin_size, scan, shape, xrd_dir, positions, rawgrid, output, root):
     out.parent.mkdir(parents=True, exist_ok=True)
     _require(xdir, "raw frames directory")
 
-    n_cols = _parse_shape_cols(shape)
-    if not Path(pos).exists() and n_cols is None:
-        click.echo(f"Error: no position CSV at {pos} and no --shape given.")
-        click.echo("  Provide --positions, link --position-root, or pass --shape ROWSxCOLS.")
+    if not io.has_raw_frames(xdir, scan_no):
+        click.echo(f"Error: no raw frame files (scan_{scan_no:04d}_*.h5) in {xdir}.")
+        click.echo("  This scan looks incomplete (no XRD frames). Skip it or check the raw data.")
         raise SystemExit(1)
 
-    io.generate_grid_mapping(xdir, pos if Path(pos).exists() else None, bin_size,
+    n_cols = _parse_shape_cols(shape)
+    pos_real = Path(pos).exists() and not io.is_recreated_csv(pos)
+
+    # Force a position CSV when we don't have a real one (and weren't asked to
+    # synthesize a raster shape) — reconstructed from the file-per-row layout.
+    if not pos_real and n_cols is None:
+        if Path(pos).exists():
+            click.echo(f"No real position CSV; reusing recreated positions: {pos}")
+        else:
+            click.echo(f"No position CSV at {pos} — recreating from the one-file-per-row layout ...")
+            try:
+                io.recreate_positions_csv(xdir, pos, scan_number=scan_no, log=click.echo)
+            except ValueError as e:
+                click.echo(f"Error: {e}")
+                click.echo("  Or pass --shape ROWSxCOLS to synthesize a grid instead.")
+                raise SystemExit(1)
+
+    io.generate_grid_mapping(xdir, pos if pos_real else None, bin_size,
                              scan_number=scan_no, output=out, n_cols=n_cols,
-                             deskew=not rawgrid, log=click.echo)
+                             deskew=not rawgrid, deskew_method=deskew_method,
+                             log=click.echo)
     click.echo(f"Wrote grid_mapping -> {out}")
+
+
+# ─────────────────────────────────────────────────────────────────────
+# recreate-positions — rebuild a missing position CSV from raw frames
+# ─────────────────────────────────────────────────────────────────────
+@main.command(name='recreate-positions')
+@click.option('--scan', default=None, help='Scan number/name (defaults to config scan)')
+@click.option('--xrd-dir', help='Directory of raw per-frame H5 files (defaults to resolved)')
+@click.option('--step-x', type=float, default=1.0, help='Nominal µm per row (slow axis)')
+@click.option('--step-y', type=float, default=1.0, help='Nominal µm per column (fast axis)')
+@click.option('--no-serpentine', is_flag=True, help='Rows scanned same direction (no boustrophedon)')
+@click.option('--output', help='Output CSV (defaults to the resolved position CSV path)')
+@click.option('--force', is_flag=True, help='Overwrite an existing CSV')
+@click.option('--root', default='.', help='Project root directory')
+def recreate_positions(scan, xrd_dir, step_x, step_y, no_serpentine, output, force, root):
+    """Recreate a missing per-frame position CSV from the one-file-per-row layout.
+
+    For scans whose SOCKETSERVER-derived ``scan_NNNN_position.csv`` is missing.
+    Assigns each frame (row = HDF5 file index, col = serpentine within-file index)
+    and writes the standard ``Trigger,X_Position,Y_Position`` CSV (tagged as a
+    reconstruction). Steps are nominal µm — the lattice is exact, only the absolute
+    scale is synthetic. Errors if the scan is not a clean one-file-per-row raster.
+    """
+    from .core import io
+    dm = DataManager(root, scan=scan)
+    scan_no = dm.scan_number() or 203
+    xdir = Path(xrd_dir) if xrd_dir else dm.xrd_frames_dir()
+    out = Path(output) if output else dm.position_csv()
+    _require(xdir, "raw frames directory")
+
+    if out.exists() and not force:
+        kind = "recreated" if io.is_recreated_csv(out) else "existing (real?)"
+        click.echo(f"Refusing to overwrite {kind} CSV: {out}")
+        click.echo("  Pass --force to overwrite, or --output to write elsewhere.")
+        raise SystemExit(1)
+
+    try:
+        info = io.recreate_positions_csv(
+            xdir, out, scan_number=scan_no, step_x=step_x, step_y=step_y,
+            serpentine=not no_serpentine, log=click.echo)
+    except ValueError as e:
+        click.echo(f"Error: {e}")
+        raise SystemExit(1)
+    click.echo(f"Wrote {info['n_total']} positions "
+               f"({info['n_rows']}x{info['n_cols']}) -> {info['path']}")
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -642,6 +714,8 @@ def peaks(bin_size, scan, algorithm, snr, out_name, h5_path, tth_path,
 
     out = dm.peaks_json(algo, bin_size, scan)
     _write_json(out, result)
+    from .core import catalogs
+    catalogs.record_catalog(dm.labels_dir(scan), out.name, result["lineage"])
     click.echo(f"\nDone: {result['n_peaks']} peaks in "
                f"{result['n_bins_with_peaks']} bins -> {out}")
 
@@ -712,6 +786,12 @@ def shapes(bin_size, scan, algorithm, from_peaks, peak_algo, link_tolerance,
     processing.write_peak_table(result["kept"], ldir / f"kept_peaks_{suffix}.csv", "kept peaks", click.echo)
     processing.write_peak_table(result["filtered"], ldir / f"filtered_peaks_{suffix}.csv", "filtered peaks", click.echo)
 
+    # Track lineage for every JSON written here (the shapes file already carries
+    # an in-file block; the plain-list feature_catalog gets it via the manifest).
+    from .core import catalogs
+    catalogs.record_catalog(ldir, out.name, result["lineage"])
+    catalogs.record_catalog(ldir, f"feature_catalog_{suffix}.json", result["lineage"])
+
     click.echo(f"\nDone: {result['n_kept']} shapes kept, "
                f"{result['n_filtered']} filtered -> {out}")
 
@@ -741,11 +821,18 @@ def batch(ctx, scans, all_scans, bin_size, algorithm, shape_algo, snr, grid_shap
         click.echo('No scans. Use --scans "203,204" or --all (after scan-detect).')
         raise SystemExit(1)
 
+    from .core import io
     click.echo(f"Batch over {len(scan_list)} scan(s): {', '.join(scan_list)}\n")
-    failures = []
+    failures, skipped = [], []
     for name in scan_list:
         click.echo(f"{'='*60}\n  {name}\n{'='*60}")
         dm = DataManager(root, scan=name)
+        # Skip incomplete scans (no XRD/ frame files) rather than crashing — many
+        # Scan_NNNN/ dirs on the beamline mount have no frames yet.
+        if not io.has_raw_frames(dm.xrd_frames_dir(scan=name), dm.scan_number(name) or 0):
+            click.echo("  no raw frames (incomplete scan) — skipping\n")
+            skipped.append(name)
+            continue
         algo = algorithm or Path(dm.detector_script(algorithm, bin_size=bin_size)).stem
         if skip_existing and dm.shapes_json(shape_algo, bin_size, name).exists():
             click.echo("  shapes exist — skipping (--skip-existing)\n")
@@ -763,10 +850,15 @@ def batch(ctx, scans, all_scans, bin_size, algorithm, shape_algo, snr, grid_shap
                 click.echo(f"  ✗ {name} failed (exit {e.code})\n")
                 failures.append(name)
                 continue
+        except Exception as e:  # one bad scan must not abort the whole batch
+            click.echo(f"  ✗ {name} errored: {e}\n")
+            failures.append(name)
+            continue
         click.echo(f"  ✓ {name} done\n")
 
-    done = len(scan_list) - len(failures)
+    done = len(scan_list) - len(failures) - len(skipped)
     click.echo(f"Batch complete: {done}/{len(scan_list)} succeeded"
+               + (f", {len(skipped)} skipped (incomplete)" if skipped else "")
                + (f", failed: {', '.join(failures)}" if failures else ""))
     if failures:
         raise SystemExit(1)
@@ -872,6 +964,9 @@ def run_combined_cmd(bin_size, scan, algorithm, root):
     # can overlay them (atomic write so viewers never see a partial file).
     processing.write_feature_catalog(
         result["features"], ldir / f"feature_catalog_{suffix}.json", click.echo)
+    from .core import catalogs
+    catalogs.record_catalog(ldir, f"{algo}_combined_{suffix}.json", result["lineage"])
+    catalogs.record_catalog(ldir, f"feature_catalog_{suffix}.json", result["lineage"])
     click.echo(f"\nDone: {result['n_features']} features in "
                f"{len(result['by_bin'])} bins.")
 
@@ -927,7 +1022,7 @@ def _resolve_scan_list(scans, all_scans, root):
     if scans:
         return [DataManager.scan_name_of(s.strip()) for s in scans.split(',') if s.strip()]
     if all_scans:
-        return DataManager(root).discover_scans()
+        return DataManager(root).discover_scans(usable_only=True)
     return []
 
 
