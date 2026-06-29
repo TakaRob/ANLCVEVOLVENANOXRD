@@ -31,7 +31,8 @@ set -uo pipefail
 REL='isn/2026-1/2026-1-Luo'
 PROJECT="${PROJECT:-$PWD/xrd_study}"
 BIN_SIZES="${BIN_SIZES:-1 3}"
-SCANS="${SCANS:-$(seq 203 214)}"
+# 206 omitted: incomplete (3/151 XRD frames) as of 2026-06-29. Add it back if recollected.
+SCANS="${SCANS:-203 204 205 207 208 209 210 211 212 213 214}"
 COMPRESSION="${COMPRESSION:-gzip}"
 SKIP_EXISTING="${SKIP_EXISTING:-1}"
 DRY_RUN="${DRY_RUN:-0}"

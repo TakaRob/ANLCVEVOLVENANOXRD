@@ -20,7 +20,7 @@
   | 203 | 20.5 | 209 | 4.5 |
   | 204 | 20.0 | 210 | 4.0 |
   | 205 | 19.5 | 211 | 3.5 |
-  | 206 | 6.0  | 212 | 3.0 |
+  | 206 | 6.0 ⚠*incomplete* | 212 | 3.0 |
   | 207 | 5.5  | 213 | 0.0 |
   | 208 | 5.0  | 214 | 20.5 *(repeat of 203 — reproducibility check)* |
 
@@ -165,7 +165,9 @@ Run from the project root (`TakaTest/MountTest` or a dedicated study project).
 Quote paths (spaces). Write `Binned/` to a non-OneDrive location.
 
 ### Phase 0 — Confirm scope (cheap, do first)
-- Finish the completeness scan of 203–214 (XRD file counts; in flight — 0203=151).
+- **DONE (2026-06-29):** completeness scan of 203–214. **11 usable** (203, 204,
+  205, 207–214; all XRD=151 / SOCKETSERVER=195). **Scan_0206 (θ=6.0) is
+  incomplete (XRD=3) — excluded.** Native grid ≈ 151 rows for this sample.
 - Confirm SOCKETSERVER positions exist per scan; rebuild if missing
   (`recreate-positions`). Record per-scan grid dims (rows×cols) — they may differ.
 - Decide bin size(s): **1×1 (requested) and/or 3×3 (recommended working layer).**
