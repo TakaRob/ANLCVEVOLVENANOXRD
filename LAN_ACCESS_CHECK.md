@@ -55,6 +55,14 @@ Est. time to bin all 12 scans here: ~6.9 h   (laptop ≈ 42 h)
 
 **Report the `MEASURED READ SPEED` line back** and we'll pick the path.
 
+If the verdict is **FAST** (or BETTER), bin the series right there:
+```bash
+pip install -e .                         # once, from the repo
+./run_binning.sh                         # bins 203-214 at 1x1 + 3x3
+# then rsync the small binned .h5 files down to the laptop
+```
+See `run_binning.sh` header for options (`BIN_SIZES`, `SCANS`, `PROJECT`, `DRY_RUN`).
+
 ---
 
 ## Windows PowerShell equivalent (no repo needed)
