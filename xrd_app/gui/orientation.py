@@ -23,8 +23,8 @@ from scipy.optimize import minimize
 
 from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import (
-    QApplication, QCheckBox, QComboBox, QGroupBox, QPushButton,
-    QHBoxLayout, QLabel, QMainWindow, QSlider, QSpinBox, QSplitter,
+    QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QGroupBox, QPushButton,
+    QHBoxLayout, QLabel, QMainWindow, QSpinBox, QSplitter,
     QVBoxLayout, QWidget,
 )
 
@@ -79,14 +79,16 @@ COLORMAPS = [
 
 # ── Data loading ──────────────────────────────────────────────────
 def load_features():
-    """Kept-feature list from the selected feature map (or the canonical
-    per-bin ``feature_catalog_NxN.json`` when none is selected). Accepts a plain
-    list or a shapes file with a ``kept`` array — both store identical features.
+    """Kept-feature list from the selected feature map (or the newest shapes/
+    combined catalog for the bin when none is selected). Reads any catalog kind
+    via ``load_features_any``.
     """
-    path = CATALOG_PATH or (RESULTS_DIR / f"feature_catalog_{_BIN_SIZE}x{_BIN_SIZE}.json")
-    with open(path) as f:
-        data = json.load(f)
-    return data.get("kept", []) if isinstance(data, dict) else data
+    from ..core import catalogs
+    path = CATALOG_PATH or catalogs.default_feature_source(RESULTS_DIR, _BIN_SIZE)
+    if not path:
+        return []
+    kept, _ = catalogs.load_features_any(path)
+    return kept
 
 
 def load_tth_map():
@@ -454,19 +456,25 @@ class OrientationMapWindow(QMainWindow):
         sl = QVBoxLayout(sg)
         gr = QHBoxLayout()
         gr.addWidget(QLabel("KDE bandwidth"))
-        self.bw_slider = QSlider(Qt.Horizontal)
-        self.bw_slider.setRange(1, 30); self.bw_slider.setValue(int(self._bandwidth))
-        gr.addWidget(self.bw_slider)
-        self.bw_label = QLabel(f"{self._bandwidth:.0f}°"); self.bw_label.setFixedWidth(32)
-        gr.addWidget(self.bw_label)
+        self.bw_spin = QSpinBox()
+        self.bw_spin.setRange(1, 30)
+        self.bw_spin.setValue(int(self._bandwidth))
+        self.bw_spin.setSuffix("°")
+        self.bw_spin.setToolTip("Gaussian KDE bandwidth used to cluster features along χ")
+        gr.addWidget(self.bw_spin)
+        gr.addStretch()
         sl.addLayout(gr)
         tr = QHBoxLayout()
         tr.addWidget(QLabel("Band tol"))
-        self.tol_slider = QSlider(Qt.Horizontal)
-        self.tol_slider.setRange(10, 100); self.tol_slider.setValue(int(self._band_tol * 100))
-        tr.addWidget(self.tol_slider)
-        self.tol_label = QLabel(f"{self._band_tol:.1f}°"); self.tol_label.setFixedWidth(32)
-        tr.addWidget(self.tol_label)
+        self.tol_spin = QDoubleSpinBox()
+        self.tol_spin.setRange(0.10, 1.00)
+        self.tol_spin.setSingleStep(0.05)
+        self.tol_spin.setDecimals(2)
+        self.tol_spin.setValue(self._band_tol)
+        self.tol_spin.setSuffix("°")
+        self.tol_spin.setToolTip("2θ half-width of each Bragg band painted around a reflection")
+        tr.addWidget(self.tol_spin)
+        tr.addStretch()
         sl.addLayout(tr)
         cr = QHBoxLayout()
         cr.addWidget(QLabel("Colormap"))
@@ -519,15 +527,23 @@ class OrientationMapWindow(QMainWindow):
         self.arc_hist.scene().sigMouseClicked.connect(lambda ev: self._unlock_histograms())
 
         rl.addStretch()
+        # Keep the control panel a fixed, compact width (it would otherwise claim
+        # ~half the splitter); the map (left) takes all the extra space so the
+        # window resizes by growing the map rather than stretching the side panel.
+        right.setMinimumWidth(360)
+        right.setMaximumWidth(470)
         splitter.addWidget(right)
-        splitter.setSizes([950, 450])
+        splitter.setStretchFactor(0, 1)
+        splitter.setStretchFactor(1, 0)
+        splitter.setCollapsible(1, False)
+        splitter.setSizes([1000, 450])
 
     # ── signals ──
     def _connect_signals(self):
         for cb in self._ref_checks.values():
             cb.toggled.connect(self._on_filter_changed)
-        self.bw_slider.valueChanged.connect(self._on_bw_changed)
-        self.tol_slider.valueChanged.connect(self._on_tol_changed)
+        self.bw_spin.valueChanged.connect(self._on_bw_changed)
+        self.tol_spin.valueChanged.connect(self._on_tol_changed)
         self.cmap_combo.currentTextChanged.connect(self._on_cmap_changed)
         self.contrast_lo.valueChanged.connect(lambda _v: self._render_main())
         self.contrast_hi.valueChanged.connect(lambda _v: self._render_main())
@@ -550,13 +566,11 @@ class OrientationMapWindow(QMainWindow):
 
     def _on_bw_changed(self, value):
         self._bandwidth = float(value)
-        self.bw_label.setText(f"{value}°")
         self._cluster_all()
         self._render_main()
 
     def _on_tol_changed(self, value):
-        self._band_tol = value / 100.0
-        self.tol_label.setText(f"{self._band_tol:.2f}°")
+        self._band_tol = float(value)
         self._build_sector_id_map()
         self._render_main()
 

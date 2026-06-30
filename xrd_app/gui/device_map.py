@@ -28,8 +28,13 @@ from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtGui import QPainter, QColor, QBrush
 
 from ..config import DataManager
+from ..core import catalogs
 
 pg.setConfigOptions(imageAxisOrder="row-major", antialias=True)
+
+_ISO_GHOST_ALPHA = 0    # opacity of everything but the pick while isolating;
+                        # 0 = hide the rest entirely so the clicked feature reads
+                        # alone, like a single feature in Shape/Verify.
 
 # Resolved at runtime by configure(); see launch_gui().
 _DM = None
@@ -37,15 +42,33 @@ _BIN_SIZE = 3
 RESULTS_DIR = None
 HOLDOUT_DIR = None
 CATALOG_PATH = None   # selected feature-map JSON; None → canonical per-bin file
+GRID_PATH = None      # grid mapping matching the selected catalog's bins
 
 
 def configure(project_root=".", bin_size=3, scan=None, catalog=None):
-    global _DM, _BIN_SIZE, RESULTS_DIR, HOLDOUT_DIR, CATALOG_PATH
+    global _DM, _BIN_SIZE, RESULTS_DIR, HOLDOUT_DIR, CATALOG_PATH, GRID_PATH
     _DM = DataManager(project_root, scan=scan)
     _BIN_SIZE = bin_size
     RESULTS_DIR = _DM.results_dir()
     HOLDOUT_DIR = _DM.holdout_dir
     CATALOG_PATH = catalog
+    GRID_PATH = _resolve_grid_mapping()
+
+
+def _resolve_grid_mapping():
+    """Grid mapping whose bins match the selected catalog (so a catalog built on
+    a non-default coordinate grid uses the right grid dimensions instead of
+    clipping its out-of-range bins). Falls back to the per-bin default."""
+    default = _DM.grid_mapping(bin_size=_BIN_SIZE)
+    if not CATALOG_PATH:
+        return default
+    try:
+        cand_dir = _DM.metadata_scan_dir()
+        tagged = sorted(p for p in cand_dir.glob(
+            f"grid_mapping_{_BIN_SIZE}x{_BIN_SIZE}*.json") if Path(p) != Path(default))
+        return catalogs.best_grid_mapping([default] + tagged, CATALOG_PATH, default=default)
+    except Exception:
+        return default
 
 
 REFLECTIONS = []
@@ -101,21 +124,22 @@ METRIC_2D_TITLES = {
 
 
 def load_features():
-    """Kept-feature list from the selected feature map (or the canonical
-    per-bin ``feature_catalog_NxN.json`` when none is selected).
+    """Kept-feature list from the selected feature map (or the newest shapes/
+    combined catalog for the bin when none is selected).
 
-    Accepts either a plain list (``feature_catalog_NxN.json``) or a shapes file
-    carrying a ``kept`` array (``*_shapes_NxN.json``) — both store identical
-    feature dicts, so a shapes catalog renders here as its kept features.
+    Reads any catalog kind via ``load_features_any`` (shapes ``kept``, combined
+    ``features``, or a legacy plain list), so a shapes catalog renders here as
+    its kept features.
     """
-    path = CATALOG_PATH or (RESULTS_DIR / f"feature_catalog_{_BIN_SIZE}x{_BIN_SIZE}.json")
-    with open(path) as f:
-        data = json.load(f)
-    return data.get("kept", []) if isinstance(data, dict) else data
+    path = CATALOG_PATH or catalogs.default_feature_source(RESULTS_DIR, _BIN_SIZE)
+    if not path:
+        return []
+    kept, _ = catalogs.load_features_any(path)
+    return kept
 
 
 def load_grid_info():
-    with open(_DM.grid_mapping(bin_size=_BIN_SIZE)) as f:
+    with open(GRID_PATH or _DM.grid_mapping(bin_size=_BIN_SIZE)) as f:
         gm = json.load(f)
     return gm["n_bin_rows"], gm["n_bin_cols"]
 
@@ -380,6 +404,7 @@ class DeviceMapWindow(QMainWindow):
         self._outline_items = []
         self._highlighted_idx = None
         self._locked_idx = None
+        self._isolate = True   # clicked feature dims the rest (Photoshop-style)
         self._chi_hist_ref = None
         self._chi_weight = "count"
 
@@ -471,6 +496,15 @@ class DeviceMapWindow(QMainWindow):
         self.labels_cb = QCheckBox("Points")
         self.labels_cb.toggled.connect(self._on_labels_toggle)
         tog.addWidget(self.labels_cb)
+        self.isolate_cb = QCheckBox("Isolate selection")
+        self.isolate_cb.setChecked(self._isolate)
+        self.isolate_cb.setToolTip(
+            "When a feature is clicked, hide everything else and rescale the "
+            "color map to that feature's own value range — shows the clicked "
+            "feature alone, like a single feature in Shape/Verify. Uncheck to "
+            "keep the full map visible behind the selection.")
+        self.isolate_cb.toggled.connect(self._on_isolate_toggle)
+        tog.addWidget(self.isolate_cb)
         tog.addStretch()
         rgl.addLayout(tog)
         rl.addWidget(rg)
@@ -638,6 +672,38 @@ class DeviceMapWindow(QMainWindow):
             vmax = vmin + 1
         return combined, vmin, vmax
 
+    def _compute_isolated(self, feat):
+        """(grid, vmin, vmax) for a single feature's bins only, scaled to its
+        own value range so its internal metric variation is visible. Bins
+        outside the feature stay NaN → rendered transparent by _scalar_to_rgba.
+        """
+        ref = feat["reflection"]
+        mask = feat.get("_mask")
+        Z = self.current_grids.get(ref)
+        grid = np.full((self.n_rows, self.n_cols), np.nan)
+        if Z is None or mask is None:
+            return grid, 0.0, 1.0
+        valid = np.isfinite(Z) & mask
+        if self.metric == "intensity":
+            valid = valid & (Z > 0)
+        grid[valid] = Z[valid]
+        finite = grid[np.isfinite(grid)]
+        if finite.size == 0:
+            return grid, 0.0, 1.0
+        lo = float(self.lo_spin.value()) if hasattr(self, "lo_spin") else 0.0
+        hi = float(self.hi_spin.value()) if hasattr(self, "hi_spin") else 100.0
+        if hi <= lo:
+            hi = min(100.0, lo + 1.0)
+        vmin = float(np.percentile(finite, lo))
+        vmax = float(np.percentile(finite, hi))
+        if abs(vmax - vmin) < 1e-8:
+            vmax = vmin + 1
+        return grid, vmin, vmax
+
+    def _on_isolate_toggle(self, checked):
+        self._isolate = bool(checked)
+        self._redraw()
+
     def _clear_items(self, items):
         for it in items:
             try:
@@ -655,6 +721,16 @@ class DeviceMapWindow(QMainWindow):
             self.hover_label.setText("Hover over a feature to see details")
 
         chi_range = self._chi_range()
+
+        # Is a locked feature being isolated this redraw? (only if still visible)
+        isolate = (self._isolate and self._locked_idx is not None
+                   and 0 <= self._locked_idx < len(self.features))
+        iso_feat = self.features[self._locked_idx] if isolate else None
+        if isolate and not (iso_feat["reflection"] in self.visible_refs
+                            and _feat_in_chi_range(iso_feat, chi_range)):
+            isolate, iso_feat = False, None
+            self._locked_idx = None
+
         outline_groups = _build_outline_groups(
             self.features, self.n_rows, self.n_cols, self.visible_refs, chi_range)
 
@@ -668,8 +744,28 @@ class DeviceMapWindow(QMainWindow):
                 rgba[merged, 1] = pastel[1]
                 rgba[merged, 2] = pastel[2]
                 rgba[merged, 3] = 255
+            if isolate and iso_feat.get("_mask") is not None:
+                rgba[~iso_feat["_mask"], 3] = _ISO_GHOST_ALPHA  # hide the rest
             self.img_item.setImage(rgba, autoLevels=False)
             self._update_colorbar(None, None, None)
+        elif isolate:
+            # Hide the full map (ghost alpha 0), then paint the selected
+            # feature (its own value range) at full strength on top.
+            cmap = _get_cmap(METRIC_CMAPS.get(self.metric, "viridis"))
+            full, fvmin, fvmax = self._compute_combined(
+                self.metric, self.visible_refs, chi_range)
+            rgba = _scalar_to_rgba(full, fvmin, fvmax, cmap)
+            a = rgba[..., 3].astype(np.uint16) * _ISO_GHOST_ALPHA // 255
+            rgba[..., 3] = a.astype(np.ubyte)
+            sel, vmin, vmax = self._compute_isolated(iso_feat)
+            sel_rgba = _scalar_to_rgba(sel, vmin, vmax, cmap)
+            on = sel_rgba[..., 3] > 0
+            rgba[on] = sel_rgba[on]
+            self.img_item.setImage(rgba, autoLevels=False)
+            if np.isfinite(sel).any():
+                self._update_colorbar(cmap, vmin, vmax)
+            else:
+                self._update_colorbar(None, None, None)
         else:
             combined, vmin, vmax = self._compute_combined(
                 self.metric, self.visible_refs, chi_range)
@@ -681,10 +777,17 @@ class DeviceMapWindow(QMainWindow):
             else:
                 self._update_colorbar(None, None, None)
 
-        # Outlines (IsocurveItem at 0.5 on each merged mask)
+        # Outlines (IsocurveItem at 0.5 on each merged mask). While isolating
+        # the other outlines are hidden (ghost alpha 0); the selected
+        # feature's own outline is drawn at full strength by _draw_highlight.
         for ref, merged in outline_groups:
-            iso = pg.IsocurveItem(data=merged.astype(float), level=0.5,
-                                  pen=pg.mkPen(REF_COLORS[ref], width=1.5))
+            if isolate:
+                col = QColor(REF_COLORS[ref])
+                col.setAlpha(_ISO_GHOST_ALPHA)
+                pen = pg.mkPen(col, width=1.5)
+            else:
+                pen = pg.mkPen(REF_COLORS[ref], width=1.5)
+            iso = pg.IsocurveItem(data=merged.astype(float), level=0.5, pen=pen)
             iso.setZValue(5)
             self.plot.addItem(iso)
             self._outline_items.append(iso)
@@ -696,9 +799,10 @@ class DeviceMapWindow(QMainWindow):
                 s = pg.ScatterPlotItem(pen=None, brush=pg.mkBrush(REF_COLORS[ref]), size=10)
                 self.legend.addItem(s, ref)
 
-        # Points / labels
+        # Points / labels (only the selected feature's label while isolating)
         if self.show_labels:
-            self._draw_points(chi_range)
+            self._draw_points(chi_range,
+                              only_idx=self._locked_idx if isolate else None)
 
         self.plot.setTitle(METRIC_2D_TITLES.get(self.metric, self.metric))
 
@@ -706,7 +810,9 @@ class DeviceMapWindow(QMainWindow):
             feat = self.features[self._locked_idx]
             if (feat["reflection"] in self.visible_refs
                     and _feat_in_chi_range(feat, chi_range)):
-                self._draw_highlight(self._locked_idx)
+                # While isolating, the base image already shows the feature in
+                # full color — draw just its crisp outline (no translucent fill).
+                self._draw_highlight(self._locked_idx, fill=not isolate)
             else:
                 self._locked_idx = None
 
@@ -724,9 +830,11 @@ class DeviceMapWindow(QMainWindow):
             label=METRIC_ZLABELS.get(self.metric, ""))
         self.glw.addItem(self.colorbar, row=0, col=1)
 
-    def _draw_points(self, chi_range):
+    def _draw_points(self, chi_range, only_idx=None):
         spots = []
-        for feat in self.features:
+        for i, feat in enumerate(self.features):
+            if only_idx is not None and i != only_idx:
+                continue
             ref = feat["reflection"]
             if ref not in self.visible_refs or not _feat_in_chi_range(feat, chi_range):
                 continue
@@ -785,6 +893,7 @@ class DeviceMapWindow(QMainWindow):
             "hidden_layers": [r for r, cb in self.layer_cbs.items()
                               if not cb.isChecked()],
             "points": self.labels_cb.isChecked(),
+            "isolate": self._isolate,
         }
 
     def apply_view_state(self, state):
@@ -803,6 +912,11 @@ class DeviceMapWindow(QMainWindow):
             self.labels_cb.setChecked(bool(state["points"]))
             self.labels_cb.blockSignals(False)
             self.show_labels = bool(state["points"])
+        if "isolate" in state:
+            self._isolate = bool(state["isolate"])
+            self.isolate_cb.blockSignals(True)
+            self.isolate_cb.setChecked(self._isolate)
+            self.isolate_cb.blockSignals(False)
         m = state.get("metric")
         if m and self.metric_combo.findData(m) >= 0:
             self.metric_combo.blockSignals(True)
@@ -979,11 +1093,15 @@ class DeviceMapWindow(QMainWindow):
         if dist > 3.0 or idx is None:
             if self._locked_idx is not None:
                 self._locked_idx = None
-                self._clear_highlight()
+                self._redraw() if self._isolate else self._clear_highlight()
             return
         if idx == self._locked_idx:
             self._locked_idx = None
-            self._clear_highlight()
+            self._redraw() if self._isolate else self._clear_highlight()
+        elif self._isolate:
+            # Isolate path rebuilds the base image around the new selection.
+            self._locked_idx = idx
+            self._redraw()
         else:
             self._locked_idx = idx
             self._clear_highlight(draw=False)
@@ -1011,7 +1129,7 @@ class DeviceMapWindow(QMainWindow):
         self._clear_highlight(draw=False)
         self._draw_highlight(idx)
 
-    def _draw_highlight(self, idx):
+    def _draw_highlight(self, idx, fill=True):
         self._highlighted_idx = idx
         feat = self.features[idx]
         mask = feat.get("_mask")
@@ -1019,13 +1137,14 @@ class DeviceMapWindow(QMainWindow):
             return
         ref = feat["reflection"]
         r, g, b = _hex_rgb(REF_COLORS[ref])
-        rgba = np.zeros((self.n_rows, self.n_cols, 4), dtype=np.ubyte)
-        rgba[mask, 0], rgba[mask, 1], rgba[mask, 2] = r, g, b
-        rgba[mask, 3] = 115
-        hl = pg.ImageItem(rgba)
-        hl.setZValue(10)
-        self.plot.addItem(hl)
-        self._highlight_items.append(hl)
+        if fill:
+            rgba = np.zeros((self.n_rows, self.n_cols, 4), dtype=np.ubyte)
+            rgba[mask, 0], rgba[mask, 1], rgba[mask, 2] = r, g, b
+            rgba[mask, 3] = 115
+            hl = pg.ImageItem(rgba)
+            hl.setZValue(10)
+            self.plot.addItem(hl)
+            self._highlight_items.append(hl)
         for pen in (pg.mkPen("w", width=3), pg.mkPen(REF_COLORS[ref], width=1.8)):
             iso = pg.IsocurveItem(data=mask.astype(float), level=0.5, pen=pen)
             iso.setZValue(11)

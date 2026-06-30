@@ -6,7 +6,7 @@ Faithful, de-hardcoded port of ``analysis/spatial_feature_analysis.py``:
   Phase 1  per-bin detection      (run a detector module over every bin)
   Phase 2  spatial linking        (Union-Find across neighboring bins)
   Phase 3  Gaussian filtering     (keep clusters with a clear bright center)
-  Phase 4  output                 (feature_catalog.json + kept/filtered CSVs)
+  Phase 4  output                 (shapes JSON via the CLI + kept/filtered CSVs)
 
 The detector itself is supplied as an external module (``detector_script``)
 exposing ``radial_median_subtract``, ``fast_tophat``, ``build_tth_band_masks``,
@@ -209,13 +209,6 @@ def estimate_beam_center(tth_map):
 
 
 # ── Phase 4: output ────────────────────────────────────────────────
-def write_feature_catalog(kept, output_path, log: Callable[[str], None] = print):
-    for i, f in enumerate(kept):
-        f["feature_id"] = i + 1
-    io.atomic_write_json(output_path, kept)   # atomic: viewers never see a partial file
-    log(f"  Wrote {len(kept)} kept features to {output_path}")
-
-
 def write_peak_table(peaks, output_path, title, log: Callable[[str], None] = print):
     with open(output_path, "w", newline="") as fh:
         writer = csv.writer(fh)
@@ -496,8 +489,19 @@ def run_shapes(
     n_rows, n_cols = gm["n_bin_rows"], gm["n_bin_cols"]
     log(f"  Grid: {n_rows} x {n_cols} = {n_rows * n_cols} bins")
 
-    log("  Linking peaks across bins (Union-Find)...")
-    features = shape.link_peaks(all_detections, n_rows, n_cols, link_tolerance)
+    territories = gm.get("territories")
+    if territories is not None:
+        # Territorial / cell-model mapping: link across physical (X, Y) neighbors
+        # instead of the N×N 8-neighborhood. The shape algorithm must expose the
+        # neighbor-graph link_peaks signature (ShapeAlgorithms/territory.py).
+        neighbors = {k: info.get("neighbors", []) for k, info in territories.items()}
+        if hasattr(shape, "set_centroids"):
+            shape.set_centroids({k: info.get("centroid_rc") for k, info in territories.items()})
+        log(f"  Linking peaks across {len(neighbors)} territories (Union-Find)...")
+        features = shape.link_peaks(all_detections, neighbors, link_tolerance)
+    else:
+        log("  Linking peaks across bins (Union-Find)...")
+        features = shape.link_peaks(all_detections, n_rows, n_cols, link_tolerance)
     n_single = sum(1 for f in features if len(set(m[0] for m in f)) == 1)
     log(f"  {len(features)} raw features: {len(features) - n_single} multi-bin, "
         f"{n_single} single-bin")

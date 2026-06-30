@@ -6,6 +6,11 @@ fixes the **serpentine-raster registration error** which fragments features at
 fine binning — most visibly at 1×1, where a single physical Bragg feature breaks
 into *horizontal slices* (it spans scan columns within a row but not across rows).
 
+This is the **fast 1×1 post-processing** skew fix: it operates on the existing
+1×1 grid's peaks (same bin keys), correcting skew at the *linking* stage, so its
+output catalog stays on the default grid and is directly comparable to the
+territorial truth (see ``TERRITORY.md`` / ``compare_to_truth.py``).
+
 Why the baseline slices it
 --------------------------
 ``gaussian.link_peaks`` joins detections in 8-connected ``(row, col)`` bins only
@@ -54,6 +59,10 @@ import tifffile
 DEFAULT_LINK_TOLERANCE = 5   # px — same meaning as gaussian.py
 _MAX_SHIFT = 15              # px-cols — search range for the per-row backlash shift
 _MIN_PAIRS = 5              # min unambiguous matches to trust a row-pair shift
+_CROSS_ROW_REACH = 16       # cols — wide cross-row column window to bridge the
+                            # alternating even/odd backlash (safe: cross-row links
+                            # still require the detector (x,y) to match, i.e. the
+                            # SAME grain, so over-reach can't merge distinct grains)
 
 
 # Reuse the (unchanged) gaussian Phase-3 characterization so this variant differs
@@ -122,16 +131,16 @@ def link_peaks(all_detections, n_rows, n_cols, link_tolerance=DEFAULT_LINK_TOLER
     if not nodes:
         return []
 
-    # 1) estimate + accumulate the per-row backlash shift
-    shifts = estimate_row_shifts(by_cell, n_rows, link_tolerance)
+    # No cumulative per-row shift. On this beamline the backlash ALTERNATES by
+    # row parity (even/odd), not as a monotonic drift, so accumulating per-pair
+    # estimates injects a bogus drift (measured up to ~60 cols here) that scatters
+    # links and fragments features further. Instead we leave the column index
+    # uncorrected and widen the cross-row column reach: because a cross-row link
+    # still requires the detector (x, y) to agree within link_tolerance (the SAME
+    # grain), a wide reach merges a feature's parity-split slices without merging
+    # physically distinct grains.
     cum = np.zeros(max(n_rows, 1), dtype=int)
-    for r in range(1, len(cum)):
-        cum[r] = cum[r - 1] + shifts.get(r - 1, 0)
-
-    # 2) adaptive cross-row residual window: widen only when a real skew exists
-    nz = [abs(v) for v in shifts.values() if v != 0]
-    skew = np.median(nz) if len(nz) >= max(3, 0.05 * n_rows) else 0
-    xwin = 1 if skew < 1 else (2 if skew < 3 else 3)
+    xwin = _CROSS_ROW_REACH
 
     # 3) index by (row, corrected_col, detector-cell) and union neighbours
     idx = defaultdict(list)

@@ -337,11 +337,15 @@ class DataManager:
         return (self.metadata_dir / name) if name else self.metadata_dir
 
     # ----- algorithm output files -------------------------------------
-    def peaks_json(self, algo: str, bin_size: int, scan: object = None) -> Path:
-        return self.labels_dir(scan) / f"{algo}_peaks_{bin_size}x{bin_size}.json"
+    def peaks_json(self, algo: str, bin_size: int, scan: object = None,
+                   variant: Optional[str] = None) -> Path:
+        tag = f"_{variant}" if variant else ""
+        return self.labels_dir(scan) / f"{algo}_peaks_{bin_size}x{bin_size}{tag}.json"
 
-    def shapes_json(self, algo: str, bin_size: int, scan: object = None) -> Path:
-        return self.labels_dir(scan) / f"{algo}_shapes_{bin_size}x{bin_size}.json"
+    def shapes_json(self, algo: str, bin_size: int, scan: object = None,
+                    variant: Optional[str] = None) -> Path:
+        tag = f"_{variant}" if variant else ""
+        return self.labels_dir(scan) / f"{algo}_shapes_{bin_size}x{bin_size}{tag}.json"
 
     def manual_labels_json(self, scan: object = None) -> Path:
         return self.labels_dir(scan) / "manual_labels.json"
@@ -500,22 +504,25 @@ class DataManager:
         return proj if proj.exists() else self._asset("reflections.py")
 
     def grid_mapping(self, override: Optional[str] = None, bin_size: Optional[int] = None,
-                     scan: object = None) -> Path:
+                     scan: object = None, variant: Optional[str] = None) -> Path:
         if override:
             return self._abs(override)
-        configured = self.config.get("data_sources", "grid_mapping")
-        if configured:
-            return self._abs(configured)
+        if not variant:
+            configured = self.config.get("data_sources", "grid_mapping")
+            if configured:
+                return self._abs(configured)
         sdir = self.metadata_scan_dir(scan)
+        tag = f"_{variant}" if variant else ""
         if bin_size is not None:
-            return sdir / f"grid_mapping_{bin_size}x{bin_size}.json"
-        return sdir / "grid_mapping.json"
+            return sdir / f"grid_mapping_{bin_size}x{bin_size}{tag}.json"
+        return sdir / f"grid_mapping{tag}.json"
 
     def binned_h5(self, bin_size: int, override: Optional[str] = None,
-                  scan: object = None) -> Path:
+                  scan: object = None, variant: Optional[str] = None) -> Path:
         if override:
             return self._abs(override)
-        return self.binned_dir(scan) / f"xrd_{bin_size}x{bin_size}_bins.h5"
+        tag = f"_{variant}" if variant else ""
+        return self.binned_dir(scan) / f"xrd_{bin_size}x{bin_size}_bins{tag}.h5"
 
     # ----- compatibility shims for the embedded legacy GUIs -----------
     # The viewer/device_map/orientation modules were written against the old

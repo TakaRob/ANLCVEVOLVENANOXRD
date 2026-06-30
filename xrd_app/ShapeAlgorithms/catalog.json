@@ -20,7 +20,27 @@
       "holdout_f1": null,
       "holdout_f2": null,
       "source": "manual",
-      "notes": "Skew-aware variant of 'gaussian'. Estimates each scan's serpentine-raster column backlash from unambiguous cross-row detector matches and de-skews the linking so a single feature stops fragmenting into horizontal slices at fine binning (esp. 1x1). Adaptive: neutral on well-registered grids, corrects proportionally where skew exists. Reuses gaussian's gaussian-profile filtering + characterization unchanged; only link_peaks differs. Cannot fix missing detections (SNR dropouts) — bin for those."
+      "notes": "Fast 1x1 post-processing skew fix: drop-in for 'gaussian' that corrects serpentine/backlash column misregistration at the LINKING stage (estimates the per-row column shift from unambiguous cross-row matches, links on the corrected column with an adaptive cross-row window), then reuses the gaussian profile filter + characterization verbatim. Same default-grid bin keys, so its catalog is directly comparable to the territorial truth (TERRITORY.md / compare_to_truth.py). Neutral on already-clean (binned) grids."
+    },
+    {
+      "name": "territory",
+      "bin_size": null,
+      "file": "territory.py",
+      "role": "shape",
+      "holdout_f1": null,
+      "holdout_f2": null,
+      "source": "manual",
+      "notes": "Territorial / cell-model source-of-truth linker: same Union-Find + gaussian filter + characterization as 'gaussian', but links across PHYSICAL territory neighbors (true (X,Y) adjacency) instead of the N×N 8-neighborhood. Pair with a territorial grid mapping (core.territory) — 'xrd-app shapes --algorithm territory --variant territory'. Skew-free reference for optimizing the fast post-processing."
+    },
+    {
+      "name": "voigt",
+      "bin_size": null,
+      "file": "voigt.py",
+      "role": "shape",
+      "holdout_f1": null,
+      "holdout_f2": null,
+      "source": "manual",
+      "notes": "Voigt shape finder: same linking as gaussian/territory (grid or coordinate, auto-dispatched) but keeps features whose cross-bin radial profile fits a pseudo-Voigt (R2 test + compact/monotonic fallbacks) instead of the gaussian monotonicity check. Ports the Voigt verification from the per-frame CombinedAlgorithms onto the standard peaks->shapes pipeline (full intensities/profiles, populates Device/Orientation). Select with 'xrd-app shapes --algorithm voigt'."
     }
   ]
 }

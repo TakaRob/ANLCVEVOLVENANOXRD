@@ -101,9 +101,11 @@ class SetupTab(QWidget):
         b_dir.setMinimumHeight(40)
         b_dir.setToolTip("Pick a folder that contains several Scan_*/ directories.")
         b_dir.clicked.connect(self._pick_dir)
-        b_pos = QPushButton("Load positions.csv…")
+        b_pos = QPushButton("Load positions…")
         b_pos.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.MinimumExpanding)
         b_pos.setMinimumHeight(40)
+        b_pos.setToolTip("Load a single position CSV for the active scan, or a "
+                         "folder of per-scan scan_NNNN_position.csv files.")
         b_pos.clicked.connect(self._load_positions)
         ll.addWidget(b_file)
         ll.addWidget(b_dir)
@@ -299,15 +301,37 @@ class SetupTab(QWidget):
                               "--scans-dir", path])
 
     def _load_positions(self):
-        path, _ = QFileDialog.getOpenFileName(
-            self, "Select a scan position CSV", self.project_root or "",
-            "CSV (*.csv)")
-        if not path:
-            return
-        args = ["link", "--root", self.project_root, "--position-csv", path]
-        if self.scan:
-            args += ["--scan", str(self.scan)]
-        self.console.run(args)
+        """Load scan positions as either a single CSV (this scan) or a folder
+        of per-scan ``scan_NNNN_position.csv`` files (multi-scan)."""
+        box = QMessageBox(self)
+        box.setWindowTitle("Load positions")
+        box.setText(
+            "Load a single position CSV for the active scan, or a folder "
+            "of per-scan scan_NNNN_position.csv files?")
+        b_file = box.addButton("Single CSV…", QMessageBox.AcceptRole)
+        b_dir = box.addButton("Folder of CSVs…", QMessageBox.AcceptRole)
+        box.addButton(QMessageBox.Cancel)
+        box.exec_()
+        clicked = box.clickedButton()
+        if clicked is b_dir:
+            # → link --position-root: records the dir; per-scan CSVs are
+            #   resolved later as scan_NNNN_position.csv.
+            path = QFileDialog.getExistingDirectory(
+                self, "Select a folder of scan_NNNN_position.csv files",
+                self.project_root or "")
+            if path:
+                self.console.run(["link", "--root", self.project_root,
+                                  "--position-root", path])
+        elif clicked is b_file:
+            path, _ = QFileDialog.getOpenFileName(
+                self, "Select a scan position CSV", self.project_root or "",
+                "CSV (*.csv)")
+            if not path:
+                return
+            args = ["link", "--root", self.project_root, "--position-csv", path]
+            if self.scan:
+                args += ["--scan", str(self.scan)]
+            self.console.run(args)
 
     def _load_tth(self):
         path, _ = QFileDialog.getOpenFileName(

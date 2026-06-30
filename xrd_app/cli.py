@@ -549,14 +549,20 @@ def scan_detect(scans_dir, scan_file, deep, root):
 @click.option('--positions', help='Scan position CSV (defaults to resolved)')
 @click.option('--rawgrid', is_flag=True,
               help='Bypass (X,Y) de-skew: use the legacy serpentine X-only grid.')
-@click.option('--deskew-method', type=click.Choice(['commanded', 'perrow_offset']),
+@click.option('--deskew-method',
+              type=click.Choice(['commanded', 'faithful', 'faithful_native', 'perrow_offset']),
               default='commanded',
               help='Column assignment for file-per-row scans: commanded (default, '
-                   'align by rank) or perrow_offset (DEPRECATED "triangle" method, '
-                   'for comparison only).')
+                   'align by rank), faithful (snap columns to true Y on a square-pixel '
+                   'lattice — to-scale, de-skewed, best for viewing), faithful_native '
+                   '(snap to true Y at native frame density — de-skewed with ~1 frame/'
+                   'cell, best for detection/recall), or perrow_offset (DEPRECATED).')
+@click.option('--variant', default=None,
+              help='Tag appended to default output names (e.g. "faithful") so a '
+                   'coordinate variant sits alongside the default instead of overwriting it.')
 @click.option('--output', help='Output grid_mapping JSON (defaults to per-scan Metadata dir)')
 @click.option('--root', default='.', help='Project root directory')
-def grid(bin_size, scan, shape, xrd_dir, positions, rawgrid, deskew_method, output, root):
+def grid(bin_size, scan, shape, xrd_dir, positions, rawgrid, deskew_method, variant, output, root):
     """Generate grid_mapping.json assigning raw frames to a spatial bin grid.
 
     Coordinate source (auto-selected, recorded in the output JSON):
@@ -573,7 +579,7 @@ def grid(bin_size, scan, shape, xrd_dir, positions, rawgrid, deskew_method, outp
     scan_no = dm.scan_number() or 203
     xdir = Path(xrd_dir) if xrd_dir else dm.xrd_frames_dir()
     pos = Path(positions) if positions else dm.position_csv()
-    out = Path(output) if output else dm.grid_mapping(bin_size=bin_size)
+    out = Path(output) if output else dm.grid_mapping(bin_size=bin_size, variant=variant)
     out.parent.mkdir(parents=True, exist_ok=True)
     _require(xdir, "raw frames directory")
 
@@ -604,6 +610,58 @@ def grid(bin_size, scan, shape, xrd_dir, positions, rawgrid, deskew_method, outp
                              deskew=not rawgrid, deskew_method=deskew_method,
                              log=click.echo)
     click.echo(f"Wrote grid_mapping -> {out}")
+
+
+# ─────────────────────────────────────────────────────────────────────
+# territory-grid — skew-free reference binning by true (X, Y) territories
+# ─────────────────────────────────────────────────────────────────────
+@main.command(name='territory-grid')
+@click.option('--target-size', type=int, default=9,
+              help='Frames per territory before it stops growing (sweepable; '
+                   'small ≈ 1×1 resolution, large = higher per-cell SNR).')
+@click.option('--scan', default=None, help='Scan number/name (defaults to config scan)')
+@click.option('--xrd-dir', help='Directory of raw per-frame H5 files (defaults to resolved)')
+@click.option('--positions', help='Real scan position CSV (defaults to resolved)')
+@click.option('--variant', default='territory',
+              help='Tag for the output names so the territorial mapping sits '
+                   'alongside the grid ones (default "territory").')
+@click.option('--output', help='Output grid_mapping JSON (defaults to per-scan Metadata dir)')
+@click.option('--root', default='.', help='Project root directory')
+def territory_grid(target_size, scan, xrd_dir, positions, variant, output, root):
+    """Build a territorial (cell-model) grid mapping — the skew-free source of truth.
+
+    Groups frames by **true (X, Y) stage positions** into irregular territories
+    that grow until they hit ``--target-size`` frames, bypassing the serpentine
+    reconstruction that skews the N×N grid. Requires a *real* position CSV
+    (X_Position/Y_Position); it will not fall back to a recreated lattice.
+
+    Then run the standard pipeline on the variant (bin_size is nominally 1×1)::
+
+        xrd-app bin    --bin-size 1 --variant territory
+        xrd-app peaks  --bin-size 1 --variant territory
+        xrd-app shapes --bin-size 1 --variant territory --algorithm territory
+    """
+    from .core import io, territory
+    dm = DataManager(root, scan=scan)
+    scan_no = dm.scan_number() or 203
+    xdir = Path(xrd_dir) if xrd_dir else dm.xrd_frames_dir()
+    pos = Path(positions) if positions else dm.position_csv()
+    out = Path(output) if output else dm.grid_mapping(bin_size=1, variant=variant)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    _require(xdir, "raw frames directory")
+
+    if not io.has_raw_frames(xdir, scan_no):
+        click.echo(f"Error: no raw frame files (scan_{scan_no:04d}_*.h5) in {xdir}.")
+        raise SystemExit(1)
+
+    try:
+        territory.build_territory_mapping(
+            xdir, pos, target_size=target_size, scan_number=scan_no,
+            output=out, log=click.echo)
+    except (FileNotFoundError, ValueError) as e:
+        click.echo(f"Error: {e}")
+        raise SystemExit(1)
+    click.echo(f"Wrote territorial grid_mapping -> {out}")
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -658,15 +716,18 @@ def recreate_positions(scan, xrd_dir, step_x, step_y, no_serpentine, output, for
 @click.option('--bin-size', type=int, default=3, help='Spatial bin size (NxN)')
 @click.option('--scan', default=None, help='Scan number/name (defaults to config scan)')
 @click.option('--grid-mapping', help='Grid mapping JSON (defaults to resolved)')
+@click.option('--variant', default=None,
+              help='Coordinate variant tag (e.g. "faithful") — resolves the matching '
+                   'tagged grid mapping and writes a tagged binned HDF5.')
 @click.option('--output', help='Output binned HDF5 path (defaults to per-scan Binned/)')
 @click.option('--compression', type=click.Choice(['gzip', 'lz4', 'none']), default='gzip')
 @click.option('--root', default='.', help='Project root directory')
-def bin(bin_size, scan, grid_mapping, output, compression, root):
+def bin(bin_size, scan, grid_mapping, variant, output, compression, root):
     """Pre-build the binned HDF5 (xrd_NxN_bins.h5) used by 'peaks'."""
     from .core import io
     dm = DataManager(root, scan=scan)
-    gm = Path(grid_mapping) if grid_mapping else dm.grid_mapping(bin_size=bin_size)
-    out = Path(output) if output else dm.binned_h5(bin_size)
+    gm = Path(grid_mapping) if grid_mapping else dm.grid_mapping(bin_size=bin_size, variant=variant)
+    out = Path(output) if output else dm.binned_h5(bin_size, variant=variant)
     _require(gm, "grid mapping (run 'xrd-app grid' first)")
     out.parent.mkdir(parents=True, exist_ok=True)
 
@@ -683,16 +744,19 @@ def bin(bin_size, scan, grid_mapping, output, compression, root):
 @click.option('--algorithm', default=None, help='Detector path OR bundled name (see status)')
 @click.option('--snr', type=float, default=4.0, help='SNR threshold for detection')
 @click.option('--name', 'out_name', default=None, help='Algorithm name for the output file (default: detector stem)')
+@click.option('--variant', default=None,
+              help='Coordinate variant tag (e.g. "faithful") — reads the tagged bins '
+                   'and writes a tagged peaks JSON.')
 @click.option('--h5-path', help='Binned HDF5 (defaults to resolved bins)')
 @click.option('--tth-path', help='2θ TIFF map (defaults to resolved)')
 @click.option('--reflections', 'reflections_path', help='reflections.py (defaults to resolved)')
 @click.option('--root', default='.', help='Project root directory')
-def peaks(bin_size, scan, algorithm, snr, out_name, h5_path, tth_path,
+def peaks(bin_size, scan, algorithm, snr, out_name, variant, h5_path, tth_path,
           reflections_path, root):
     """Phase 1: run a detector over every bin → per-bin peaks (Labels/<scan>/)."""
     from .core import processing
     dm = DataManager(root, scan=scan)
-    h5 = dm.binned_h5(bin_size, h5_path)
+    h5 = dm.binned_h5(bin_size, h5_path, variant=variant)
     tth = dm.tth_map(tth_path)
     det = dm.detector_script(algorithm, bin_size=bin_size)
     refl = dm.reflections(reflections_path)
@@ -712,7 +776,7 @@ def peaks(bin_size, scan, algorithm, snr, out_name, h5_path, tth_path,
         scan=dm.scan_name, bin_size=bin_size, algorithm=algo,
         detector_file=det, snr=snr)
 
-    out = dm.peaks_json(algo, bin_size, scan)
+    out = dm.peaks_json(algo, bin_size, scan, variant=variant)
     _write_json(out, result)
     from .core import catalogs
     catalogs.record_catalog(dm.labels_dir(scan), out.name, result["lineage"])
@@ -730,19 +794,56 @@ def peaks(bin_size, scan, algorithm, snr, out_name, h5_path, tth_path,
 @click.option('--from-peaks', help='Path to a saved *_peaks.json (else --peak-algo)')
 @click.option('--peak-algo', help='Name of a saved peak set in Labels/<scan>/')
 @click.option('--link-tolerance', type=int, default=5, help='Cross-bin link tolerance (px)')
+@click.option('--variant', default=None,
+              help='Coordinate variant tag (e.g. "faithful") — resolves the tagged '
+                   'peaks/grid and writes a tagged shapes JSON + CSVs.')
+@click.option('--coordinate/--grid-link', 'coordinate', default=None,
+              help='Linking mode. Gridless coordinate linking (across true (X,Y) '
+                   'neighbors) is the DEFAULT at 1×1 — the skew-free path, no grid '
+                   'to skew; binned sizes (≥2×2) default to grid linking, where '
+                   'backlash is already averaged out. --grid-link / --coordinate '
+                   'force the choice. Coordinate mode reuses the standard peaks '
+                   '(only linking changes) and writes a "_coord" shapes file.')
+@click.option('--positions', help='Position CSV for coordinate linking (defaults to resolved)')
 @click.option('--tth-path', help='2θ TIFF map (defaults to resolved)')
 @click.option('--reflections', 'reflections_path', help='reflections.py (defaults to resolved)')
 @click.option('--grid-mapping', help='Grid mapping JSON (defaults to resolved)')
 @click.option('--root', default='.', help='Project root directory')
-def shapes(bin_size, scan, algorithm, from_peaks, peak_algo, link_tolerance,
-           tth_path, reflections_path, grid_mapping, root):
-    """Phase 2: link peaks across bins → gaussian-like shapes (Labels/<scan>/)."""
+def shapes(bin_size, scan, algorithm, from_peaks, peak_algo, link_tolerance, variant,
+           coordinate, positions, tth_path, reflections_path, grid_mapping, root):
+    """Phase 2: link peaks → shapes (Labels/<scan>/).
+
+    Links peaks into shapes. At 1×1 the default is gridless **coordinate**
+    linking (across true (X,Y) physical neighbors) — the skew-free path, since
+    the serpentine/backlash skew is a grid artefact and there is no grid here.
+    Binned sizes default to grid linking. Coordinate mode reuses the standard
+    peaks and only changes the linking stage.
+    """
     import json
     from .core import processing
     dm = DataManager(root, scan=scan)
 
+    # Gridless coordinate linking is the skew-free default at 1×1; binned sizes
+    # keep grid linking. An explicit --coordinate/--grid-link overrides.
+    if coordinate is None:
+        coordinate = (bin_size == 1)
+
+    # Coordinate linking needs positions; degrade to grid linking if absent so
+    # position-less projects still run (with a clear note).
+    pos = None
+    if coordinate:
+        pos = Path(positions) if positions else dm.position_csv(scan=scan)
+        if not Path(pos).exists():
+            click.echo(f"Note: no position CSV ({pos}) — falling back to grid linking.")
+            coordinate = False
+    if coordinate and algorithm in (None, 'gaussian'):
+        # Coordinate linking needs a neighbor-graph-capable linker. 'gaussian'
+        # (grid-only) maps to 'territory' = same gaussian verification, coordinate
+        # linking. An explicit coordinate-capable algo (e.g. voigt) is kept.
+        algorithm = 'territory'
+
     peaks_path = Path(from_peaks) if from_peaks else (
-        dm.peaks_json(peak_algo, bin_size, scan) if peak_algo else None)
+        dm.peaks_json(peak_algo, bin_size, scan, variant=variant) if peak_algo else None)
     if not peaks_path:
         click.echo("Error: provide --from-peaks <json> or --peak-algo <name>.")
         raise SystemExit(1)
@@ -752,16 +853,32 @@ def shapes(bin_size, scan, algorithm, from_peaks, peak_algo, link_tolerance,
 
     tth = dm.tth_map(tth_path)
     refl = dm.reflections(reflections_path)
-    gm = Path(grid_mapping) if grid_mapping else dm.grid_mapping(bin_size=bin_size)
+    gm = Path(grid_mapping) if grid_mapping else dm.grid_mapping(bin_size=bin_size, variant=variant)
     shape = dm.shape_script(algorithm)
     for label, p in [("tth", tth), ("reflections", refl), ("grid_mapping", gm),
                      ("shape algorithm", shape)]:
         _require(p, label)
     algo = Path(shape).stem
 
+    # Gridless coordinate linking: augment the grid mapping with true-(X,Y)
+    # neighbors and route to a "_coord" output so it never clobbers grid shapes.
+    out_variant = variant
+    grid_for_run = gm
+    if coordinate:
+        from .core import io as core_io, territory
+        gm_dict = core_io.load_grid_mapping(gm)
+        n_total = gm_dict.get("n_total_frames") or len(gm_dict.get("frame_map", []))
+        fx, fy = core_io.load_positions_xy(pos, n_total)
+        if not (fx == fx).any():
+            click.echo("Error: positions have no usable X — cannot link by coordinate.")
+            raise SystemExit(1)
+        territory.add_coordinate_neighbors(gm_dict, fx, fy, log=click.echo)
+        grid_for_run = gm_dict
+        out_variant = f"{variant}_coord" if variant else "coord"
+
     click.echo(f"[shapes] algorithm: {shape}\n[shapes] peaks: {peaks_path}\n")
     result = processing.run_shapes(
-        peaks=peaks_data, tth_path=tth, grid_mapping=gm, reflections_path=refl,
+        peaks=peaks_data, tth_path=tth, grid_mapping=grid_for_run, reflections_path=refl,
         bin_size=bin_size, link_tolerance=link_tolerance, shape_path=shape,
         progress=_make_progress("shapes"), log=click.echo)
     result["scan"] = dm.scan_name
@@ -774,23 +891,21 @@ def shapes(bin_size, scan, algorithm, from_peaks, peak_algo, link_tolerance,
         peak_source=lineage.from_peaks_data(peaks_data, fallback_file=peaks_path.name),
         peak_source_file=peaks_path.name)
 
-    out = dm.shapes_json(algo, bin_size, scan)
+    out = dm.shapes_json(algo, bin_size, scan, variant=out_variant)
     _write_json(out, result)
 
-    # Also emit legacy-format catalog + CSVs so the embedded GUIs (viewer,
-    # device-map, orientation) read this scan's shapes unchanged.
-    suffix = f"{bin_size}x{bin_size}"
+    # Emit the kept/filtered CSVs alongside the shapes file. The shapes JSON is
+    # the catalog the GUIs (viewer, device-map, orientation) read directly via
+    # core.catalogs — no separate feature_catalog copy is written anymore.
+    suffix = f"{bin_size}x{bin_size}" + (f"_{out_variant}" if out_variant else "")
     ldir = dm.labels_dir(scan)
     ldir.mkdir(parents=True, exist_ok=True)
-    processing.write_feature_catalog(result["kept"], ldir / f"feature_catalog_{suffix}.json", click.echo)
     processing.write_peak_table(result["kept"], ldir / f"kept_peaks_{suffix}.csv", "kept peaks", click.echo)
     processing.write_peak_table(result["filtered"], ldir / f"filtered_peaks_{suffix}.csv", "filtered peaks", click.echo)
 
-    # Track lineage for every JSON written here (the shapes file already carries
-    # an in-file block; the plain-list feature_catalog gets it via the manifest).
+    # The shapes file carries its own in-file lineage block.
     from .core import catalogs
     catalogs.record_catalog(ldir, out.name, result["lineage"])
-    catalogs.record_catalog(ldir, f"feature_catalog_{suffix}.json", result["lineage"])
 
     click.echo(f"\nDone: {result['n_kept']} shapes kept, "
                f"{result['n_filtered']} filtered -> {out}")
@@ -960,13 +1075,10 @@ def run_combined_cmd(bin_size, scan, algorithm, root):
     ldir = dm.labels_dir(scan)
     ldir.mkdir(parents=True, exist_ok=True)
     _write_json(ldir / f"{algo}_combined_{suffix}.json", result)
-    # Viewer reads feature_catalog_<suffix>.json — write the points so View/Label
-    # can overlay them (atomic write so viewers never see a partial file).
-    processing.write_feature_catalog(
-        result["features"], ldir / f"feature_catalog_{suffix}.json", click.echo)
+    # The combined JSON is itself a feature source (load_features_any reads its
+    # "features" list) — the GUIs read it directly; no feature_catalog copy.
     from .core import catalogs
     catalogs.record_catalog(ldir, f"{algo}_combined_{suffix}.json", result["lineage"])
-    catalogs.record_catalog(ldir, f"feature_catalog_{suffix}.json", result["lineage"])
     click.echo(f"\nDone: {result['n_features']} features in "
                f"{len(result['by_bin'])} bins.")
 

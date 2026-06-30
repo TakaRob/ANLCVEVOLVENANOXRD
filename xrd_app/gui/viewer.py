@@ -31,16 +31,85 @@ from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
 from matplotlib.figure import Figure
 import matplotlib.pyplot as plt
 
-from PyQt5.QtCore import Qt, QRectF, QThread, QTimer, pyqtSignal
+from PyQt5.QtCore import Qt, QPoint, QRect, QRectF, QSize, QThread, QTimer, pyqtSignal
 from PyQt5.QtGui import QBrush, QColor, QPen
 from PyQt5.QtWidgets import (
     QAbstractItemView, QApplication, QComboBox, QGraphicsRectItem, QGridLayout,
-    QGroupBox, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem,
-    QMainWindow, QMessageBox, QPushButton, QSizePolicy, QSlider, QSpinBox,
-    QSplitter, QVBoxLayout, QWidget, QCheckBox,
+    QGroupBox, QHBoxLayout, QLabel, QLayout, QLineEdit, QListWidget,
+    QListWidgetItem, QMainWindow, QMessageBox, QPushButton, QSizePolicy, QSlider,
+    QSpinBox, QSplitter, QVBoxLayout, QWidget, QCheckBox,
 )
 
 pg.setConfigOptions(imageAxisOrder="row-major", antialias=True)
+
+
+class FlowLayout(QLayout):
+    """Left-to-right layout that wraps to a new row when width runs out.
+
+    Used for the left toolbar so its many checkboxes don't impose a wide
+    *minimum* on the splitter pane — its minimum width is just the widest single
+    control, letting the user shrink the left pane freely. The row simply wraps
+    instead of forcing the pane to ~half the window.
+    """
+
+    def __init__(self, parent=None, margin=0, spacing=8):
+        super().__init__(parent)
+        if parent is not None:
+            self.setContentsMargins(margin, margin, margin, margin)
+        self.setSpacing(spacing)
+        self._items = []
+
+    def addItem(self, item):
+        self._items.append(item)
+
+    def count(self):
+        return len(self._items)
+
+    def itemAt(self, i):
+        return self._items[i] if 0 <= i < len(self._items) else None
+
+    def takeAt(self, i):
+        return self._items.pop(i) if 0 <= i < len(self._items) else None
+
+    def expandingDirections(self):
+        return Qt.Orientations(Qt.Orientation(0))
+
+    def hasHeightForWidth(self):
+        return True
+
+    def heightForWidth(self, width):
+        return self._do_layout(QRect(0, 0, width, 0), test_only=True)
+
+    def setGeometry(self, rect):
+        super().setGeometry(rect)
+        self._do_layout(rect, test_only=False)
+
+    def sizeHint(self):
+        return self.minimumSize()
+
+    def minimumSize(self):
+        size = QSize()
+        for item in self._items:
+            size = size.expandedTo(item.minimumSize())
+        m = self.contentsMargins()
+        size += QSize(m.left() + m.right(), m.top() + m.bottom())
+        return size
+
+    def _do_layout(self, rect, test_only):
+        x, y, line_h = rect.x(), rect.y(), 0
+        sp = self.spacing()
+        for item in self._items:
+            w, h = item.sizeHint().width(), item.sizeHint().height()
+            if x + w > rect.right() and line_h > 0:   # wrap
+                x = rect.x()
+                y += line_h + sp
+                line_h = 0
+            if not test_only:
+                item.setGeometry(QRect(QPoint(x, y), QSize(w, h)))
+            x += w + sp
+            line_h = max(line_h, h)
+        return y + line_h - rect.y()
+
 
 # These are resolved at runtime by configure(); see launch_gui().
 _DM = None
@@ -81,48 +150,22 @@ def load_module(path):
 
 # ── Data loading ───────────────────────────────────────────────────
 
-def load_features():
-    suffix = f"{_BIN_SIZE}x{_BIN_SIZE}"
-    catalog_path = RESULTS_DIR / f"feature_catalog_{suffix}.json"
-    filtered_csv = RESULTS_DIR / f"filtered_peaks_{suffix}.csv"
-
-    with open(catalog_path) as f:
-        kept = json.load(f)
-
-    filtered = []
-    with open(filtered_csv, newline="") as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            extent_str = row["spatial_extent"].strip()
-            extent_list = extent_str.split() if extent_str else [row["bin_key"]]
-            intensity = float(row["peak_intensity"])
-            profile = {}
-            for bk in extent_list:
-                profile[bk] = intensity
-            filtered.append({
-                "feature_id": int(row["feature_id"]),
-                "reflection": row["reflection"],
-                "detector_x": int(row["detector_x"]),
-                "detector_y": int(row["detector_y"]),
-                "peak_intensity": intensity,
-                "mean_snr": float(row["mean_snr"]),
-                "n_bins": int(row["n_bins"]),
-                "spatial_extent": extent_list,
-                "center_bin": row["bin_key"],
-                "center_row": int(row["center_row"]),
-                "center_col": int(row["center_col"]),
-                "reason": row["reason"],
-                "intensity_profile": profile,
-            })
-
-    return kept, filtered
-
-
 def group_by_reflection(features):
     groups = defaultdict(list)
     for feat in features:
         groups[feat["reflection"]].append(feat)
     return dict(groups)
+
+
+def _fmt_num(v, prec=1):
+    """Format a metric that may be ``None`` (combined catalogs leave per-bin
+    metrics like peak_intensity / mean_snr unset)."""
+    if v is None:
+        return "n/a"
+    try:
+        return f"{float(v):.{prec}f}"
+    except (TypeError, ValueError):
+        return str(v)
 
 
 # ── Catalog discovery + selectable loaders ─────────────────────────
@@ -695,6 +738,9 @@ class FeatureViewer(QMainWindow):
         self._log_scale = False
         self._selected_bin = None
         self._highlight_bin = None
+        # Spot we were viewing before a catalog/bin switch, so we can snap to the
+        # nearest comparable feature afterwards (set in _make_focus_anchor).
+        self._focus_anchor = None
         self._expand_boundary = True
         self._fill_surface = False
         self._iso_bar_info = None
@@ -742,6 +788,10 @@ class FeatureViewer(QMainWindow):
         self._explore_rects = []
         self._next_job_id = 0
         self._region_shown = False
+        # When True, the heatmap/3D/detector/location draws are skipped so a batch
+        # of state changes (e.g. _restore_state) can settle and render once at the
+        # end instead of redrawing — and visibly resizing — on every setter.
+        self._suspend_render = False
 
         self._scan = _DM.scan_name if _DM is not None else None
         self._bin_size = _BIN_SIZE
@@ -754,9 +804,14 @@ class FeatureViewer(QMainWindow):
         self._build_ui()
         self._connect_signals()
 
+        # Build combos with drawing suspended, then render exactly once — via
+        # _restore_state when there's saved state, else a single explicit render.
+        self._suspend_render = True
         self._on_category_changed()
         self._populate_catalog_combos()
-        self._restore_state()
+        self._suspend_render = False
+        if not self._restore_state():
+            self._on_feature_changed()
 
     # ── Data ───────────────────────────────────────────────────────
 
@@ -796,7 +851,8 @@ class FeatureViewer(QMainWindow):
             for bk in feat.get("spatial_extent", []):
                 self._bin_to_all_features[bk].append(feat)
 
-        with open(_DM.grid_mapping(bin_size=_BIN_SIZE)) as f:
+        self._grid_path = self._resolve_grid_mapping()
+        with open(self._grid_path) as f:
             gm = json.load(f)
         self._n_rows = gm["n_bin_rows"]
         self._n_cols = gm["n_bin_cols"]
@@ -821,11 +877,31 @@ class FeatureViewer(QMainWindow):
         self._tth_edges, self._tth_centers, self._n_tth_bins, \
             self._tth_bin_indices, self._tth_radial_counts = compute_tth_binning(self._tth_map)
 
+    def _resolve_grid_mapping(self):
+        """Grid mapping matching the selected feature catalog (the grid whose
+        bins actually contain the catalog's bins); falls back to the per-bin
+        default. This is what lets a catalog built on a non-default coordinate
+        grid resolve its raw frames instead of reporting 'bin not found'."""
+        default = _DM.grid_mapping(bin_size=_BIN_SIZE)
+        if not self._sel_feature_catalog or RESULTS_DIR is None:
+            return default
+        cat = Path(RESULTS_DIR) / self._sel_feature_catalog
+        try:
+            cand_dir = _DM.metadata_scan_dir(self._scan)
+            tagged = sorted(p for p in cand_dir.glob(
+                f"grid_mapping_{_BIN_SIZE}x{_BIN_SIZE}*.json")
+                if Path(p) != Path(default))
+            return catalogs.best_grid_mapping([default] + tagged, cat, default=default)
+        except Exception:
+            return default
+
     def _get_source(self):
         """Lazily open the per-bin image source (built h5, or raw frames)."""
         with self.h5_lock:
             if self._source is None:
-                self._source = io.open_bin_source(_DM, self._bin_size, self._scan)
+                self._source = io.open_bin_source(
+                    _DM, self._bin_size, self._scan,
+                    grid_mapping=getattr(self, "_grid_path", None))
             return self._source
 
     def _load_raw_image(self, bin_key):
@@ -1056,6 +1132,7 @@ class FeatureViewer(QMainWindow):
             layout.addWidget(self.top_bar)
 
         splitter = QSplitter(Qt.Horizontal)
+        self._main_splitter = splitter   # kept so reloads can re-assert pane sizes
 
         # Left: checkbox + heatmap (top) + isometric 3D (bottom)
         left_container = QWidget()
@@ -1063,9 +1140,8 @@ class FeatureViewer(QMainWindow):
         left_vbox.setContentsMargins(0, 0, 0, 0)
         left_vbox.setSpacing(2)
 
-        cb_bar = QHBoxLayout()
+        cb_bar = FlowLayout(spacing=10)   # wraps so the left pane can shrink
         cb_bar.setContentsMargins(0, 0, 0, 0)
-        cb_bar.setSpacing(12)
         self.peak_mode_cb = QCheckBox("Peak intensity")
         self.peak_mode_cb.setToolTip("Unchecked = integrated (area under peak)\nChecked = peak pixel intensity")
         cb_bar.addWidget(self.peak_mode_cb)
@@ -1100,7 +1176,6 @@ class FeatureViewer(QMainWindow):
         self.sub_catalog_combo.activated.connect(self._on_sub_catalog_changed)
         self.sub_catalog_combo.setVisible(False)
         cb_bar.addWidget(self.sub_catalog_combo)
-        cb_bar.addStretch()
         # Heatmap contrast: the colormap spans [min%, max%] percentiles of the
         # grid values (the colorbar on the right is just a legend for that range).
         cb_bar.addWidget(QLabel("Contrast %:"))
@@ -1114,7 +1189,11 @@ class FeatureViewer(QMainWindow):
         self.heat_hi_spin.setToolTip("Upper percentile — colormap top maps here")
         self.heat_hi_spin.valueChanged.connect(self._on_heat_contrast_changed)
         cb_bar.addWidget(self.heat_hi_spin)
-        left_vbox.addLayout(cb_bar)
+        # Host the flow layout in a widget so it slots cleanly into the vbox and
+        # reports a small minimum width (the pane is then freely shrinkable).
+        cb_host = QWidget()
+        cb_host.setLayout(cb_bar)
+        left_vbox.addWidget(cb_host)
 
         left_splitter = QSplitter(Qt.Vertical)
         self.heatmap_canvas = HeatmapView()
@@ -1166,10 +1245,29 @@ class FeatureViewer(QMainWindow):
         self._build_visualization_controls(right_layout)
         self._build_noise_reduction(right_layout)
 
-        # Device location mini-map (clickable in explore mode)
+        # Device location mini-map. Click it (or type a coordinate below) to jump
+        # to the nearest feature at that device (row, col).
         self.loc_canvas = MiniMapView()
         self.loc_canvas.set_click_callback(self._on_minimap_click)
+        self.loc_canvas.setToolTip(
+            "Click a spot to jump to the nearest feature there (device row, col).")
         right_layout.addWidget(self.loc_canvas)
+
+        coord_row = QHBoxLayout()
+        coord_row.setContentsMargins(0, 0, 0, 0)
+        coord_row.addWidget(QLabel("Go to (row, col):"))
+        self.coord_edit = QLineEdit()
+        self.coord_edit.setPlaceholderText("e.g. 12, 34")
+        self.coord_edit.setToolTip(
+            "Device coordinate (bin-grid row, col). Jumps to the nearest feature "
+            "in the current category — the same as clicking the map.")
+        self.coord_edit.returnPressed.connect(self._on_search_coord)
+        coord_row.addWidget(self.coord_edit)
+        self.coord_btn = QPushButton("Go")
+        self.coord_btn.setFixedWidth(40)
+        self.coord_btn.clicked.connect(self._on_search_coord)
+        coord_row.addWidget(self.coord_btn)
+        right_layout.addLayout(coord_row)
 
         # Status bar for hover info
         self.hover_label = QLabel("")
@@ -1201,20 +1299,20 @@ class FeatureViewer(QMainWindow):
         self.bin_combo = QComboBox()
         bar.addWidget(self.bin_combo)
         self._populate_bin_combo()
-        bar.addWidget(QLabel("<b>Scan Catalog:</b>"))
-        self.scan_catalog_combo = QComboBox()
-        self.scan_catalog_combo.setMinimumWidth(190)
-        self.scan_catalog_combo.setToolTip(
-            "Peak set (Peak Finding output) for this scan + bin size.")
-        bar.addWidget(self.scan_catalog_combo)
+        # Search by feature catalog only; the peak-finding algorithm is shown
+        # from its lineage rather than picked separately.
+        self.scan_catalog_combo = None
         bar.addWidget(QLabel("<b>Feature Catalog:</b>"))
         self.feature_catalog_combo = QComboBox()
-        self.feature_catalog_combo.setMinimumWidth(190)
+        self.feature_catalog_combo.setMinimumWidth(220)
         self.feature_catalog_combo.setToolTip(
-            "Shape output (Shape Finding) to view. Selecting one snaps the Scan "
-            "Catalog to the peak set it was derived from. '(none)' shows the peak "
-            "set as raw points.")
+            "Feature catalog (Shape Finding output) to view, for this bin.")
         bar.addWidget(self.feature_catalog_combo)
+        self.lineage_label = QLabel("")
+        self.lineage_label.setStyleSheet(
+            "color:#777; font-size:0.9em; padding-left:6px;")
+        self.lineage_label.setToolTip("Peak-finding algorithm this catalog was built from (lineage).")
+        bar.addWidget(self.lineage_label)
         self.load_btn = QPushButton("Load")
         self.load_btn.setToolTip(
             "Reload features and detector data for the selected scan + bin size")
@@ -1281,19 +1379,22 @@ class FeatureViewer(QMainWindow):
             if src in peaks:
                 self._sel_scan_catalog = src
 
+    def _selected_bin_size(self):
+        """The bin size currently chosen in the Bin dropdown (may differ from the
+        loaded bin until Load is pressed). Distinct from ``self._selected_bin``,
+        which is the clicked bin *key*."""
+        try:
+            return int(self.bin_combo.currentText().split("x")[0])
+        except (ValueError, AttributeError):
+            return self._bin_size
+
     def _feature_catalog_choices(self):
-        """Feature catalogs to offer: those derived from the selected scan catalog
-        (by lineage), plus lineage-less plain ``feature_catalog`` lists for this
-        bin so they stay reachable."""
+        """All feature catalogs for the *chosen* bin (shapes / combined / plain
+        feature lists). You search by feature catalog; the peak-finding algorithm
+        is shown from each one's lineage rather than picked separately."""
         if RESULTS_DIR is None:
             return []
-        feats = (shapes_for_peaks(self._sel_scan_catalog)
-                 if self._sel_scan_catalog else list_shape_catalogs())
-        names = {p.name for p in feats}
-        for p in catalogs.list_catalogs(RESULTS_DIR, "feature", _BIN_SIZE):
-            if p.name not in names:
-                feats.append(p)
-        return feats
+        return catalogs.feature_sources(RESULTS_DIR, self._selected_bin_size())
 
     def _populate_bin_combo(self):
         """Bin sizes to offer = those that actually have catalogs for this scan
@@ -1331,53 +1432,106 @@ class FeatureViewer(QMainWindow):
             self._sel_feature_catalog = m.name if m else None
 
     def _populate_catalog_combos(self):
-        """Fill both catalog dropdowns for the current scan + bin size."""
-        for combo in (self.scan_catalog_combo, self.feature_catalog_combo):
-            combo.blockSignals(True)
-            combo.clear()
-
-        peaks = list_peak_catalogs()
-        self.scan_catalog_combo.addItem("(none)", None)
-        for p in peaks:
-            self.scan_catalog_combo.addItem(p.name, p.name)
-        i = self.scan_catalog_combo.findData(self._sel_scan_catalog)
-        self.scan_catalog_combo.setCurrentIndex(i if i >= 0 else 0)
-
+        """Fill the Feature Catalog dropdown for the current scan + bin size."""
+        self.feature_catalog_combo.blockSignals(True)
+        self.feature_catalog_combo.clear()
         feats = self._feature_catalog_choices()
-        self.feature_catalog_combo.addItem("(none — peaks only)", None)
+        self.feature_catalog_combo.addItem("(none)", None)
         for p in feats:
             self.feature_catalog_combo.addItem(p.name, p.name)
         j = self.feature_catalog_combo.findData(self._sel_feature_catalog)
         self.feature_catalog_combo.setCurrentIndex(j if j >= 0 else 0)
+        self.feature_catalog_combo.blockSignals(False)
+        self._update_lineage_label()
 
-        for combo in (self.scan_catalog_combo, self.feature_catalog_combo):
-            combo.blockSignals(False)
+    def _peak_algo_text(self):
+        """The peak-finding algorithm behind the selected feature catalog, from
+        its lineage (nested peak_source → algorithm, else the peak source file)."""
+        if not self._sel_feature_catalog or RESULTS_DIR is None:
+            return ""
+        lin = catalogs.read_lineage(
+            Path(RESULTS_DIR) / self._sel_feature_catalog, RESULTS_DIR)
+        if isinstance(lin, dict):
+            ps = lin.get("peak_source")
+            if isinstance(ps, dict) and ps.get("peak_algorithm"):
+                return ps["peak_algorithm"]
+            if lin.get("peak_source_file"):
+                return lin["peak_source_file"]
+        return "—"
+
+    def _update_lineage_label(self):
+        algo = self._peak_algo_text()
+        self.lineage_label.setText(f"peaks: {algo}" if algo else "")
+
+    def _on_bin_changed(self, _idx):
+        """Pick a bin → refresh the Feature Catalog list for that bin right away
+        (no data reload). The view itself updates when Load is pressed."""
+        feats = self._feature_catalog_choices()
+        names = {p.name for p in feats}
+        if self._sel_feature_catalog not in names:
+            self._sel_feature_catalog = feats[0].name if feats else None
+        self._populate_catalog_combos()
+        if self._selected_bin_size() != self._bin_size:
+            b = self._selected_bin_size()
+            self.scan_status.setText(f"Bin {b}×{b} selected — press Load to view")
 
     def _on_feature_catalog_changed(self, _idx):
-        """Pick a feature catalog → snap the scan catalog to its lineage source."""
+        """Pick a feature catalog → print its peak-finding lineage. Apply live
+        when its bin is already loaded; otherwise wait for Load."""
         self._sel_feature_catalog = self.feature_catalog_combo.currentData()
-        if self._sel_feature_catalog:
-            src = shape_catalog_peak_source(
-                Path(RESULTS_DIR) / self._sel_feature_catalog)
-            if src and self.scan_catalog_combo.findData(src) >= 0:
-                self._sel_scan_catalog = src
-                self.scan_catalog_combo.blockSignals(True)
-                self.scan_catalog_combo.setCurrentIndex(
-                    self.scan_catalog_combo.findData(src))
-                self.scan_catalog_combo.blockSignals(False)
-        self._apply_feature_selection()
+        # Track the derived peak set internally (for lineage/bin carry-over).
+        self._sel_scan_catalog = (
+            shape_catalog_peak_source(Path(RESULTS_DIR) / self._sel_feature_catalog)
+            if (self._sel_feature_catalog and RESULTS_DIR) else None)
+        self._update_lineage_label()
+        if self._selected_bin_size() == self._bin_size:
+            self._apply_feature_selection()
+        else:
+            b = self._selected_bin_size()
+            self.scan_status.setText(f"Bin {b}×{b} selected — press Load to view")
 
-    def _on_scan_catalog_changed(self, _idx):
-        """Pick a scan catalog (peaks) → narrow the Feature Catalog list to the
-        shapes derived from it and select the first match (blank if none)."""
-        self._sel_scan_catalog = self.scan_catalog_combo.currentData()
-        feats = self._feature_catalog_choices()
-        self._sel_feature_catalog = feats[0].name if feats else None
-        self._populate_catalog_combos()
-        self._apply_feature_selection()
+    def _refresh_grid_if_changed(self):
+        """If the selected catalog needs a different grid than the one in use,
+        switch to it: update device dims and drop the raw-frame source so it
+        reopens against the matching grid (fixes 'bin not found')."""
+        new_grid = self._resolve_grid_mapping()
+        if str(new_grid) == str(getattr(self, "_grid_path", None)):
+            return
+        self._grid_path = new_grid
+        try:
+            with open(new_grid) as f:
+                gm = json.load(f)
+            self._n_rows = gm["n_bin_rows"]
+            self._n_cols = gm["n_bin_cols"]
+        except Exception:
+            pass
+        with self.h5_lock:
+            if self._source is not None:
+                try:
+                    self._source.close()
+                except Exception:
+                    pass
+                self._source = None
+        self._raw_image_cache.clear()
+        self._image_cache.clear()
+
+    def _reassert_splitter(self, sizes):
+        """Restore main-splitter pane sizes (call after a reload so opening a new
+        catalog can't snap the panes — e.g. when its grid differs)."""
+        sp = getattr(self, "_main_splitter", None)
+        if sp is not None and sizes and sum(sizes) > 0:
+            sp.setSizes(sizes)
 
     def _apply_feature_selection(self):
         """Re-read features for the current selection and refresh views in place."""
+        # Pane sizes before the refresh; re-assert after so a grid/feature change
+        # can't drift the splitter (the user's complaint about panes shifting).
+        _pane_sizes = (self._main_splitter.sizes()
+                       if getattr(self, "_main_splitter", None) else None)
+        # Remember the spot before the grid/features change so we can snap to the
+        # comparable feature in the newly selected catalog.
+        self._focus_anchor = self._make_focus_anchor()
+        self._refresh_grid_if_changed()
         kept, filtered = self._load_selected_features()
         self._features = {
             "kept": group_by_reflection(kept),
@@ -1397,8 +1551,13 @@ class FeatureViewer(QMainWindow):
         self._refresh_category_labels()
         self.category_combo.setCurrentIndex(0)
         self.category_combo.blockSignals(False)
-        self._on_category_changed()
         self._update_scan_status()
+        if not self._snap_after_switch():
+            self._on_category_changed()
+        # Re-assert the user's pane sizes now and once more after this event
+        # cycle's relayout settles, so the panes don't shift on catalog open.
+        self._reassert_splitter(_pane_sizes)
+        QTimer.singleShot(0, lambda: self._reassert_splitter(_pane_sizes))
         self._save_state()
 
     def _bins_built_text(self):
@@ -1446,6 +1605,9 @@ class FeatureViewer(QMainWindow):
         """Re-read all data for ``scan`` + bin size in place and refresh views."""
         old_scan, old_bin = self._scan, self._bin_size
         prev_scan_cat, prev_feat_cat = self._sel_scan_catalog, self._sel_feature_catalog
+        # Snap to the same spot only across a bin change on the same scan; a scan
+        # change is a different sample, so don't carry a spot into it.
+        self._focus_anchor = self._make_focus_anchor() if scan == old_scan else None
         bin_size = bin_size if bin_size is not None else self._bin_size
         self.load_btn.setEnabled(False)
         try:
@@ -1460,6 +1622,7 @@ class FeatureViewer(QMainWindow):
             self._load_data()
         except Exception as e:
             self._scan, self._bin_size = old_scan, old_bin
+            self._focus_anchor = None
             try:
                 configure(project_root=str(_DM.root), bin_size=old_bin,
                           scan=old_scan)
@@ -1509,7 +1672,6 @@ class FeatureViewer(QMainWindow):
         self._refresh_category_labels()
         self.category_combo.setCurrentIndex(0)
         self.category_combo.blockSignals(False)
-        self._on_category_changed()
 
         if self._explore_mode:
             self._update_pending_list()
@@ -1517,6 +1679,9 @@ class FeatureViewer(QMainWindow):
         self.region_btn.setText("Show region features")
         self.load_btn.setEnabled(True)
         self._update_scan_status()
+        # One render per load: snap to the prior spot, or fall back to feature #0.
+        if not self._snap_after_switch():
+            self._on_category_changed()
 
     def _refresh_category_labels(self):
         self.category_combo.clear()
@@ -1735,7 +1900,7 @@ class FeatureViewer(QMainWindow):
 
     def _connect_signals(self):
         self._refresh_category_labels()
-        self.scan_catalog_combo.activated.connect(self._on_scan_catalog_changed)
+        self.bin_combo.activated.connect(self._on_bin_changed)
         self.feature_catalog_combo.activated.connect(self._on_feature_catalog_changed)
         self.category_combo.currentIndexChanged.connect(self._on_category_changed)
         self.reflection_combo.currentIndexChanged.connect(self._on_reflection_changed)
@@ -1780,6 +1945,128 @@ class FeatureViewer(QMainWindow):
         if 0 <= idx < len(feats):
             return feats[idx]
         return None
+
+    # ── Snap to the same spot across catalog / bin switches ─────────
+    def _make_focus_anchor(self):
+        """Bin/catalog-independent description of the feature in view, so a
+        catalog or bin switch can land on the comparable feature instead of
+        resetting to #0. Position is normalized by grid size so it carries
+        across bin sizes (grids scale with bin). ``None`` when nothing is shown."""
+        feat = self._current_feature()
+        if not feat:
+            return None
+        nr, nc = max(1, self._n_rows), max(1, self._n_cols)
+        return {
+            "cat_idx": self.category_combo.currentIndex(),
+            "reflection": feat.get("reflection"),
+            "frac_row": feat.get("center_row", 0) / nr,
+            "frac_col": feat.get("center_col", 0) / nc,
+        }
+
+    def _select_nearest_feature(self, anchor):
+        """Move the selection to the feature nearest the anchored spot, within
+        the anchor's category. A feature of ``anchor['reflection']`` is preferred
+        when one is named (so a catalog/bin switch stays on the same reflection);
+        pass ``reflection=None`` for a pure location match (coordinate search).
+        Positions are normalized by grid size so they compare across bin sizes.
+        Returns ``(reflection, dist_fraction, same_reflection)`` of the chosen
+        feature, or ``None`` when there is nothing to select."""
+        if not anchor:
+            return None
+        cat_idx = anchor["cat_idx"]
+        cat_key = "kept" if cat_idx == 0 else "filtered"
+        groups = self._features.get(cat_key, {})
+        if not groups:
+            return None
+        nr, nc = max(1, self._n_rows), max(1, self._n_cols)
+        want_ref = anchor.get("reflection")
+        best = None   # (rank, ref, idx, dist, same_ref)
+        for ref, feats in groups.items():
+            same = (want_ref is not None and ref == want_ref)
+            for idx, feat in enumerate(feats):
+                fr = feat.get("center_row", 0) / nr
+                fc = feat.get("center_col", 0) / nc
+                dist = ((fr - anchor["frac_row"]) ** 2
+                        + (fc - anchor["frac_col"]) ** 2) ** 0.5
+                rank = (0 if same else 1, dist)
+                if best is None or rank < best[0]:
+                    best = (rank, ref, idx, dist, same)
+        _, ref, idx, dist, same = best
+        self.category_combo.blockSignals(True)
+        self.category_combo.setCurrentIndex(cat_idx)
+        self.category_combo.blockSignals(False)
+        refs = sorted(groups.keys())
+        self.reflection_combo.blockSignals(True)
+        self.reflection_combo.clear()
+        for r in refs:
+            self.reflection_combo.addItem(f"{r} ({len(groups[r])})", r)
+        self.reflection_combo.setCurrentIndex(refs.index(ref))
+        self.reflection_combo.blockSignals(False)
+        feats = groups[ref]
+        self.feat_spin.blockSignals(True)
+        self.feat_spin.setMaximum(max(0, len(feats) - 1))
+        self.feat_spin.setValue(idx)
+        self.feat_spin.blockSignals(False)
+        self._on_feature_changed()
+        return ref, dist, same
+
+    def _apply_focus_anchor(self):
+        """Consume ``self._focus_anchor`` (set before a catalog/bin switch) and
+        snap to the comparable feature. Returns a short status note, or ``None``
+        when there is nothing to snap to (then the default #0 selection stands)."""
+        anchor = self._focus_anchor
+        self._focus_anchor = None
+        res = self._select_nearest_feature(anchor)
+        if not res:
+            return None
+        ref, dist, same = res
+        pct = dist * 100
+        if same:
+            return f"↳ nearest {ref} (Δ{pct:.0f}%)"
+        return f"↳ no {anchor['reflection']} here — nearest {ref} (Δ{pct:.0f}%)"
+
+    def _snap_to_coord(self, row, col):
+        """Select the feature nearest a device coordinate (bin-grid row, col) in
+        the current category — shared by the device-map click and the coordinate
+        search box."""
+        if not (0 <= row < self._n_rows and 0 <= col < self._n_cols):
+            self.scan_status.setText(
+                f"({row}, {col}) is outside the {self._n_rows}×{self._n_cols} grid")
+            return
+        anchor = {"cat_idx": self.category_combo.currentIndex(),
+                  "reflection": None,
+                  "frac_row": row / max(1, self._n_rows),
+                  "frac_col": col / max(1, self._n_cols)}
+        res = self._select_nearest_feature(anchor)
+        if not res:
+            self.scan_status.setText(f"No features near ({row}, {col})")
+            return
+        ref, dist, _ = res
+        feat = self._current_feature() or {}
+        ar, ac = feat.get("center_row", "?"), feat.get("center_col", "?")
+        self.scan_status.setText(
+            f"↳ ({row}, {col}) → {ref} at ({ar}, {ac})  (Δ{dist * 100:.0f}%)")
+
+    def _on_search_coord(self):
+        """Parse the coordinate box (``row, col`` or ``row col``) and snap."""
+        text = self.coord_edit.text().strip().replace(",", " ")
+        parts = text.split()
+        if len(parts) != 2 or not all(p.lstrip("-").isdigit() for p in parts):
+            self.coord_edit.setStyleSheet("QLineEdit { background: #ffe0e0; }")
+            QTimer.singleShot(800, lambda: self.coord_edit.setStyleSheet(""))
+            return
+        self._snap_to_coord(int(parts[0]), int(parts[1]))
+
+    def _snap_after_switch(self):
+        """Snap to the anchored spot after a catalog/bin switch. Returns ``True``
+        when it selected + rendered a feature (so the caller skips the default
+        category render — one render per switch, no flicker); ``False`` when there
+        is nothing to snap to and the caller should render the default #0."""
+        note = self._apply_focus_anchor()
+        if not note:
+            return False
+        self.scan_status.setText(self.scan_status.text() + "  ·  " + note)
+        return True
 
     def _on_category_changed(self):
         self.reflection_combo.blockSignals(True)
@@ -1861,6 +2148,8 @@ class FeatureViewer(QMainWindow):
     # ── Device location mini-map ──────────────────────────────────────
 
     def _render_location(self, feat):
+        if self._suspend_render:
+            return
         p = self.loc_canvas.plot
         p.clear()
         nr, nc = self._n_rows, self._n_cols
@@ -1897,9 +2186,10 @@ class FeatureViewer(QMainWindow):
             f"Feature ID:     {feat.get('feature_id', '?')}",
             f"Reflection:     {feat['reflection']}",
             f"Bins:           {feat['n_bins']}",
-            f"Peak intensity: {feat['peak_intensity']:.1f}",
-            f"Mean SNR:       {feat['mean_snr']:.1f}",
+            f"Peak intensity: {_fmt_num(feat.get('peak_intensity'))}",
+            f"Mean SNR:       {_fmt_num(feat.get('mean_snr'))}",
             f"Center bin:     {feat.get('center_bin', '?')}",
+            f"Device (r, c):  ({feat.get('center_row', '?')}, {feat.get('center_col', '?')})",
             f"Detector pos:   ({feat['detector_x']}, {feat['detector_y']})",
             f"",
             f"Reason:",
@@ -1940,7 +2230,7 @@ class FeatureViewer(QMainWindow):
             nb = near.get("n_bins", 0)
             pi = near.get("peak_intensity", 0)
             base += (f"\n  ▸ Feature #{fid}  {ref}  "
-                     f"peak={pi:.0f}  SNR={snr:.1f}  bins={nb}")
+                     f"peak={_fmt_num(pi, 0)}  SNR={_fmt_num(snr)}  bins={nb}")
 
         self.hover_label.setText(base)
 
@@ -2037,6 +2327,8 @@ class FeatureViewer(QMainWindow):
     # ── Heatmap ────────────────────────────────────────────────────
 
     def _render_heatmap(self, feat):
+        if self._suspend_render:
+            return
         if self._view_1x1 and self._bin_size != 1:
             self._render_heatmap_1x1(feat)
             return
@@ -2303,6 +2595,8 @@ class FeatureViewer(QMainWindow):
     # ── Isometric 3D ─────────────────────────────────────────────────
 
     def _render_isometric(self, feat):
+        if self._suspend_render:
+            return
         ax = self.iso_canvas.ax
         ax.clear()
         ax.set_facecolor("#1a1a1a")
@@ -2426,6 +2720,8 @@ class FeatureViewer(QMainWindow):
     # ── Detector image ─────────────────────────────────────────────
 
     def _load_detector_image(self, bin_key, feat=None):
+        if self._suspend_render:
+            return
         if feat is None:
             feat = self._current_feature()
         if feat is None:
@@ -2615,6 +2911,8 @@ class FeatureViewer(QMainWindow):
 
     def _load_detector_image_1x1(self, bin_key, feat):
         """Detector panel = the one raw frame for this 1×1 bin (one scan)."""
+        if self._suspend_render:
+            return
         self._clear_explore_rects()
         cleaned = self._get_sub_display_image(bin_key)
         dv = self.detector_canvas
@@ -2667,8 +2965,8 @@ class FeatureViewer(QMainWindow):
                 prof = f.get("intensity_profile", {}).get(bin_key, {})
                 lines.append(
                     f"  #{f.get('feature_id', '?')} {f.get('reflection', '')}  "
-                    f"χ={f.get('chi_deg', 0):.0f}°  {f.get('n_bins', '?')}bins  "
-                    f"SNR={f.get('mean_snr', 0):.1f}")
+                    f"χ={_fmt_num(f.get('chi_deg', 0), 0)}°  {f.get('n_bins', '?')}bins  "
+                    f"SNR={_fmt_num(f.get('mean_snr'))}")
                 if prof:
                     lines.append(
                         f"     I={prof.get('intensity', '?')}  "
@@ -2863,6 +3161,10 @@ class FeatureViewer(QMainWindow):
         idx = rows[0]
         if idx >= len(self._pending_features):
             return
+        if not self._sel_feature_catalog or RESULTS_DIR is None:
+            self.info_label.setText(
+                "No feature catalog selected — pick one in the toolbar to save into.")
+            return
         pf = self._pending_features.pop(idx)
         if pf["status"] == "processing":
             return
@@ -2871,14 +3173,10 @@ class FeatureViewer(QMainWindow):
 
         self._remove_rect_for_job(pf.get("job_id", -1))
 
-        catalog_path = RESULTS_DIR / f"feature_catalog_{_BIN_SIZE}x{_BIN_SIZE}.json"
-        with open(catalog_path) as f:
-            catalog = json.load(f)
-        next_id = max((f.get("feature_id", 0) for f in catalog), default=0) + 1
-        feat["feature_id"] = next_id
-        catalog.append(feat)
-        with open(catalog_path, "w") as f:
-            json.dump(catalog, f, indent=2)
+        # Save into the selected shapes/combined catalog (its "kept"/"features"
+        # list), not a separate feature_catalog — that file is gone.
+        catalog_path = Path(RESULTS_DIR) / self._sel_feature_catalog
+        next_id = catalogs.append_features(catalog_path, [feat])[0]
 
         ref = feat["reflection"]
         if "kept" not in self._features:
@@ -3051,10 +3349,12 @@ class FeatureViewer(QMainWindow):
             self._on_feature_changed()
 
     def _on_minimap_click(self, row, col):
-        if not self._explore_mode:
+        if self._explore_mode:
+            if 0 <= row < self._n_rows and 0 <= col < self._n_cols:
+                self._on_explore_navigate(row, col)
             return
-        if 0 <= row < self._n_rows and 0 <= col < self._n_cols:
-            self._on_explore_navigate(row, col)
+        # Normal mode: clicking the device map snaps to the nearest feature there.
+        self._snap_to_coord(row, col)
 
     def _render_explore_minimap(self):
         p = self.loc_canvas.plot
@@ -3520,12 +3820,25 @@ class FeatureViewer(QMainWindow):
             pass
 
     def _restore_state(self):
-        """Re-apply the last session's display settings + selection."""
+        """Re-apply the last session's display settings + selection. Returns
+        ``True`` if it rendered (state existed), ``False`` if there was nothing to
+        restore (caller should render)."""
         st = self._scan_state()
         if not st:
-            return
+            return False
 
-        # Visualization settings (each setter triggers a single re-render).
+        # Each setter below would otherwise trigger its own re-render (and a
+        # visible resize). Suspend drawing while they settle, then render once.
+        self._suspend_render = True
+        try:
+            self._restore_state_settings(st)
+        finally:
+            self._suspend_render = False
+        self._on_feature_changed()
+        return True
+
+    def _restore_state_settings(self, st):
+        # Visualization settings (renders are suspended by the caller).
         if "cmap" in st:
             i = self.cmap_combo.findText(st["cmap"])
             if i >= 0:
@@ -3572,26 +3885,21 @@ class FeatureViewer(QMainWindow):
                  if pf.get("status") == "ready"]
         if not ready:
             return 0
-        catalog_path = RESULTS_DIR / f"feature_catalog_{_BIN_SIZE}x{_BIN_SIZE}.json"
-        try:
-            with open(catalog_path) as f:
-                catalog = json.load(f)
-        except Exception:
-            catalog = []
-        next_id = max((f.get("feature_id", 0) for f in catalog), default=0) + 1
+        if not self._sel_feature_catalog or RESULTS_DIR is None:
+            return 0
+        catalog_path = Path(RESULTS_DIR) / self._sel_feature_catalog
+        feats = []
         for pf in ready:
             feat = pf["feature"]
             feat.pop("_members", None)
-            feat["feature_id"] = next_id
-            next_id += 1
-            catalog.append(feat)
+            feats.append(feat)
+        catalogs.append_features(catalog_path, feats)   # assigns feature_id in place
+        for pf, feat in zip(ready, feats):
             ref = feat["reflection"]
             self._features.setdefault("kept", {}).setdefault(ref, []).append(feat)
             for bk in feat.get("spatial_extent", []):
                 self._bin_to_features[bk].append(feat)
             self._remove_rect_for_job(pf.get("job_id", -1))
-        with open(catalog_path, "w") as f:
-            json.dump(catalog, f, indent=2)
         self._pending_features = [pf for pf in self._pending_features
                                   if pf.get("status") != "ready"]
         return len(ready)

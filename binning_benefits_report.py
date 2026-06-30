@@ -128,10 +128,11 @@ cell after editing.
   algorithm name. Produces features only (no per-bin peak list).
 
 List what's available with `!xrd-app detectors --kind peak` (or `--kind shape` /
-`--kind combined`). Shape options include `gaussian` (default) and **`gaussian_deskew`**
-— a skew-aware linker that corrects each scan's serpentine column backlash to reduce the
-1×1 horizontal-slice fragmentation (set `shape="gaussian_deskew"` below). If accuracy
-looks low for a new bin size (e.g. 2×2, 4×4), freeze a tuned variant and use its name here:
+`--kind combined`). The shape option is `gaussian` (default). Serpentine column skew
+is now fixed at the **coordinate** level (`coordinate_source: file_per_row`; see
+`GRID_METHODS.md`), so the old `gaussian_deskew` linker variant has been retired. If
+accuracy looks low for a new bin size (e.g. 2×2, 4×4), freeze a tuned variant and use
+its name here:
 
     !xrd-app save-algorithm --base 5x5_tophat_band_adaptive_snr \\
         --sensitivity 3.0 --bin-size 2 --name tophat_b2 --root <project>

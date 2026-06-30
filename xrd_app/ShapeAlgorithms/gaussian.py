@@ -23,7 +23,7 @@ Usage (standalone)
         --two-theta tth.tiff \
         --grid-mapping Metadata/Scan_0203/grid_mapping_3x3.json \
         --reflections reflections.py \
-        --output feature_catalog_3x3.json
+        --output shapes_catalog_3x3.json
 """
 
 import argparse
@@ -306,7 +306,7 @@ def main():
     parser.add_argument("--two-theta", dest="two_theta", default="tth.tiff")
     parser.add_argument("--grid-mapping", required=True, help="grid_mapping_*.json")
     parser.add_argument("--reflections", default="reflections.py")
-    parser.add_argument("--output", default="feature_catalog.json")
+    parser.add_argument("--output", default="shapes_catalog.json")
     parser.add_argument("--link-tolerance", type=int, default=DEFAULT_LINK_TOLERANCE)
     args = parser.parse_args()
 

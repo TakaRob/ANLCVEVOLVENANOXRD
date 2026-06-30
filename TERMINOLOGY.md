@@ -257,3 +257,88 @@ Deliberately **not** changed (load-bearing identifiers / correct usage):
 - **`*_peaks.json` / `filtered_peaks_*.csv`** — on-disk filename conventions; renaming breaks existing project data. Left as-is.
 - **`.shape`** (numpy/detector/grid dimensions) — unrelated to morphology.
 - **"LoG blob detection"** — the standard CV name for the *technique*, not an output-object noun (§1).
+
+---
+
+## 7. Code occurrence inventory (as of 2026-06-26)
+
+A map of where `shape` and `feature` actually live, so any rename/swap can be
+scoped. Counts are matching **lines** (case-insensitive), in `xrd_app/`,
+excluding the algorithm-zoo dirs (`CombinedAlgorithms/`, `PeakAlgorithms/`).
+
+### 7.1 `shape` — three distinct uses, only one is the domain term
+
+| Use | What it is | In scope for a swap? | Volume |
+|---|---|---|---|
+| **Domain `shape`** | the verified-feature stage/kind/CLI/files (§1) | **Yes** | ~280 lines |
+| `.shape` | numpy/detector/grid array dimensions | No (§1, §6) | ~63 lines |
+| `--shape` / `shape=` | the grid-geometry CLI flag (`n_cols`) | No (geometry) | ~22 lines |
+
+**Domain `shape` per file** (excludes `.shape`, `--shape`, `shape=`):
+
+| File | Lines | Mostly |
+|---|---|---|
+| `cli.py` | 71 | `shapes` / `run-shapes` commands, `--source shapes`, help text |
+| `gui/viewer.py` | 39 | shape overlays / source selection |
+| `tabs/programs.py` | 33 | program runner wiring the `shapes` command |
+| `config.py` | 31 | `shapes_json()`, `*_shapes_NxN.json` path builders |
+| `core/io.py` | 21 | shape file IO |
+| `core/catalogs.py` | 21 | `bins_from_shapes()`, shape-catalog discovery |
+| `core/processing.py` | 19 | Phase-2 shape-finding (link + gaussian filter) |
+| `ShapeAlgorithms/gaussian.py` | 12 | the shape algorithm itself |
+| `core/lineage.py` | 11 | lineage of shape outputs |
+| `core/holdout.py` | 7 | |
+| `core/geometry.py` | 6 | |
+| `app.py` | 4 | |
+| `tabs/shape_verify.py` | 3 | the verification tab (filename + title) |
+| `gui/device_map.py` | 3 | |
+| `core/aggregate.py` | 3 | |
+| `ShapeAlgorithms/catalog.json` | 3 | algorithm catalog `kind="shape"` |
+| `tabs/setup.py`, `tabs/_embed.py`, `tabs/cvevolve_dialog.py`, `gui/orientation.py`, `core/save_algorithm.py` | 2 each | |
+| `tabs/save_algorithm_dialog.py`, `tabs/reflection_popup.py` | 1 each | |
+
+**Load-bearing `shape` identifiers** (the public/on-disk surface — renaming
+these breaks existing project data + the CLI contract):
+`ShapeAlgorithms/` · `run_shapes` (10) · `shapes_json` (9) · `_shapes*.json`
+files · `bins_from_shapes` (2) · `shape_verify` tab · `kind="shape"` ·
+`--source shapes`.
+
+### 7.2 `feature` — the data-record term
+
+| File | Lines | Mostly |
+|---|---|---|
+| `gui/viewer.py` | 316 | the feature-centric inspector (overlays, IDs, profiles) |
+| `gui/device_map.py` | 53 | per-feature metrics painted into bins |
+| `gui/orientation.py` | 45 | |
+| `core/catalogs.py` | 41 | `feature_catalog_*` discovery/readers |
+| `tabs/_embed.py` | 38 | |
+| `core/processing.py` | 30 | feature record construction |
+| `ShapeAlgorithms/gaussian.py` | 23 | emits the feature dicts |
+| `core/aggregate.py` | 21 | per-feature CSV rows |
+| `cli.py` | 6 · `core/io.py` 4 · `tabs/shape_verify.py` 3 · `core/holdout.py` 3 · rest 1–2 | |
+
+**Load-bearing `feature` identifiers:** `feature_catalog` (61) ·
+`feature_id` (33) · `n_features` (4) · `features_by`/`by_feature` (6) ·
+`PER_FEATURE` (3). `feature_catalog_<NxN>[_<tag>].json` is the on-disk record
+file; `feature_id` is the cross-reference key threaded through viewer ↔
+device-map ↔ aggregate.
+
+### 7.3 Outside `xrd_app/` (scripts + docs that also use the terms)
+
+`binning_benefits_report.py` (211) · `ANALYSIS_PLAYBOOK.md` (57) ·
+`docs/IMPLEMENTATION.md` (53) · `peak_intensity_snr_histograms.py` (52) ·
+`feature_candidates_compare.py` (42) · `docs/PLAN.md` (42) ·
+`feature_brightness_size_candidates.py` (41) · `cvevolve_*/prompt*.md` (15–36) ·
+`make_dummy_project.py` (29) · `scan_203_skew_map.py` (15) · plus
+`README.md`, `CLAUDE.md`, `xrd_app/CLAUDE.md`, `GRID_METHODS.md`,
+`TASK_deskew_coordinates.md`. These would all drift if the meanings swap.
+
+### 7.4 ⚠️ The shape ↔ feature swap is a *re-definition*, not a rename
+
+Today (§1) **`shape` and `feature` name the same object** from two angles:
+`feature` = the data record, `shape` = the stage/CLI/file name for that same
+verified record. Swapping their *meanings* (so `shape` = a lighter, unverified
+candidate and `feature` = the verified one) **introduces a new distinction that
+does not exist in the code yet** — there is currently no separate "verified"
+object. This needs a definition decision before any edit (see open question
+below). Until then nothing in §1–§6 is changed.

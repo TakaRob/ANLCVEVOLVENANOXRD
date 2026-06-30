@@ -496,6 +496,71 @@ def assign_grid_from_positions(frame_x, frame_y, frame_map=None,
     return grid_row, grid_col, n_rows, n_cols
 
 
+def assign_grid_coordinate_faithful(frame_x, frame_y, frame_map,
+                                    column_mode: str = "square",
+                                    log: Callable[[str], None] = print):
+    """Per-frame ``(row, col)`` on a de-skewed lattice from true (X, Y).
+
+    The de-skewed coordinate system for clean one-file-per-row rasters. Rows stay
+    the exact acquisition layout (file index — the slow axis is already faithful:
+    ``corr(row, X) ≈ 1``), but **columns are snapped to the true fast-axis stage
+    position** so serpentine stage backlash no longer puts the same physical
+    position at a different column on alternate rows (the ``file_per_row`` comb / V).
+
+    ``column_mode`` sizes the column count:
+
+    - ``"square"`` (default): ``n_cols`` from the physical X/Y span so device-map
+      pixels are ~square and the image is to-scale. Best for *viewing*.
+    - ``"native"``: ``n_cols`` = the native frames-per-row count, so each true-Y
+      sample keeps ~one cell (minimal collisions / empty cells). Best for
+      *detection/recall* — it de-skews without losing the per-frame sampling that
+      the under-sampled square lattice merges away.
+
+    Returns ``(grid_row, grid_col, n_rows, n_cols)``.
+    """
+    n_total = len(frame_x)
+    x = _interp_nan(frame_x)
+    y = _interp_nan(frame_y)
+
+    # Rows straight from the one-file-per-row layout (exact, no re-snap).
+    ref_row, _ref_col, n_rows, _ = build_grid_from_frame_map(
+        frame_map, log=lambda *a: None)
+    grid_row = ref_row.astype(int)
+
+    # Which physical axis sweeps within a row (the fast / column axis)?
+    row_is_X = abs(_corr(ref_row, x)) >= abs(_corr(ref_row, y))
+    rowv, colv = (x, y) if row_is_X else (y, x)
+
+    def _span(v):
+        lo, hi = np.percentile(v, 0.2), np.percentile(v, 99.8)
+        return max(hi - lo, 1e-9)
+    row_span, col_span = _span(rowv), _span(colv)
+    if column_mode == "native":
+        # Native fast-axis density: one column per acquired frame-per-row, so the
+        # true-Y snap keeps ~one frame per cell (no detection loss from merges).
+        _n_files, counts = file_row_layout(frame_map)
+        n_cols = int(np.median([c for c in counts if c > 0])) if counts else n_rows
+    else:
+        # Square pixels: column step ≈ row step in physical units (to-scale view).
+        n_cols = max(int(round(1 + (n_rows - 1) * col_span / row_span)), 1)
+    n_cols = max(n_cols, 1)
+
+    # Orient to the historical device-map convention via the serpentine
+    # reconstruction's correlation *sign* (its lattice size is irrelevant here),
+    # so the faithful map keeps the same orientation as the file-per-row default.
+    serp_row, serp_col, _, _ = build_scan_grid(frame_x, n_total)
+    sc = np.sign(_corr(serp_col, colv)) or 1.0
+    grid_col = _scale_to_index(colv, sc, n_cols)
+    if _corr(grid_row, rowv) * _corr(serp_row, rowv) < 0:
+        grid_row = grid_row.max() - grid_row
+    grid_row = grid_row - grid_row.min()
+    n_rows = int(grid_row.max()) + 1
+    log(f"  coordinate-faithful grid ({column_mode}, true-position columns): "
+        f"{n_rows} x {n_cols} (col <- {'Y' if row_is_X else 'X'}, "
+        f"aspect {col_span / row_span:.3f})")
+    return grid_row, grid_col, n_rows, n_cols
+
+
 def build_scan_grid(frame_x, n_total, kernel=20, order=50):
     """Infer (row, col) for each frame from the serpentine position trace."""
     from scipy.signal import argrelextrema
@@ -736,6 +801,14 @@ def generate_grid_mapping(
                 grid_row, grid_col, n_rows, n_cols = assign_grid_perrow_offset(
                     frame_x, frame_y, frame_map, log=log)
                 coordinate_source = "perrow_offset_deprecated"
+            elif fpr and deskew_method in ("faithful", "faithful_native"):
+                col_mode = "native" if deskew_method == "faithful_native" else "square"
+                log(f"Computing coordinate-faithful scan grid ({col_mode}, "
+                    "true-position columns) ...")
+                grid_row, grid_col, n_rows, n_cols = assign_grid_coordinate_faithful(
+                    frame_x, frame_y, frame_map, column_mode=col_mode, log=log)
+                coordinate_source = ("positions_faithful_native"
+                                     if col_mode == "native" else "positions_faithful")
             else:
                 log("Computing scan grid from layout + true (X, Y) positions ...")
                 grid_row, grid_col, n_rows, n_cols = assign_grid_from_positions(
@@ -1038,9 +1111,9 @@ class _RawSource(BinImageSource):
 
     is_raw = True
 
-    def __init__(self, dm, bin_size, scan=None, n_cols=None):
+    def __init__(self, dm, bin_size, scan=None, n_cols=None, grid_mapping=None):
         self.bin_size = bin_size
-        gm_path = dm.grid_mapping(bin_size=bin_size, scan=scan)
+        gm_path = grid_mapping or dm.grid_mapping(bin_size=bin_size, scan=scan)
         if gm_path and Path(gm_path).exists():
             with open(gm_path) as f:
                 gm = json.load(f)
@@ -1119,15 +1192,17 @@ class _RawSource(BinImageSource):
         return acc if acc is not None else np.zeros((1, 1))
 
 
-def open_bin_source(dm, bin_size, scan=None, n_cols=None) -> BinImageSource:
+def open_bin_source(dm, bin_size, scan=None, n_cols=None, grid_mapping=None) -> BinImageSource:
     """Open the best per-bin image source for a scan + bin size.
 
     Uses the prebuilt ``xrd_NxN_bins.h5`` when it exists (fast); otherwise falls
     back to summing raw frames on demand (``is_raw`` True, slower). 1×1 has no
-    binned file by convention and always uses the raw source.
+    binned file by convention and always uses the raw source. ``grid_mapping``
+    overrides which grid the raw source bins against (so a feature catalog built
+    on a non-default grid maps its bins correctly).
     """
     if bin_size != 1:
         h5 = dm.bins_h5(bin_size, scan=scan)
         if h5 and os.path.exists(h5):
             return _H5Source(h5)
-    return _RawSource(dm, bin_size, scan=scan, n_cols=n_cols)
+    return _RawSource(dm, bin_size, scan=scan, n_cols=n_cols, grid_mapping=grid_mapping)

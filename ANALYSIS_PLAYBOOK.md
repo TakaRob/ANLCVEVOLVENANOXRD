@@ -8,6 +8,12 @@ then summarizing. This file maps the questions they ask to the commands/fields
 that answer them. Pair it with `CLAUDE.md` (science context) and
 `xrd_app/CLAUDE.md` (app architecture).
 
+> **Optimizing the skew / backlash fix?** Read [`TERRITORY.md`](TERRITORY.md). The
+> territorial (cell-model) catalog bins by true (X,Y) — it's the skew-free *source
+> of truth* the fast 1×1 catalog is scored against via `compare_to_truth.py`
+> (recall / F2 / residual offset). The build commands and optimization loop live
+> there.
+
 ## Operating mode
 
 - **You run the tools; the researcher reads conclusions.** Run CLI commands,

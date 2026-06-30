@@ -975,3 +975,141 @@ Building 25170 bin images (1x1) -> /mnt/c/Users/trobson/OneDrive - Argonne Natio
   [24700/25170] 1900s elapsed, ~36s remaining
   [24800/25170] 1909s elapsed, ~28s remaining
   [24900/25170] 1917s elapsed, ~21s remaining
+  [25000/25170] 1926s elapsed, ~13s remaining
+  [25100/25170] 1935s elapsed, ~5s remaining
+  [25170/25170] 1941s elapsed, ~0s remaining
+Done! /mnt/c/Users/trobson/OneDrive - Argonne National Laboratory/2026-1_Luo/TakaTest/TakaProject/Binned/Scan_0203/xrd_1x1_bins.h5: 10138 MB (9.9 GB)
+Wrote bins -> /mnt/c/Users/trobson/OneDrive - Argonne National Laboratory/2026-1_Luo/TakaTest/TakaProject/Binned/Scan_0203/xrd_1x1_bins.h5
+
+Bins ready: /mnt/c/Users/trobson/OneDrive - Argonne National Laboratory/2026-1_Luo/TakaTest/TakaProject/Binned/Scan_0203/xrd_1x1_bins.h5
+  make-bins 1 OK
+===== BIN 1x1 : peaks =====
+[peaks] detector: /mnt/c/Users/trobson/OneDrive - Argonne National Laboratory/2026-1_Luo/xrd_app/PeakAlgorithms/5x5_tophat_band_adaptive_snr.py
+[peaks] bins: /mnt/c/Users/trobson/OneDrive - Argonne National Laboratory/2026-1_Luo/TakaTest/TakaProject/Binned/Scan_0203/xrd_1x1_bins.h5
+
+  Reflections: ['PbI2', '(001)', '(011)', '(111)', '(002)', 'ITO', '(012)', '(112)', '21.30', '22.60', '26.16']
+  Running detector on 25170 bins (5 workers)...
+PROGRESS 251/25170  (251/25170) peaks
+PROGRESS 502/25170  (502/25170) peaks
+PROGRESS 753/25170  (753/25170) peaks
+PROGRESS 1004/25170  (1004/25170) peaks
+PROGRESS 1255/25170  (1255/25170) peaks
+PROGRESS 1506/25170  (1506/25170) peaks
+PROGRESS 1757/25170  (1757/25170) peaks
+PROGRESS 2008/25170  (2008/25170) peaks
+PROGRESS 2259/25170  (2259/25170) peaks
+PROGRESS 2510/25170  (2510/25170) peaks
+PROGRESS 2761/25170  (2761/25170) peaks
+PROGRESS 3012/25170  (3012/25170) peaks
+PROGRESS 3263/25170  (3263/25170) peaks
+PROGRESS 3514/25170  (3514/25170) peaks
+PROGRESS 3765/25170  (3765/25170) peaks
+PROGRESS 4016/25170  (4016/25170) peaks
+PROGRESS 4267/25170  (4267/25170) peaks
+PROGRESS 4518/25170  (4518/25170) peaks
+PROGRESS 4769/25170  (4769/25170) peaks
+PROGRESS 5020/25170  (5020/25170) peaks
+PROGRESS 5271/25170  (5271/25170) peaks
+PROGRESS 5522/25170  (5522/25170) peaks
+PROGRESS 5773/25170  (5773/25170) peaks
+PROGRESS 6024/25170  (6024/25170) peaks
+PROGRESS 6275/25170  (6275/25170) peaks
+PROGRESS 6526/25170  (6526/25170) peaks
+PROGRESS 6777/25170  (6777/25170) peaks
+PROGRESS 7028/25170  (7028/25170) peaks
+PROGRESS 7279/25170  (7279/25170) peaks
+PROGRESS 7530/25170  (7530/25170) peaks
+PROGRESS 7781/25170  (7781/25170) peaks
+PROGRESS 8032/25170  (8032/25170) peaks
+PROGRESS 8283/25170  (8283/25170) peaks
+PROGRESS 8534/25170  (8534/25170) peaks
+PROGRESS 8785/25170  (8785/25170) peaks
+PROGRESS 9036/25170  (9036/25170) peaks
+PROGRESS 9287/25170  (9287/25170) peaks
+PROGRESS 9538/25170  (9538/25170) peaks
+PROGRESS 9789/25170  (9789/25170) peaks
+PROGRESS 10040/25170  (10040/25170) peaks
+PROGRESS 10291/25170  (10291/25170) peaks
+PROGRESS 10542/25170  (10542/25170) peaks
+PROGRESS 10793/25170  (10793/25170) peaks
+PROGRESS 11044/25170  (11044/25170) peaks
+PROGRESS 11295/25170  (11295/25170) peaks
+PROGRESS 11546/25170  (11546/25170) peaks
+PROGRESS 11797/25170  (11797/25170) peaks
+PROGRESS 12048/25170  (12048/25170) peaks
+PROGRESS 12299/25170  (12299/25170) peaks
+PROGRESS 12550/25170  (12550/25170) peaks
+PROGRESS 12801/25170  (12801/25170) peaks
+PROGRESS 13052/25170  (13052/25170) peaks
+PROGRESS 13303/25170  (13303/25170) peaks
+PROGRESS 13554/25170  (13554/25170) peaks
+PROGRESS 13805/25170  (13805/25170) peaks
+PROGRESS 14056/25170  (14056/25170) peaks
+PROGRESS 14307/25170  (14307/25170) peaks
+PROGRESS 14558/25170  (14558/25170) peaks
+PROGRESS 14809/25170  (14809/25170) peaks
+PROGRESS 15060/25170  (15060/25170) peaks
+PROGRESS 15311/25170  (15311/25170) peaks
+PROGRESS 15562/25170  (15562/25170) peaks
+PROGRESS 15813/25170  (15813/25170) peaks
+PROGRESS 16064/25170  (16064/25170) peaks
+PROGRESS 16315/25170  (16315/25170) peaks
+PROGRESS 16566/25170  (16566/25170) peaks
+PROGRESS 16817/25170  (16817/25170) peaks
+PROGRESS 17068/25170  (17068/25170) peaks
+PROGRESS 17319/25170  (17319/25170) peaks
+PROGRESS 17570/25170  (17570/25170) peaks
+PROGRESS 17821/25170  (17821/25170) peaks
+PROGRESS 18072/25170  (18072/25170) peaks
+PROGRESS 18323/25170  (18323/25170) peaks
+PROGRESS 18574/25170  (18574/25170) peaks
+PROGRESS 18825/25170  (18825/25170) peaks
+PROGRESS 19076/25170  (19076/25170) peaks
+PROGRESS 19327/25170  (19327/25170) peaks
+PROGRESS 19578/25170  (19578/25170) peaks
+PROGRESS 19829/25170  (19829/25170) peaks
+PROGRESS 20080/25170  (20080/25170) peaks
+PROGRESS 20331/25170  (20331/25170) peaks
+PROGRESS 20582/25170  (20582/25170) peaks
+PROGRESS 20833/25170  (20833/25170) peaks
+PROGRESS 21084/25170  (21084/25170) peaks
+PROGRESS 21335/25170  (21335/25170) peaks
+PROGRESS 21586/25170  (21586/25170) peaks
+PROGRESS 21837/25170  (21837/25170) peaks
+PROGRESS 22088/25170  (22088/25170) peaks
+PROGRESS 22339/25170  (22339/25170) peaks
+PROGRESS 22590/25170  (22590/25170) peaks
+PROGRESS 22841/25170  (22841/25170) peaks
+PROGRESS 23092/25170  (23092/25170) peaks
+PROGRESS 23343/25170  (23343/25170) peaks
+PROGRESS 23594/25170  (23594/25170) peaks
+PROGRESS 23845/25170  (23845/25170) peaks
+PROGRESS 24096/25170  (24096/25170) peaks
+PROGRESS 24347/25170  (24347/25170) peaks
+PROGRESS 24598/25170  (24598/25170) peaks
+PROGRESS 24849/25170  (24849/25170) peaks
+PROGRESS 25100/25170  (25100/25170) peaks
+PROGRESS 25170/25170  (25170/25170) peaks
+  Detection complete: 186063 peaks in 25161 bins
+
+Done: 186063 peaks in 25161 bins -> /mnt/c/Users/trobson/OneDrive - Argonne National Laboratory/2026-1_Luo/TakaTest/TakaProject/Labels/Scan_0203/5x5_tophat_band_adaptive_snr_peaks_1x1.json
+  peaks 1 OK
+===== BIN 1x1 : shapes =====
+[shapes] algorithm: /mnt/c/Users/trobson/OneDrive - Argonne National Laboratory/2026-1_Luo/xrd_app/ShapeAlgorithms/gaussian.py
+[shapes] peaks: /mnt/c/Users/trobson/OneDrive - Argonne National Laboratory/2026-1_Luo/TakaTest/TakaProject/Labels/Scan_0203/5x5_tophat_band_adaptive_snr_peaks_1x1.json
+
+  Grid: 151 x 167 = 25217 bins
+  Linking peaks across bins (Union-Find)...
+  145344 raw features: 3265 multi-bin, 142079 single-bin
+PROGRESS 1/2  (1/2) shapes
+  Filtering by gaussian profile + characterizing shapes...
+PROGRESS 2/2  (2/2) shapes
+  Kept (shapes): 2428   Filtered: 142916
+  Wrote 2428 kept features to /mnt/c/Users/trobson/OneDrive - Argonne National Laboratory/2026-1_Luo/TakaTest/TakaProject/Labels/Scan_0203/feature_catalog_1x1.json
+  Wrote 2428 kept peaks to /mnt/c/Users/trobson/OneDrive - Argonne National Laboratory/2026-1_Luo/TakaTest/TakaProject/Labels/Scan_0203/kept_peaks_1x1.csv
+  Wrote 142916 filtered peaks to /mnt/c/Users/trobson/OneDrive - Argonne National Laboratory/2026-1_Luo/TakaTest/TakaProject/Labels/Scan_0203/filtered_peaks_1x1.csv
+
+Done: 2428 shapes kept, 142916 filtered -> /mnt/c/Users/trobson/OneDrive - Argonne National Laboratory/2026-1_Luo/TakaTest/TakaProject/Labels/Scan_0203/gaussian_shapes_1x1.json
+  shapes 1 OK
+===== BIN 1x1 COMPLETE Fri Jun 26 01:24:19 PM CDT 2026 =====
+REGEN ALL DONE Fri Jun 26 01:24:19 PM CDT 2026

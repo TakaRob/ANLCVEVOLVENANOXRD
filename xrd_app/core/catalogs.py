@@ -22,7 +22,9 @@ changing their on-disk format; the CLI appends to it on every write via
 
 from __future__ import annotations
 
+import datetime
 import json
+import os
 import re
 from pathlib import Path
 
@@ -172,10 +174,105 @@ def available_bins(results_dir, kinds=("peaks", "shapes", "feature")) -> list:
 
 
 def feature_sources(results_dir, bin_size=None) -> list:
-    """Catalogs usable as a feature source (shapes first, then plain feature lists)."""
+    """Catalogs offered in the feature-source selector: shapes, then combined,
+    then plain ``feature_catalog`` lists (hand-made one-offs / exports).
+
+    Plain lists were once hidden as redundant kept-only copies of a shapes file,
+    but intentional one-offs live as this kind too, so they are surfaced again.
+    ``default_feature_source`` still prefers shapes/combined for headless use.
+    """
     return (list_catalogs(results_dir, "shapes", bin_size)
             + list_catalogs(results_dir, "combined", bin_size)
             + list_catalogs(results_dir, "feature", bin_size))
+
+
+def default_feature_source(results_dir, bin_size):
+    """The catalog a headless consumer should use when none is selected: the
+    newest-named shapes/combined catalog for ``bin_size`` (mirrors the single
+    canonical file the old ``feature_catalog_NxN.json`` provided). A plain
+    feature list is used only when no shapes/combined exists; ``None`` if neither.
+    """
+    primary = (list_catalogs(results_dir, "shapes", bin_size)
+               + list_catalogs(results_dir, "combined", bin_size))
+    if primary:
+        return primary[-1]
+    feats = list_catalogs(results_dir, "feature", bin_size)
+    return feats[-1] if feats else None
+
+
+# ── lineage backfill for hand-made feature catalogs ────────────────
+def _infer_peak_source(results_dir, bin_size, tag):
+    """Best guess at the peaks file a hand-made feature catalog derived from.
+
+    Returns ``(path, how)`` where ``how`` is ``"grid-tag match"`` when a peaks
+    file's grid tag (e.g. ``perrowOffset151x235``) appears in the catalog's tag,
+    or ``"bin fallback"`` for the plain (untagged, non-rawgrid) peaks at that bin.
+    ``(None, None)`` when the bin has no peaks file.
+    """
+    peaks = list_catalogs(results_dir, "peaks", bin_size)
+    if not peaks:
+        return None, None
+    tag = tag or ""
+    for p in peaks:                       # grid-variant match (tag encodes grid)
+        ptag = (parse_name(p.name) or {}).get("tag") or ""
+        if ptag and ptag in tag:
+            return p, "grid-tag match"
+    plain = [p for p in peaks if not (parse_name(p.name) or {}).get("tag")]
+    plain.sort(key=lambda p: ("rawgrid" in p.name, p.name))   # prefer non-rawgrid
+    if plain:
+        return plain[0], "bin fallback"
+    return peaks[0], "bin fallback"
+
+
+def backfill_feature_lineage(results_dir, scan=None, overwrite=False) -> list:
+    """Record lineage for plain ``feature_catalog`` files that have none, so they
+    show as first-class feature sources with an (inferred) peak lineage.
+
+    The peak source is inferred (see :func:`_infer_peak_source`) and flagged
+    ``peak_source_inferred`` so callers know it is a guess. Returns the list of
+    ``(filename, lineage)`` written. Idempotent unless ``overwrite``.
+    """
+    rd = Path(results_dir)
+    scan = scan or rd.name
+    out = []
+    for p in list_catalogs(rd, "feature"):
+        if not overwrite and read_lineage(p, rd) is not None:
+            continue
+        info = parse_name(p.name) or {}
+        bin_size, tag = info.get("bin"), (info.get("tag") or "")
+        try:
+            kept, _ = load_features_any(p)
+            n_features = len(kept)
+        except Exception:
+            n_features = None
+        created = datetime.datetime.fromtimestamp(
+            os.path.getmtime(p)).replace(microsecond=0).isoformat()
+        lineage = {
+            "stage": "feature",
+            "scan": scan,
+            "bin_size": bin_size,
+            "tag": tag,
+            "created": created,
+            "feature_count": n_features,
+            "lineage_backfilled": True,
+        }
+        src, how = _infer_peak_source(rd, bin_size, tag)
+        if src is not None:
+            lineage["peak_source_file"] = src.name
+            lineage["peak_source_inferred"] = True
+            lineage["peak_source_inference"] = how
+            ps = read_lineage(src, rd)
+            if isinstance(ps, dict):
+                lineage["peak_source"] = ps
+            else:                          # minimal nested source from the name
+                pinfo = parse_name(src.name) or {}
+                lineage["peak_source"] = {
+                    "stage": "peaks", "bin_size": pinfo.get("bin"),
+                    "peak_algorithm": pinfo.get("algo"), "tag": pinfo.get("tag"),
+                }
+        record_catalog(rd, p.name, lineage)
+        out.append((p.name, lineage))
+    return out
 
 
 def shapes_for_peaks(results_dir, peaks_path) -> list:
@@ -252,6 +349,53 @@ def peaks_to_features(peaks_by_bin):
     return feats, []
 
 
+def catalog_bin_keys(path, limit=400):
+    """A sample of bin keys (center_bin + spatial_extent) a catalog references."""
+    kept, _ = load_features_any(path)
+    keys = set()
+    for f in kept:
+        cb = f.get("center_bin")
+        if cb:
+            keys.add(cb)
+        for bk in f.get("spatial_extent", []) or []:
+            keys.add(bk)
+        if len(keys) >= limit:
+            break
+    return keys
+
+
+def _grid_bin_keys(grid_mapping_path):
+    g = _load_json(grid_mapping_path)
+    if isinstance(g, dict) and isinstance(g.get("bins"), dict):
+        return set(g["bins"].keys())
+    return set()
+
+
+def best_grid_mapping(candidates, feature_catalog_path, default=None):
+    """The grid mapping whose bins best cover a feature catalog's bins.
+
+    ``candidates`` is an ordered list of grid_mapping_*.json paths (put the
+    default first so it wins ties). Returns ``default`` when nothing covers the
+    catalog's bins — e.g. a catalog built on a non-default coordinate grid is
+    matched to the grid that actually contains its bins.
+    """
+    cbins = catalog_bin_keys(feature_catalog_path)
+    if not cbins:
+        return default
+    best, best_score = default, 0
+    target = len(cbins)
+    for gm in candidates:
+        keys = _grid_bin_keys(gm)
+        if not keys:
+            continue
+        score = sum(1 for b in cbins if b in keys)
+        if score > best_score:                 # strict → default (first) wins ties
+            best, best_score = Path(gm), score
+        if best_score == target:               # full coverage — stop early
+            break
+    return best if best_score > 0 else default
+
+
 def load_features_any(path):
     """``(kept, filtered)`` from any catalog kind.
 
@@ -269,3 +413,36 @@ def load_features_any(path):
         if "peaks_by_bin" in data:
             return peaks_to_features(data["peaks_by_bin"])
     return [], []
+
+
+def append_features(path, feats) -> list:
+    """Append feature dicts into a catalog in place, assigning ``feature_id``.
+
+    Writes back the same on-disk shape it found: a shapes file keeps its
+    ``kept``/``filtered``/``lineage`` structure (features go into ``kept``); a
+    combined file appends to ``features``; a plain list (legacy feature_catalog)
+    grows in place; a missing/odd file becomes a new plain list. This is what
+    lets the viewer's accept/curate action edit the *selected* shapes catalog
+    directly instead of a separate feature_catalog copy. Returns the ids
+    assigned, in order. Atomic write so readers never see a partial file.
+    """
+    path = Path(path)
+    data = _load_json(path)
+    if isinstance(data, dict) and isinstance(data.get("kept"), list):
+        target = data["kept"]
+    elif isinstance(data, dict) and isinstance(data.get("features"), list):
+        target = data["features"]
+    elif isinstance(data, list):
+        target = data
+    else:
+        data = []
+        target = data
+    next_id = max((f.get("feature_id", 0) for f in target), default=0) + 1
+    ids = []
+    for feat in feats:
+        feat["feature_id"] = next_id
+        target.append(feat)
+        ids.append(next_id)
+        next_id += 1
+    atomic_write_json(path, data)
+    return ids

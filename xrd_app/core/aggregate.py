@@ -1,8 +1,9 @@
 """
 Aggregate per-scan feature catalogs into a single comparable dataset.
 
-Walks ``results/<scan>/feature_catalog_NxN.json`` across all scans and bin sizes
-and produces two flat tables you can open in Excel/pandas or query with SQL:
+Walks each scan's canonical shapes/combined catalog across all scans and bin
+sizes and produces two flat tables you can open in Excel/pandas or query with
+SQL:
 
   features    one row per detected feature — intensity, prevalence (n_bins),
               morphology (chi_fwhm / tth_fwhm), orientation (chi_deg).
@@ -15,8 +16,6 @@ Outputs a CSV per table plus a combined SQLite ``.db`` with both as tables.
 from __future__ import annotations
 
 import csv
-import json
-import re
 import sqlite3
 from pathlib import Path
 from typing import Callable, Optional, Union
@@ -38,23 +37,26 @@ DEVICEMAP_COLUMNS = [
     "detector_x", "detector_y", "intensity", "integrated", "tth", "chi",
 ]
 
-_CATALOG_RE = re.compile(r"feature_catalog_(\d+)x(\d+)\.json$")
-
-
 def iter_catalogs(results_dir: Path, scans=None, bin_size: Optional[int] = None):
-    """Yield (scan_name, bin_size, catalog_path) for every catalog found."""
+    """Yield (scan_name, bin_size, catalog_path) — one catalog per (scan, bin).
+
+    Picks the canonical shapes/combined catalog per bin via
+    :func:`catalogs.default_feature_source` (the newest-named one), matching the
+    single-file behaviour the old per-bin ``feature_catalog_NxN.json`` provided.
+    """
+    from . import catalogs
     if not results_dir.exists():
         return
     wanted = set(scans) if scans else None
     for scan_dir in sorted(p for p in results_dir.iterdir() if p.is_dir()):
         if wanted and scan_dir.name not in wanted:
             continue
-        for cat in sorted(scan_dir.glob("feature_catalog_*x*.json")):
-            m = _CATALOG_RE.search(cat.name)
-            bs = int(m.group(1)) if m else None
+        for bs in catalogs.available_bins(scan_dir, kinds=("shapes", "combined")):
             if bin_size and bs != bin_size:
                 continue
-            yield scan_dir.name, bs, cat
+            cat = catalogs.default_feature_source(scan_dir, bs)
+            if cat is not None:
+                yield scan_dir.name, bs, cat
 
 
 def _feature_row(scan: str, bin_size: Optional[int], f: dict) -> dict:
@@ -111,14 +113,14 @@ def aggregate(results_dir: Union[str, Path], scans=None, bin_size: Optional[int]
     results_dir = Path(results_dir)
     features, device_map = [], []
     n_catalogs = 0
+    from . import catalogs
     for scan, bs, cat in iter_catalogs(results_dir, scans, bin_size):
-        with open(cat) as fh:
-            catalog = json.load(fh)
+        kept, _ = catalogs.load_features_any(cat)
         n_catalogs += 1
-        for f in catalog:
+        for f in kept:
             features.append(_feature_row(scan, bs, f))
             device_map.extend(_devicemap_rows(scan, bs, f))
-        log(f"  {scan} [{bs}x{bs}]: {len(catalog)} features")
+        log(f"  {scan} [{bs}x{bs}]: {len(kept)} features")
     log(f"Aggregated {len(features)} features from {n_catalogs} catalog(s)")
     return features, device_map
 

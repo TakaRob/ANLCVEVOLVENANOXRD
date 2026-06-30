@@ -25,7 +25,7 @@ from .config import DataManager
 from .tabs._embed import placeholder
 
 # Built-in tab modules (module path under xrd_app.tabs).
-_BUILTIN_TABS = ["setup", "programs", "view_label", "shape_verify", "device", "orientation"]
+_BUILTIN_TABS = ["setup", "programs", "view_label", "shape_verify", "device", "territory", "orientation"]
 _BIN_SIZES = [1, 3, 4, 5]
 
 
