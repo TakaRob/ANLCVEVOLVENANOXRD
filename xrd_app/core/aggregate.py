@@ -24,7 +24,7 @@ from typing import Callable, Optional, Union
 FEATURE_COLUMNS = [
     "scan", "bin_size", "feature_id", "reflection", "ref_tth",
     "center_bin", "center_row", "center_col", "detector_x", "detector_y",
-    "chi_deg",
+    "chi_deg", "tth_com",
     "peak_intensity", "mean_intensity", "sum_integrated", "mean_snr",  # intensity
     "n_bins",                                                          # prevalence
     "chi_fwhm", "tth_fwhm",                                            # morphology
@@ -65,6 +65,14 @@ def _feature_row(scan: str, bin_size: Optional[int], f: dict) -> dict:
                    if isinstance(e, dict) and "intensity" in e]
     integrated = [e["integrated"] for e in profile.values()
                   if isinstance(e, dict) and "integrated" in e]
+    # Intensity-weighted measured 2θ center-of-mass over the shape's bins — the
+    # radial Bragg-peak position used downstream for microstrain (Δd/d). Falls
+    # back to ref_tth-less None when no per-bin tth is present.
+    tw = [(e["tth"], e.get("intensity", 0.0) or 0.0) for e in profile.values()
+          if isinstance(e, dict) and e.get("tth") is not None]
+    wsum = sum(w for _, w in tw)
+    tth_com = (round(sum(t * w for t, w in tw) / wsum, 5) if wsum else
+               (round(sum(t for t, _ in tw) / len(tw), 5) if tw else None))
     return {
         "scan": scan,
         "bin_size": bin_size,
@@ -77,6 +85,7 @@ def _feature_row(scan: str, bin_size: Optional[int], f: dict) -> dict:
         "detector_x": f.get("detector_x"),
         "detector_y": f.get("detector_y"),
         "chi_deg": f.get("chi_deg"),
+        "tth_com": tth_com,
         "peak_intensity": f.get("peak_intensity"),
         "mean_intensity": round(sum(intensities) / len(intensities), 2) if intensities else None,
         "sum_integrated": round(sum(integrated), 1) if integrated else None,

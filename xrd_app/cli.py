@@ -570,9 +570,11 @@ def grid(bin_size, scan, shape, xrd_dir, positions, rawgrid, deskew_method, vari
     legacy serpentine X-only grid); no CSV → reconstructed from the one-file-per-
     row layout (``file_per_row``); ``--shape`` → ``synthetic`` raster.
 
-    When no position CSV exists it is **recreated** from the file-per-row layout
-    (so downstream never zero-pads positions); pass ``--shape`` to synthesize a
-    raster instead.
+    When no position CSV exists, one is created automatically: first from the
+    **real SOCKETSERVER interferometry** stream if present (see
+    'xrd-app create-positions'), otherwise **recreated** from the file-per-row
+    layout (so downstream never zero-pads positions). Pass ``--shape`` to
+    synthesize a raster instead.
     """
     from .core import io
     dm = DataManager(root, scan=scan)
@@ -591,19 +593,27 @@ def grid(bin_size, scan, shape, xrd_dir, positions, rawgrid, deskew_method, vari
     n_cols = _parse_shape_cols(shape)
     pos_real = Path(pos).exists() and not io.is_recreated_csv(pos)
 
-    # Force a position CSV when we don't have a real one (and weren't asked to
-    # synthesize a raster shape) — reconstructed from the file-per-row layout.
+    # When we don't have a real position CSV (and weren't asked to synthesize a
+    # raster shape), build one from the REAL stage positions in the SOCKETSERVER
+    # interferometry stream. With no interferometry data we pass no CSV and let
+    # generate_grid_mapping reconstruct the grid straight from the one-file-per-
+    # row layout (exact for these scans) — no synthetic lattice is fabricated.
     if not pos_real and n_cols is None:
-        if Path(pos).exists():
-            click.echo(f"No real position CSV; reusing recreated positions: {pos}")
-        else:
-            click.echo(f"No position CSV at {pos} — recreating from the one-file-per-row layout ...")
+        from .core import positions as P
+        sdir = dm.socketserver_dir(scan=scan)
+        if P.has_socketserver(sdir, scan_no):
+            dest = dm.metadata_scan_dir(scan) / "positions.csv"
+            click.echo("No real position CSV — building one from SOCKETSERVER "
+                       f"interferometry ({sdir}) ...")
             try:
-                io.recreate_positions_csv(xdir, pos, scan_number=scan_no, log=click.echo)
-            except ValueError as e:
-                click.echo(f"Error: {e}")
-                click.echo("  Or pass --shape ROWSxCOLS to synthesize a grid instead.")
-                raise SystemExit(1)
+                P.build_positions_csv(sdir, dest, scan_number=scan_no, log=click.echo)
+                pos, pos_real = dest, True
+            except (FileNotFoundError, ValueError) as e:
+                click.echo(f"  SOCKETSERVER positions failed ({e}); "
+                           "using the one-file-per-row layout for the grid.")
+        else:
+            click.echo(f"No SOCKETSERVER interferometry at {sdir} — using the "
+                       "one-file-per-row layout for the grid.")
 
     io.generate_grid_mapping(xdir, pos if pos_real else None, bin_size,
                              scan_number=scan_no, output=out, n_cols=n_cols,
@@ -665,32 +675,35 @@ def territory_grid(target_size, scan, xrd_dir, positions, variant, output, root)
 
 
 # ─────────────────────────────────────────────────────────────────────
-# recreate-positions — rebuild a missing position CSV from raw frames
+# create-positions — build a REAL position CSV from SOCKETSERVER interferometry
 # ─────────────────────────────────────────────────────────────────────
-@main.command(name='recreate-positions')
+@main.command(name='create-positions')
 @click.option('--scan', default=None, help='Scan number/name (defaults to config scan)')
-@click.option('--xrd-dir', help='Directory of raw per-frame H5 files (defaults to resolved)')
-@click.option('--step-x', type=float, default=1.0, help='Nominal µm per row (slow axis)')
-@click.option('--step-y', type=float, default=1.0, help='Nominal µm per column (fast axis)')
-@click.option('--no-serpentine', is_flag=True, help='Rows scanned same direction (no boustrophedon)')
-@click.option('--output', help='Output CSV (defaults to the resolved position CSV path)')
+@click.option('--socket-dir', help='SOCKETSERVER interferometry dir (defaults to resolved)')
+@click.option('--method', type=click.Choice(['averaging', 'basic']), default='averaging',
+              help='averaging (default, self-contained) or basic (needs --theta)')
+@click.option('--theta', type=float, default=None,
+              help='Sample theta in degrees — only used by --method basic')
+@click.option('--reduction', type=int, default=1,
+              help='Use every Nth interferometer sample (speed; 1 = all)')
+@click.option('--output', help='Output CSV (default: Metadata/<scan>/positions.csv)')
 @click.option('--force', is_flag=True, help='Overwrite an existing CSV')
 @click.option('--root', default='.', help='Project root directory')
-def recreate_positions(scan, xrd_dir, step_x, step_y, no_serpentine, output, force, root):
-    """Recreate a missing per-frame position CSV from the one-file-per-row layout.
+def create_positions(scan, socket_dir, method, theta, reduction, output, force, root):
+    """Build a REAL per-frame position CSV from the SOCKETSERVER interferometry stream.
 
-    For scans whose SOCKETSERVER-derived ``scan_NNNN_position.csv`` is missing.
-    Assigns each frame (row = HDF5 file index, col = serpentine within-file index)
-    and writes the standard ``Trigger,X_Position,Y_Position`` CSV (tagged as a
-    reconstruction). Steps are nominal µm — the lattice is exact, only the absolute
-    scale is synthetic. Errors if the scan is not a clean one-file-per-row raster.
+    Reduces the interferometer encoder samples to one true (X, Y) stage position
+    per trigger and writes ``Metadata/<scan>/positions.csv`` — the *real*
+    measured positions. 'xrd-app grid' calls this automatically when no position
+    CSV is found; run it directly to (re)generate one. When a scan has no
+    SOCKETSERVER stream, the grid is reconstructed from the one-file-per-row
+    layout instead (no positions file needed).
     """
-    from .core import io
+    from .core import io, positions as P
     dm = DataManager(root, scan=scan)
     scan_no = dm.scan_number() or 203
-    xdir = Path(xrd_dir) if xrd_dir else dm.xrd_frames_dir()
-    out = Path(output) if output else dm.position_csv()
-    _require(xdir, "raw frames directory")
+    sdir = Path(socket_dir) if socket_dir else dm.socketserver_dir(scan=scan)
+    out = Path(output) if output else (dm.metadata_scan_dir(scan) / "positions.csv")
 
     if out.exists() and not force:
         kind = "recreated" if io.is_recreated_csv(out) else "existing (real?)"
@@ -698,15 +711,22 @@ def recreate_positions(scan, xrd_dir, step_x, step_y, no_serpentine, output, for
         click.echo("  Pass --force to overwrite, or --output to write elsewhere.")
         raise SystemExit(1)
 
+    if not P.has_socketserver(sdir, scan_no):
+        click.echo(f"Error: no SOCKETSERVER files (scan_{scan_no:04d}_*.h5) in {sdir}.")
+        click.echo("  This scan has no interferometry stream — 'xrd-app grid' will "
+                   "reconstruct the grid from the one-file-per-row layout instead.")
+        raise SystemExit(1)
+
     try:
-        info = io.recreate_positions_csv(
-            xdir, out, scan_number=scan_no, step_x=step_x, step_y=step_y,
-            serpentine=not no_serpentine, log=click.echo)
-    except ValueError as e:
+        info = P.build_positions_csv(
+            sdir, out, scan_number=scan_no, method=method, theta_deg=theta,
+            reduction=reduction, log=click.echo)
+    except (FileNotFoundError, ValueError) as e:
         click.echo(f"Error: {e}")
         raise SystemExit(1)
-    click.echo(f"Wrote {info['n_total']} positions "
-               f"({info['n_rows']}x{info['n_cols']}) -> {info['path']}")
+    click.echo(f"Wrote {info['n_positions']} real positions "
+               f"(span {info['x_span_um']:.1f} x {info['y_span_um']:.1f} um) "
+               f"-> {info['path']}")
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -1128,6 +1148,232 @@ def lineage(target, scan, root):
             for k in ("algorithm", "shape_algo", "peak_source", "bin_size", "scan"):
                 if k in data:
                     click.echo(f"    {k}: {data[k]}")
+
+
+# ─────────────────────────────────────────────────────────────────────
+# aggregate — fuse per-scan shape catalogs into cross-scan tables
+# ─────────────────────────────────────────────────────────────────────
+@main.command()
+@click.option('--scans', help='Comma-separated scan numbers/names (default: all in Labels/)')
+@click.option('--bin-size', type=int, default=None, help='Filter to one bin size (default: all)')
+@click.option('--out', 'out_dir', default='Study', help='Output directory (default: Study/)')
+@click.option('--root', default='.', help='Project root directory')
+def aggregate(scans, bin_size, out_dir, root):
+    """Aggregate per-scan shape catalogs → features.csv, device_map.csv, study.db.
+
+    Walks Labels/<scan>/ across scans (and bin sizes) via the canonical
+    shapes/combined catalog per (scan, bin) and emits two tidy tables plus a
+    combined SQLite db — the cross-scan foundation for track/rocking/predict.
+    """
+    from .core import aggregate as agg
+    dm = DataManager(root)
+    results_dir = dm.labels_dir_root
+    _require(results_dir, "Labels/ directory (run 'xrd-app peaks'/'shapes' first)")
+
+    scan_list = ([DataManager.scan_name_of(s.strip()) for s in scans.split(',') if s.strip()]
+                 if scans else None)
+    features, device_map = agg.aggregate(
+        results_dir, scans=scan_list, bin_size=bin_size, log=click.echo)
+    if not features:
+        click.echo("No features found — run peaks/shapes first, or check --scans/--bin-size.")
+        raise SystemExit(1)
+
+    out = Path(out_dir)
+    if not out.is_absolute():
+        out = Path(root) / out
+    fcsv = agg.write_csv(features, agg.FEATURE_COLUMNS, out / "features.csv")
+    dcsv = agg.write_csv(device_map, agg.DEVICEMAP_COLUMNS, out / "device_map.csv")
+    db = agg.write_sqlite(out / "study.db", features, device_map)
+    click.echo(f"\nWrote {len(features)} features, {len(device_map)} device-map rows:")
+    click.echo(f"  {fcsv}\n  {dcsv}\n  {db}")
+
+
+# ─────────────────────────────────────────────────────────────────────
+# track — link shapes across θ into grain tracks
+# ─────────────────────────────────────────────────────────────────────
+@main.command()
+@click.option('--scans', help='Comma-separated scan numbers/names (default: all in Labels/)')
+@click.option('--bin-size', type=int, default=3, help='Bin size to track (default: 3)')
+@click.option('--match-tol', type=float, default=2.0,
+              help='Max spatial distance (bins) to call two shapes the same grain across θ')
+@click.option('--min-theta', type=int, default=2,
+              help='Distinct θ a track needs to be flagged "recurrent" (H1)')
+@click.option('--out', 'out_path', default='Study/tracks.json', help='Output tracks JSON')
+@click.option('--root', default='.', help='Project root directory')
+def track(scans, bin_size, match_tol, min_theta, out_path, root):
+    """Link shapes across the θ sweep into grain tracks (Study/tracks.json + .csv).
+
+    Same reflection band + spatial proximity within --match-tol bins (the grid is
+    identical across θ, so de-skewed bin coords compare directly). Emits a full
+    JSON (per-track θ membership, χ(θ), intensity(θ)) and a one-row-per-track CSV.
+    """
+    from .core import aggregate as agg, tracking
+    dm = DataManager(root)
+    results_dir = dm.labels_dir_root
+    _require(results_dir, "Labels/ directory (run 'xrd-app peaks'/'shapes' first)")
+
+    scan_list = ([DataManager.scan_name_of(s.strip()) for s in scans.split(',') if s.strip()]
+                 if scans else None)
+    features, _ = agg.aggregate(results_dir, scans=scan_list, bin_size=bin_size, log=click.echo)
+    if not features:
+        click.echo("No features to track — run peaks/shapes first.")
+        raise SystemExit(1)
+
+    tracks = tracking.build_tracks(
+        features, match_tol=match_tol, min_theta=min_theta, log=click.echo)
+
+    out = Path(out_path)
+    if not out.is_absolute():
+        out = Path(root) / out
+    _write_json(out, {
+        "bin_size": bin_size, "match_tol": match_tol, "min_theta": min_theta,
+        "n_tracks": len(tracks), "tracks": tracks,
+    })
+    csv_path = out.with_suffix(".csv")
+    from .core import aggregate as _agg
+    _agg.write_csv(tracking.track_summary_rows(tracks), tracking.TRACK_COLUMNS, csv_path)
+    n_rec = sum(1 for t in tracks if t["is_recurrent"])
+    click.echo(f"\nWrote {len(tracks)} tracks ({n_rec} recurrent):\n  {out}\n  {csv_path}")
+
+
+# ─────────────────────────────────────────────────────────────────────
+# rocking — fit intensity(θ) per track → θ_Bragg, FWHM (mosaicity)
+# ─────────────────────────────────────────────────────────────────────
+@main.command()
+@click.option('--tracks', 'tracks_path', default='Study/tracks.json', help='tracks JSON from `xrd-app track`')
+@click.option('--min-points', type=int, default=4, help='Distinct θ needed to attempt a Gaussian fit')
+@click.option('--all-tracks', is_flag=True, help='Fit non-recurrent (single/sparse-θ) tracks too')
+@click.option('--out', 'out_path', default='Study/rocking_curves.csv', help='Output rocking-curves CSV')
+@click.option('--root', default='.', help='Project root directory')
+def rocking(tracks_path, min_points, all_tracks, out_path, root):
+    """Fit each track's rocking curve (intensity vs θ) → Study/rocking_curves.csv.
+
+    Gaussian in θ: θ_Bragg (peak), FWHM (mosaicity), amplitude, R². Tracks too
+    sparsely sampled in θ are emitted with moment descriptors and a 'too_sparse'
+    status (the θ sampling is clustered — fits are only meaningful near θ≈3–6°).
+    """
+    import json
+    from .core import rocking as rk, aggregate as agg
+    tp = Path(tracks_path)
+    if not tp.is_absolute():
+        tp = Path(root) / tp
+    _require(tp, "tracks JSON (run 'xrd-app track' first)")
+    with open(tp) as f:
+        tracks = json.load(f).get("tracks", [])
+
+    rows = rk.fit_tracks(tracks, min_points=min_points,
+                         only_recurrent=not all_tracks, log=click.echo)
+    out = Path(out_path)
+    if not out.is_absolute():
+        out = Path(root) / out
+    agg.write_csv(rows, rk.ROCKING_COLUMNS, out)
+    click.echo(f"\nWrote {len(rows)} rocking curves -> {out}")
+
+
+# ─────────────────────────────────────────────────────────────────────
+# predict — forecast per-θ shapes, compare predicted vs observed
+# ─────────────────────────────────────────────────────────────────────
+@main.command()
+@click.option('--tracks', 'tracks_path', default='Study/tracks.json', help='tracks JSON from `xrd-app track`')
+@click.option('--scans', help='Comma-separated scans (default: all in Labels/)')
+@click.option('--bin-size', type=int, default=3, help='Bin size to aggregate features for')
+@click.option('--match-tol', type=float, default=2.0, help='Match tolerance (bins) for the repeatability floor')
+@click.option('--rocking', 'rocking_path', default='Study/rocking_curves.csv',
+              help='Optional rocking_curves.csv to fold fit quality into the report')
+@click.option('--repeat-pair', default='203,214', help='Same-orientation scan pair for the noise floor')
+@click.option('--out', 'out_path', default='Study/prediction_report.md', help='Output report (.md; .json written alongside)')
+@click.option('--root', default='.', help='Project root directory')
+def predict(tracks_path, scans, bin_size, match_tol, rocking_path, repeat_pair, out_path, root):
+    """Compare predicted (recurrent-track) shapes vs observed → prediction_report.{md,json}.
+
+    Headline metrics: recall (do predicted shapes appear?), precision (are
+    detections predicted vs noise?), the 203-vs-214 repeatability floor, χ(θ)
+    smoothness, and rocking-fit quality.
+    """
+    import csv as _csv, json
+    from .core import aggregate as agg, prediction as pred
+    dm = DataManager(root)
+
+    tp = Path(tracks_path)
+    if not tp.is_absolute():
+        tp = Path(root) / tp
+    _require(tp, "tracks JSON (run 'xrd-app track' first)")
+    with open(tp) as f:
+        tracks = json.load(f).get("tracks", [])
+
+    scan_list = ([DataManager.scan_name_of(s.strip()) for s in scans.split(',') if s.strip()]
+                 if scans else None)
+    features, _ = agg.aggregate(dm.labels_dir_root, scans=scan_list, bin_size=bin_size, log=click.echo)
+
+    rocking_rows = None
+    rp = Path(rocking_path)
+    if not rp.is_absolute():
+        rp = Path(root) / rp
+    if rp.exists():
+        with open(rp) as f:
+            rocking_rows = [
+                {k: (float(v) if k not in ("reflection", "status") and v not in ("", None) else v)
+                 for k, v in row.items()}
+                for row in _csv.DictReader(f)]
+
+    pair = tuple(DataManager.scan_name_of(s.strip()) for s in repeat_pair.split(','))
+    report = pred.build_report(tracks, features, match_tol=match_tol,
+                              repeat_pair=pair, rocking_rows=rocking_rows)
+
+    out = Path(out_path)
+    if not out.is_absolute():
+        out = Path(root) / out
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(pred.to_markdown(report))
+    _write_json(out.with_suffix(".json"), report)
+    click.echo(f"\n{report['verdict']}\n")
+    click.echo(f"Wrote:\n  {out}\n  {out.with_suffix('.json')}")
+
+
+# ─────────────────────────────────────────────────────────────────────
+# combined-device — fuse per-θ device maps into one spatial canvas
+# ─────────────────────────────────────────────────────────────────────
+@main.command(name='combined-device')
+@click.option('--device-map', 'device_map_path', default='Study/device_map.csv',
+              help='device_map.csv from `xrd-app aggregate`')
+@click.option('--tracks', 'tracks_path', default='Study/tracks.json',
+              help='Optional tracks JSON for the centroid overlay')
+@click.option('--intensity', 'intensity_key', type=click.Choice(['integrated', 'intensity']),
+              default='integrated', help='Which column drives the max/argmax canvases')
+@click.option('--out', 'out_path', default='Study/combined_device.npz', help='Output .npz')
+@click.option('--root', default='.', help='Project root directory')
+def combined_device(device_map_path, tracks_path, intensity_key, out_path, root):
+    """Fuse all θ into one spatial device-view dataset (Study/combined_device.npz).
+
+    Per (row,col) bin: max intensity over θ, the argmax-θ orientation map, the
+    recurrence count, and per-reflection layers — plus track centroids. Pure data
+    layer for a future Combined Device View tab (no GUI here).
+    """
+    import csv as _csv, json
+    from .core import combined_device as cd
+    dmp = Path(device_map_path)
+    if not dmp.is_absolute():
+        dmp = Path(root) / dmp
+    _require(dmp, "device_map.csv (run 'xrd-app aggregate' first)")
+    with open(dmp) as f:
+        rows = list(_csv.DictReader(f))
+
+    tracks = None
+    tp = Path(tracks_path)
+    if not tp.is_absolute():
+        tp = Path(root) / tp
+    if tp.exists():
+        with open(tp) as f:
+            tracks = json.load(f).get("tracks", [])
+
+    combined = cd.build_combined(rows, intensity_key=intensity_key,
+                                 tracks=tracks, log=click.echo)
+    out = Path(out_path)
+    if not out.is_absolute():
+        out = Path(root) / out
+    cd.save_npz(out, combined)
+    _write_json(out.with_suffix(".summary.json"), cd.summary(combined))
+    click.echo(f"\nWrote combined device view:\n  {out}\n  {out.with_suffix('.summary.json')}")
 
 
 def _resolve_scan_list(scans, all_scans, root):

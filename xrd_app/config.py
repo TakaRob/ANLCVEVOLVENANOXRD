@@ -379,6 +379,17 @@ class DataManager:
         sub = base / "XRD"
         return sub if sub.is_dir() else base
 
+    def socketserver_dir(self, override: Optional[str] = None, scan: object = None) -> Path:
+        """Directory of the scan's SOCKETSERVER interferometry H5 files.
+
+        Sibling of :meth:`xrd_frames_dir` — the real per-frame stage positions are
+        derived from here (see ``core.positions``). Falls back to the scan dir
+        itself when there is no ``SOCKETSERVER/`` subdir.
+        """
+        base = self.raw_scan_dir(override, scan)
+        sub = base / "SOCKETSERVER"
+        return sub if sub.is_dir() else base
+
     def position_csv(self, override: Optional[str] = None, scan: object = None) -> Path:
         if override:
             return self._abs(override)

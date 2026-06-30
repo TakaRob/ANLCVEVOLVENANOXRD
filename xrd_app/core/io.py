@@ -672,55 +672,6 @@ def build_grid_from_frame_map(frame_map, serpentine: bool = True,
     return grid_row, grid_col, n_rows, n_cols
 
 
-def recreate_positions_csv(
-    xrd_dir: Union[str, Path],
-    output: Union[str, Path],
-    scan_number: int = 203,
-    step_x: float = 1.0,
-    step_y: float = 1.0,
-    serpentine: bool = True,
-    log: Callable[[str], None] = print,
-) -> dict:
-    """Reconstruct a per-frame position CSV from the one-file-per-row layout.
-
-    For scans whose SOCKETSERVER-derived ``*_position.csv`` is missing. Assigns
-    each frame a ``(row, col)`` from the file/frame structure
-    (:func:`build_grid_from_frame_map`) and writes the standard
-    ``Trigger,X_Position,Y_Position`` CSV so the rest of the pipeline (and the
-    external ptycho preprocessor) has positions instead of zero-padding.
-
-    Orientation matches the real scans: **X = slow per-row axis**, **Y = fast
-    within-row sweep**. Steps are nominal µm (the lattice is exact; only the
-    absolute scale is synthetic — pass ``step_x``/``step_y`` if you know them).
-    The file is tagged with :data:`RECREATED_CSV_MARKER` so loaders can tell it
-    apart from a real export. Returns ``{path, n_rows, n_cols, n_total}``.
-    """
-    xrd_files, frame_map, n_total = load_xrd_metadata(xrd_dir, scan_number)
-    ok, n_files, mode_count = is_file_per_row(frame_map)
-    if not ok:
-        raise ValueError(
-            f"Cannot recreate positions: frames-per-file is non-uniform "
-            f"({n_files} files, modal {mode_count}/file) — this scan is not a "
-            "clean one-file-per-row raster, and TETRAMM/SOCKETSERVER auto-extraction "
-            "is not available. Provide a position CSV or pass --shape ROWSxCOLS.")
-    grid_row, grid_col, n_rows, n_cols = build_grid_from_frame_map(
-        frame_map, serpentine=serpentine, log=log)
-
-    output = Path(output)
-    output.parent.mkdir(parents=True, exist_ok=True)
-    tmp = output.with_suffix(output.suffix + ".tmp")
-    with open(tmp, "w", newline="") as f:
-        f.write(RECREATED_CSV_MARKER +
-                f" n_rows={n_rows} n_cols={n_cols} step_x={step_x} step_y={step_y}\n")
-        w = csv.writer(f)
-        w.writerow(["Trigger", "X_Position", "Y_Position"])
-        for gi in range(n_total):
-            w.writerow([gi + 1, grid_row[gi] * step_x, grid_col[gi] * step_y])
-    os.replace(tmp, output)
-    log(f"Recreated positions ({n_total} frames, {n_rows}x{n_cols}) -> {output}")
-    return {"path": output, "n_rows": n_rows, "n_cols": n_cols, "n_total": n_total}
-
-
 def build_bin_mapping(n_rows, n_cols, bin_size, grid_to_frames):
     """Group the per-pixel grid into bin_size x bin_size spatial bins."""
     n_br = (n_rows + bin_size - 1) // bin_size
@@ -1151,7 +1102,7 @@ class _RawSource(BinImageSource):
                 raise FileNotFoundError(
                     "No grid mapping, no usable position CSV, and the scan is not a "
                     "clean one-file-per-row raster — cannot assign raw frames to bins. "
-                    "Run 'xrd-app grid' or 'xrd-app recreate-positions'.")
+                    "Run 'xrd-app grid' (optionally with --shape ROWSxCOLS).")
             grid_to_frames = {}
             for gi in range(n_total):
                 grid_to_frames.setdefault(
