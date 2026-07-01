@@ -29,7 +29,7 @@
   θ is densely sampled (≈3–6°). 203/214 are a duplicate orientation — use them to
   estimate detection repeatability (an empirical noise floor for the comparison).
 
-- **Geometry:** 15 keV, 6.16 m detector distance, 75 µm pixel, area detector
+- **Geometry:** 15 keV, 75 µm pixel, area detector
   `(1062×1028)`. Reflections are fixed 2θ bands (PbI₂, (001), (011), (111), (002),
   ITO, (012), (112), + 3 unlabeled) — see `core/reflections.py`.
 

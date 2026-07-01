@@ -17,7 +17,7 @@ context that applies everywhere.
 
 - **Goal:** map crystal grain orientation / strain across a sample surface by
   detecting Bragg peaks in nano-XRD detector images, scan position by position.
-- **Instrument:** 15 keV beam, ~6.16 m detector distance, 75 µm pixel. A raw
+- **Instrument:** 15 keV beam, 75 µm pixel. A raw
   scan is thousands of CCD frames (one per spatial position) in HDF5.
 - **Reflections** of interest (perovskite/halide + substrate): PbI2,
   (001)/(011)/(111)/(002), ITO, (012)/(112), each at a known 2-theta. These

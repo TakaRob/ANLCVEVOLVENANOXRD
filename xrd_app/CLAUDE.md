@@ -75,7 +75,7 @@ scan-dependent tab.
 
 Perovskite/halide thin films; reflections (PbI2, (001)/(011)/(111)/(002), ITO,
 (012)/(112)) at 2-theta angles in `core/reflections.py`. Beamline: 15 keV,
-6.16 m detector distance, 75 µm pixel. A *peak* is per-bin; a *shape* is a peak
+75 µm pixel. A *peak* is per-bin; a *shape* is a peak
 that holds up linked across neighboring bins (Union-Find), characterized by
 `rocking_fwhm` / `strain_breadth` / `chi_deg`. See `TERMINOLOGY.md` for the full
 glossary. CVEvolve work uses **mean F2** (recall-weighted) as the primary metric.

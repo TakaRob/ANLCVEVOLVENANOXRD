@@ -1376,6 +1376,196 @@ def combined_device(device_map_path, tracks_path, intensity_key, out_path, root)
     click.echo(f"\nWrote combined device view:\n  {out}\n  {out.with_suffix('.summary.json')}")
 
 
+# ─────────────────────────────────────────────────────────────────────
+# qspace — pixel → 3D reciprocal-space (q) mapping
+# ─────────────────────────────────────────────────────────────────────
+@main.command()
+@click.option('--scans', help='Comma-separated scan numbers/names (default: config scan)')
+@click.option('--bin-size', type=int, default=3, help='Bin size to resolve features to annotate')
+@click.option('--energy', type=float, default=None, help='Photon energy in eV (default: 15000)')
+@click.option('--pixel-size', type=float, default=None, help='Detector pixel size in metres (default: 75e-6)')
+@click.option('--theta', type=float, default=None,
+              help='Sample θ (deg) override; default from the rocking θ-table per scan')
+@click.option('--poni', 'poni_path', default=None,
+              help='pyFAI .poni for tilt-accurate Q directions (else a flat fit of the 2θ map)')
+@click.option('--intensity/--no-intensity', default=True,
+              help='Store the summed detector image at that θ in the .npz (needed by `xrd-app rsm`)')
+@click.option('--tth-path', help='2θ TIFF map (defaults to resolved)')
+@click.option('--out-dir', default='Study/qspace', help='Output directory (default: Study/qspace/)')
+@click.option('--root', default='.', help='Project root directory')
+def qspace(scans, bin_size, energy, pixel_size, theta, poni_path, intensity, tth_path, out_dir, root):
+    """Map detector pixels (+ sample θ) into 3D reciprocal space (q-space).
+
+    For each scan: resolve the detector geometry, build the per-pixel
+    Q=(qx,qy,qz) field at that scan's θ, and (if features exist) tag each
+    detected feature with its (qx,qy,qz,|Q|). Writes one .npz q-map +
+    .summary.json per scan, plus features_q.csv.
+
+    Geometry: with --poni the directions are tilt-accurate (pyFAI); otherwise a
+    flat-detector fit of the 2θ map is used (exact |Q|, ~tens-of-mdeg direction
+    error from unmodeled tilt — see the fit-RMS printed per scan).
+
+    Needs `pip install 'xrd-app[qspace]'` (xrayutilities); --poni also needs
+    `xrd-app[poni]` (pyFAI).
+    """
+    import tifffile
+    from .core import qspace as qs
+    from .core import aggregate as agg
+    from .core.tracking import theta_of
+
+    energy_ev = energy if energy is not None else qs.DEFAULT_ENERGY_EV
+    pixel_m = pixel_size if pixel_size is not None else qs.DEFAULT_PIXEL_M
+    lam = qs.wavelength_angstrom(energy_ev)
+    if poni_path:
+        _require(poni_path, "poni file")
+
+    scan_list = ([DataManager.scan_name_of(s.strip()) for s in scans.split(',') if s.strip()]
+                 if scans else None)
+    if not scan_list:
+        one = DataManager(root).scan_name
+        if not one:
+            click.echo("Error: no scan given. Use --scans or set a config scan.")
+            raise SystemExit(1)
+        scan_list = [one]
+
+    out_base = Path(out_dir)
+    if not out_base.is_absolute():
+        out_base = Path(root) / out_base
+
+    src = "poni (tilt-accurate)" if poni_path else "flat fit of 2θ map"
+    click.echo(f"[qspace] E={energy_ev/1000:.1f} keV  λ={lam:.5f} Å  "
+               f"pixel={pixel_m*1e6:.0f} µm  geometry: {src}")
+    for scan in scan_list:
+        dm = DataManager(root, scan=scan)
+        tth = dm.tth_map(tth_path)
+        tth_deg = tifffile.imread(str(tth)).astype('float64') if Path(tth).exists() else None
+
+        th = theta if theta is not None else theta_of(scan)
+        if th is None:
+            click.echo(f"  {scan}: θ unknown (not in table; pass --theta) — using 0.0")
+            th = 0.0
+
+        if poni_path:
+            geom = qs.geometry_from_poni(poni_path)
+            shape = tth_deg.shape if tth_deg is not None else None
+            qx, qy, qz = qs.q_vectors_from_poni(poni_path, energy_ev=energy_ev,
+                                                theta_deg=th, shape=shape)
+        else:
+            if tth_deg is None:
+                _require(tth, f"2θ map for {scan}")  # aborts with guidance
+            geom = qs.recover_geometry(tth_deg, pixel_m=pixel_m)
+            qx, qy, qz = qs.q_vectors(tth_deg, geom, energy_ev=energy_ev, theta_deg=th)
+        qmag = (qx ** 2 + qy ** 2 + qz ** 2) ** 0.5
+
+        # annotate detected features for this scan, if any exist
+        features, _ = agg.aggregate(dm.labels_dir_root, scans=[scan],
+                                    bin_size=bin_size, log=lambda *_: None)
+        tagged = qs.annotate_features(features, qx, qy, qz)
+
+        meta = {"scan": scan, "theta_deg": float(th),
+                "energy_ev": float(energy_ev), "wavelength_A": float(lam)}
+        has_intensity = False
+        if intensity:
+            from .core import io
+            try:
+                src = io.open_bin_source(dm, bin_size, scan=scan)
+                try:
+                    meta["intensity"] = src.sum_all().astype('float32')
+                    has_intensity = True
+                finally:
+                    src.close()
+            except Exception as e:
+                click.echo(f"  {scan}: no intensity (skipping): {e}")
+
+        npz = out_base / f"{scan}_qmap.npz"
+        qs.save_qmap(npz, qx, qy, qz, geom, meta=meta)
+        _write_json(npz.with_suffix(".summary.json"),
+                    qs.summary(geom, th, energy_ev, lam, qmag, n_features=len(tagged)))
+        if tagged:
+            cols = list(tagged[0].keys())
+            agg.write_csv(tagged, cols, out_base / f"{scan}_features_q.csv")
+
+        geo_note = "poni" if geom.source == "poni" else f"fit-RMS={geom.rms_deg*1000:.0f} mdeg"
+        click.echo(
+            f"  {scan}: θ={th:>5.1f}°  D={geom.distance_m:.4f} m  {geo_note}  "
+            f"|Q|={qmag.min():.3f}–{qmag.max():.3f} 1/Å  "
+            f"features={len(tagged)}{'  +I' if has_intensity else ''} -> {npz.name}")
+
+    click.echo(f"\nWrote q-maps to {out_base}")
+
+
+# ─────────────────────────────────────────────────────────────────────
+# rsm — fuse per-scan q-maps into one binned 3D reciprocal-space map
+# ─────────────────────────────────────────────────────────────────────
+@main.command()
+@click.option('--scans', help='Comma-separated scans (default: all *_qmap.npz in --in-dir)')
+@click.option('--in-dir', default='Study/qspace', help='Dir of <scan>_qmap.npz (from `xrd-app qspace`)')
+@click.option('--bins', 'nbins', type=int, default=128, help='Voxels per axis in the 3D grid')
+@click.option('--min-intensity', type=float, default=0.0,
+              help='Drop detector pixels at/below this (after median subtraction)')
+@click.option('--subtract-median/--no-subtract-median', default=True,
+              help='Baseline-subtract each scan by its median before binning')
+@click.option('--out', 'out_path', default='Study/rsm.npz', help='Output .npz')
+@click.option('--root', default='.', help='Project root directory')
+def rsm(scans, in_dir, nbins, min_intensity, subtract_median, out_path, root):
+    """Fuse per-scan q-maps into one binned 3D reciprocal-space map (RSM).
+
+    Reads the ``<scan>_qmap.npz`` files from `xrd-app qspace` (which must carry an
+    intensity layer — run qspace with --intensity), histograms each scan's summed
+    detector intensity into a shared 3D (qx,qy,qz) grid, and accumulates across θ.
+    Writes the volume + per-voxel counts + max-projections to one .npz.
+    """
+    import numpy as np
+    from .core import rsm as R
+
+    base = Path(in_dir)
+    if not base.is_absolute():
+        base = Path(root) / base
+    if scans:
+        names = [DataManager.scan_name_of(s.strip()) for s in scans.split(',') if s.strip()]
+        files = [base / f"{n}_qmap.npz" for n in names]
+    else:
+        files = sorted(base.glob("*_qmap.npz"))
+    files = [f for f in files if Path(f).exists()]
+    if not files:
+        click.echo(f"Error: no *_qmap.npz in {base}. Run 'xrd-app qspace' first.")
+        raise SystemExit(1)
+
+    qmaps = [R.load_qmap(f) for f in files]
+    have = [m for m in qmaps if m.intensity is not None]
+    if not have:
+        click.echo("Error: no q-map has an intensity layer. "
+                   "Re-run 'xrd-app qspace' with --intensity.")
+        raise SystemExit(1)
+    if len(have) < len(qmaps):
+        click.echo(f"Note: {len(qmaps) - len(have)} scan(s) lack intensity; skipped.")
+
+    click.echo(f"[rsm] fusing {len(have)} scans into a {nbins}³ grid "
+               f"(median-subtract={subtract_median}) …")
+    edges = R.common_grid(have, nbins=nbins)
+    volume, counts = R.accumulate(have, edges, min_intensity=min_intensity,
+                                  subtract_median=subtract_median,
+                                  progress=_make_progress("rsm"))
+    out = Path(out_path)
+    if not out.is_absolute():
+        out = Path(root) / out
+    scan_names = [m.scan for m in have]
+    thetas = [m.theta_deg for m in have]
+    meta = {"scans": np.array(scan_names),
+            "thetas": np.array([np.nan if t is None else t for t in thetas], float)}
+    R.save_npz(out, volume, counts, edges, meta=meta)
+    s = R.summary(volume, counts, edges, scan_names, thetas)
+    _write_json(out.with_suffix(".summary.json"), s)
+    qr = s["q_ranges"]
+    click.echo(f"\nRSM {tuple(volume.shape)}  nonzero={s['nonzero_voxels']} "
+               f"({100*s['fill_fraction']:.1f}%)  ΣI={s['total_intensity']:.3g}  "
+               f"peak={s['peak_voxel_intensity']:.3g}")
+    click.echo(f"  qx {qr['qx'][0]:.2f}..{qr['qx'][1]:.2f}  "
+               f"qy {qr['qy'][0]:.2f}..{qr['qy'][1]:.2f}  "
+               f"qz {qr['qz'][0]:.2f}..{qr['qz'][1]:.2f} 1/Å")
+    click.echo(f"Wrote:\n  {out}\n  {out.with_suffix('.summary.json')}")
+
+
 def _resolve_scan_list(scans, all_scans, root):
     if scans:
         return [DataManager.scan_name_of(s.strip()) for s in scans.split(',') if s.strip()]

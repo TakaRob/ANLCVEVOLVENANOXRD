@@ -15,7 +15,6 @@
 |---|---|
 | Beamline | ISN 26-ID-C, APS |
 | Energy | 15 keV |
-| Detector distance | 6.16 m |
 | Pixel size | 75 µm |
 | Detector crop / frame | 1062 × 1028 (full); 256 × 256 (ROI crop) |
 | Reflections (2θ bands) | PbI₂, (001), (011), (111), (002), ITO, (012), (112) |

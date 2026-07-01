@@ -22,11 +22,11 @@ dependencies = [
     "pyyaml",
 ]
 
-# pyFAI is only needed for the (deferred) .poni -> tth conversion. Keep it
-# optional so the core app installs light; the Convert-.poni button degrades
-# gracefully when it is absent.
+# Heavy geometry deps are optional so the core app installs light and degrades
+# gracefully (the Convert-.poni button and `qspace --poni` warn when absent).
 [project.optional-dependencies]
-poni = ["pyFAI"]            # .poni → tth conversion (core/geometry.py)
+poni = ["pyFAI"]            # .poni → tth conversion (core/geometry.py) + qspace --poni tilt path
+qspace = ["xrayutilities"]  # pixel → 3D reciprocal-space (q) mapping (core/qspace.py; see QSPACE.md)
 notebook = ["ipykernel", "jupyter"]
 
 [project.scripts]

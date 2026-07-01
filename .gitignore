@@ -86,3 +86,6 @@ data/bins/
 Thumbs.db
 .vscode/
 .idea/
+
+# ── Generated report artifact (regenerated from TakajiReport.md) ──
+TakajiReport.docx

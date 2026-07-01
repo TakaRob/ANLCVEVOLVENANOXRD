@@ -1,0 +1,18 @@
+# EXAMPLE pyFAI .poni for the ISN 26-ID-C nano-XRD detector (15 keV, 75 µm px,
+# 1062x1028). This is a TEMPLATE, not a calibration: the Distance/Poni1/Poni2
+# were recovered by a flat-detector fit of tth.tiff, and Rot1/Rot2/Rot3 are 0
+# (NO tilt). Feeding it to `xrd-app qspace --poni` therefore reproduces the
+# no-poni flat path. Replace it with a REAL .poni from pyFAI-calib on a
+# calibrant (LaB6 / CeO2) to get tilt-accurate Q directions. See docs/QSPACE.md.
+#
+# Nota: C-Order, 1 refers to the Y axis, 2 to the X axis
+poni_version: 2.1
+Detector: Detector
+Detector_config: {"pixel1": 7.5e-05, "pixel2": 7.5e-05, "orientation": 3, "max_shape": [1062, 1028]}
+Distance: 0.3348839251012993
+Poni1: 0.058890717990460154
+Poni2: 0.10455814050698557
+Rot1: 0.0
+Rot2: 0.0
+Rot3: 0.0
+Wavelength: 8.265613228880018e-11
