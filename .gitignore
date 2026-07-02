@@ -15,6 +15,7 @@ dist/
 
 # ── Nested / external repositories (cloned separately) ──
 /CVEvolve/
+/mictools/
 
 # ── Raw & bulk data: LINK at runtime, never commit ──
 /raw_scans/

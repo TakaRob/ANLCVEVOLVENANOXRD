@@ -550,13 +550,15 @@ def scan_detect(scans_dir, scan_file, deep, root):
 @click.option('--rawgrid', is_flag=True,
               help='Bypass (X,Y) de-skew: use the legacy serpentine X-only grid.')
 @click.option('--deskew-method',
-              type=click.Choice(['commanded', 'faithful', 'faithful_native', 'perrow_offset']),
-              default='commanded',
-              help='Column assignment for file-per-row scans: commanded (default, '
-                   'align by rank), faithful (snap columns to true Y on a square-pixel '
-                   'lattice — to-scale, de-skewed, best for viewing), faithful_native '
-                   '(snap to true Y at native frame density — de-skewed with ~1 frame/'
-                   'cell, best for detection/recall), or perrow_offset (DEPRECATED).')
+              type=click.Choice(['faithful', 'faithful_native', 'commanded', 'perrow_offset']),
+              default='faithful',
+              help='Column assignment from the real (X, Y) coordinate CSV: faithful '
+                   '(DEFAULT — snap columns to true Y on a square-pixel lattice: '
+                   'to-scale, de-skewed, best for viewing), faithful_native (snap to '
+                   'true Y at native frame density — de-skewed with ~1 frame/cell, best '
+                   'for detection/recall), commanded (align by rank), or perrow_offset '
+                   '(DEPRECATED). For skew-free true-(X,Y) territories use '
+                   "'xrd-app territory-grid' instead.")
 @click.option('--variant', default=None,
               help='Tag appended to default output names (e.g. "faithful") so a '
                    'coordinate variant sits alongside the default instead of overwriting it.')
@@ -565,16 +567,19 @@ def scan_detect(scans_dir, scan_file, deep, root):
 def grid(bin_size, scan, shape, xrd_dir, positions, rawgrid, deskew_method, variant, output, root):
     """Generate grid_mapping.json assigning raw frames to a spatial bin grid.
 
-    Coordinate source (auto-selected, recorded in the output JSON):
-    a real position CSV → de-skewed ``positions_xy`` (or ``--rawgrid`` for the
-    legacy serpentine X-only grid); no CSV → reconstructed from the one-file-per-
-    row layout (``file_per_row``); ``--shape`` → ``synthetic`` raster.
+    The grid is built from the **real (X, Y) coordinate CSV** — required. When
+    no real CSV exists one is created automatically from the **real SOCKETSERVER
+    interferometry** stream (see 'xrd-app create-positions'). If neither a real
+    CSV nor a SOCKETSERVER stream is available this command **hard-fails** rather
+    than silently reconstructing the grid from the one-file-per-row layout (that
+    silent fallback is what skewed rocking 203-214). The chosen ``deskew_method``
+    (default ``faithful``) and the positions provenance (``positions_csv`` /
+    ``positions_real``) are recorded in the output JSON, and ``bin`` refuses any
+    mapping whose ``positions_real`` is not true.
 
-    When no position CSV exists, one is created automatically: first from the
-    **real SOCKETSERVER interferometry** stream if present (see
-    'xrd-app create-positions'), otherwise **recreated** from the file-per-row
-    layout (so downstream never zero-pads positions). Pass ``--shape`` to
-    synthesize a raster instead.
+    The only opt-in bypass is ``--shape ROWSxCOLS``, which synthesizes a raster
+    with no positions; its output is flagged ``positions_real=false`` and cannot
+    be binned.
     """
     from .core import io
     dm = DataManager(root, scan=scan)
@@ -593,11 +598,12 @@ def grid(bin_size, scan, shape, xrd_dir, positions, rawgrid, deskew_method, vari
     n_cols = _parse_shape_cols(shape)
     pos_real = Path(pos).exists() and not io.is_recreated_csv(pos)
 
-    # When we don't have a real position CSV (and weren't asked to synthesize a
-    # raster shape), build one from the REAL stage positions in the SOCKETSERVER
-    # interferometry stream. With no interferometry data we pass no CSV and let
-    # generate_grid_mapping reconstruct the grid straight from the one-file-per-
-    # row layout (exact for these scans) — no synthetic lattice is fabricated.
+    # The real coordinate CSV is REQUIRED. When we don't have one (and weren't
+    # asked to synthesize a raster shape), build it from the REAL stage positions
+    # in the SOCKETSERVER interferometry stream. If there is no interferometry
+    # stream — or the build fails — we HARD-FAIL instead of silently
+    # reconstructing the grid from the one-file-per-row layout: that silent
+    # fallback is exactly what skewed rocking 203-214.
     if not pos_real and n_cols is None:
         from .core import positions as P
         sdir = dm.socketserver_dir(scan=scan)
@@ -609,11 +615,17 @@ def grid(bin_size, scan, shape, xrd_dir, positions, rawgrid, deskew_method, vari
                 P.build_positions_csv(sdir, dest, scan_number=scan_no, log=click.echo)
                 pos, pos_real = dest, True
             except (FileNotFoundError, ValueError) as e:
-                click.echo(f"  SOCKETSERVER positions failed ({e}); "
-                           "using the one-file-per-row layout for the grid.")
+                click.echo(f"Error: could not build real positions from the "
+                           f"SOCKETSERVER stream ({e}).")
+                raise SystemExit(1)
         else:
-            click.echo(f"No SOCKETSERVER interferometry at {sdir} — using the "
-                       "one-file-per-row layout for the grid.")
+            click.echo("Error: no real coordinate CSV and no SOCKETSERVER "
+                       f"interferometry at {sdir}.")
+            click.echo("  The grid must be built from true (X, Y) positions. "
+                       "Provide a real --positions CSV, run 'xrd-app "
+                       "create-positions', or pass --shape ROWSxCOLS to "
+                       "synthesize an (unbinnable) raster.")
+            raise SystemExit(1)
 
     io.generate_grid_mapping(xdir, pos if pos_real else None, bin_size,
                              scan_number=scan_no, output=out, n_cols=n_cols,
@@ -751,7 +763,22 @@ def bin(bin_size, scan, grid_mapping, variant, output, compression, root):
     _require(gm, "grid mapping (run 'xrd-app grid' first)")
     out.parent.mkdir(parents=True, exist_ok=True)
 
-    io.build_bins(gm, out, bin_size=bin_size, compression=compression, log=click.echo)
+    # Require the grid to have been built from a REAL (X, Y) coordinate CSV.
+    # Layout-reconstructed (file_per_row) or synthetic grids — and any legacy
+    # mapping predating this provenance field — are rejected so we never bin on
+    # the skew that mis-binned rocking 203-214.
+    gm_data = io.load_grid_mapping(gm)
+    if not gm_data.get("positions_real", False):
+        src = gm_data.get("coordinate_source", "unknown")
+        click.echo(f"Error: {gm} was not built from a real coordinate CSV "
+                   f"(coordinate_source={src}, positions_real="
+                   f"{gm_data.get('positions_real', False)}).")
+        click.echo("  Binning requires a grid built from true (X, Y) positions. "
+                   "Rebuild it with 'xrd-app grid' (now requires a real "
+                   "positions.csv / SOCKETSERVER stream), then re-run bin.")
+        raise SystemExit(1)
+
+    io.build_bins(gm_data, out, bin_size=bin_size, compression=compression, log=click.echo)
     click.echo(f"Wrote bins -> {out}")
 
 
@@ -1564,6 +1591,111 @@ def rsm(scans, in_dir, nbins, min_intensity, subtract_median, out_path, root):
                f"qy {qr['qy'][0]:.2f}..{qr['qy'][1]:.2f}  "
                f"qz {qr['qz'][0]:.2f}..{qr['qz'][1]:.2f} 1/Å")
     click.echo(f"Wrote:\n  {out}\n  {out.with_suffix('.summary.json')}")
+
+
+# ─────────────────────────────────────────────────────────────────────
+# xrf — ME7 XSPRESS3 fluorescence → per-element spatial maps on the grid
+# ─────────────────────────────────────────────────────────────────────
+@main.command()
+@click.option('--scans', help='Comma-separated scans (default: config scan)')
+@click.option('--bin-size', type=int, default=3, help='Grid bin size to map XRF onto')
+@click.option('--me7-dir', help='ME7 directory (defaults to <scan raw>/ME7)')
+@click.option('--config', 'config_path', help='XRF elements/calibration JSON (defaults to Metadata)')
+@click.option('--no-deadtime', is_flag=True, help='Disable XSPRESS3 deadtime correction')
+@click.option('--refine-roi', is_flag=True,
+              help='Data-driven ROI: center windows on observed peaks in the grand-sum spectrum')
+@click.option('--grid-mapping', help='Grid mapping JSON (defaults to resolved)')
+@click.option('--out-dir', default=None, help='Output dir (default: per-scan Metadata dir)')
+@click.option('--root', default='.', help='Project root directory')
+def xrf(scans, bin_size, me7_dir, config_path, no_deadtime, refine_roi, grid_mapping, out_dir, root):
+    """ME7 (XSPRESS3) fluorescence → per-element spatial maps on the XRD grid.
+
+    For each scan: read the ME7 MCA spectra, deadtime-correct + sum the enabled
+    channels, integrate per-element energy ROIs (from the config JSON), and
+    accumulate onto the same de-skewed bins as the XRD via the grid mapping.
+    Writes ``<scan>_xrf.npz`` (+ .summary.json). Elements/calibration come from a
+    small JSON (auto-created with perovskite defaults on first run).
+    """
+    import json
+    from .core import xrf as xrf_core
+
+    # resolve / seed the config JSON (project-level default)
+    cfg_default = ProjectConfig.load(root)  # noqa: F841 (ensures project exists)
+    scan_list = ([DataManager.scan_name_of(s.strip()) for s in scans.split(',') if s.strip()]
+                 if scans else None)
+    if not scan_list:
+        one = DataManager(root).scan_name
+        if not one:
+            click.echo("Error: no scan given. Use --scans or set a config scan.")
+            raise SystemExit(1)
+        scan_list = [one]
+
+    for scan in scan_list:
+        dm = DataManager(root, scan=scan)
+        # config: explicit → per-scan → project (seed project default if none)
+        if config_path:
+            cfg_file = Path(config_path)
+        else:
+            per_scan = dm.metadata_scan_dir(scan) / "xrf_elements.json"
+            proj = dm.metadata_dir / "xrf_elements.json"
+            cfg_file = per_scan if per_scan.exists() else proj
+            if not cfg_file.exists():
+                xrf_core.write_config(xrf_core.default_config(), proj)
+                cfg_file = proj
+                click.echo(f"[xrf] seeded default element config -> {proj}")
+        cfg = xrf_core.read_config(cfg_file)
+        if no_deadtime:
+            cfg["deadtime_correction"] = False
+
+        # ME7 dir: override → <raw scan>/ME7
+        if me7_dir:
+            me7 = Path(me7_dir)
+        else:
+            xrd = dm.xrd_frames_dir(scan=scan)
+            me7 = (xrd.parent if xrd.name.upper() == "XRD" else xrd) / "ME7"
+        _require(me7, f"ME7 directory for {scan}")
+
+        gm_path = Path(grid_mapping) if grid_mapping else dm.grid_mapping(bin_size=bin_size, scan=scan)
+        _require(gm_path, "grid mapping (run 'xrd-app grid' first)")
+        with open(gm_path) as f:
+            gm = json.load(f)
+
+        click.echo(f"[xrf] {scan}: ME7={me7.name}  channels={cfg['channels']}  "
+                   f"deadtime={cfg['deadtime_correction']}  "
+                   f"cal={cfg['calibration']['ev_per_bin']} eV/bin")
+
+        refine_diag = None
+        if refine_roi:
+            click.echo("[xrf] refining ROIs from the data-driven grand-sum spectrum…")
+            cfg, refine_diag = xrf_core.refine_rois(me7, cfg, log=click.echo)
+            click.echo(f"  found {refine_diag['n_peaks_found']} peaks; line → observed:")
+            for d in refine_diag["elements"]:
+                if d["matched"]:
+                    click.echo(f"    {d['name']:6} {d['line_ev']:7.0f} → "
+                               f"{d['observed_ev']:7.0f} eV  (Δ{d['shift_ev']:+.0f})")
+                else:
+                    click.echo(f"    {d['name']:6} {d['line_ev']:7.0f} eV → no peak matched "
+                               f"(using theoretical)")
+            if refine_diag["overlaps"]:
+                pairs = ", ".join(f"{a}/{b}" for a, b in refine_diag["overlaps"])
+                click.echo(f"  ⚠ ROI overlap(s): {pairs} — tighten window_ev to reduce crosstalk")
+
+        result = xrf_core.element_maps(me7, gm, cfg, log=click.echo)
+
+        out_base = Path(out_dir) if out_dir else dm.metadata_scan_dir(scan)
+        if out_dir and not out_base.is_absolute():
+            out_base = Path(root) / out_base
+        npz = out_base / f"{scan}_xrf.npz"
+        xrf_core.save_npz(npz, result)
+        smry = xrf_core.summary(result)
+        if refine_diag is not None:
+            smry["refinement"] = refine_diag
+        _write_json(npz.with_suffix(".summary.json"), smry)
+
+        nr, nc = result["shape"]
+        tot = {n: f"{result['maps'][n].sum():.3g}" for n in result["elements"]}
+        click.echo(f"  {scan}: grid {nr}x{nc}  dropped={result['dropped']}  "
+                   f"totals={tot} -> {npz.name}")
 
 
 def _resolve_scan_list(scans, all_scans, root):

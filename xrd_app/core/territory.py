@@ -272,6 +272,10 @@ def build_territory_mapping(
     result = {
         "bin_size": 1,                       # nominal; territories override geometry
         "coordinate_source": "territory_xy",
+        # Territorial binning always requires a real (X, Y) CSV (enforced above),
+        # so this mapping is real-positions by construction — `bin` accepts it.
+        "positions_csv": str(pos_csv),
+        "positions_real": True,
         "target_size": target_size,
         "step": step,
         "n_rows": n_rows,

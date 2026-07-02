@@ -1562,8 +1562,6 @@ class FeatureViewer(QMainWindow):
 
     def _bins_built_text(self):
         """Whether the binned HDF5 for the current bin exists, and when built."""
-        if self._bin_size == 1:
-            return "1×1: raw frames (no binning)"
         try:
             p = _DM.bins_h5(self._bin_size) if _DM is not None else None
         except Exception:
@@ -1572,6 +1570,8 @@ class FeatureViewer(QMainWindow):
             import datetime
             ts = datetime.datetime.fromtimestamp(os.path.getmtime(p))
             return f"bins {self._bin_size}×{self._bin_size} built {ts:%Y-%m-%d %H:%M}"
+        if self._bin_size == 1:
+            return "1×1: raw frames (per-frame, no binning)"
         return f"{self._bin_size}×{self._bin_size}: raw frames (slower — build bins to speed up)"
 
     def _update_scan_status(self):
@@ -1590,8 +1590,10 @@ class FeatureViewer(QMainWindow):
         except ValueError:
             bin_size = self._bin_size
         # No binned file → raw frames. Confirm on a second Load press first.
+        # A built 1×1 h5 counts too, so a bins-only project (raw deleted) loads
+        # 1×1 straight from the h5 without arming the raw-frames warning.
         h5 = _DM.bins_h5(bin_size, scan=scan) if _DM is not None else None
-        has_h5 = bin_size != 1 and h5 and os.path.exists(h5)
+        has_h5 = h5 and os.path.exists(h5)
         if not has_h5 and self._raw_armed != (scan, bin_size):
             self._raw_armed = (scan, bin_size)
             self.scan_status.setText(

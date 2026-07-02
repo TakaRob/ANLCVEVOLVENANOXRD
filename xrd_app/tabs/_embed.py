@@ -49,17 +49,17 @@ def bins_status_text(dm, bin_size, scan=None) -> str:
     """
     if dm is None:
         return ""
-    if bin_size == 1:
-        return "1×1: raw frames (per-frame, no binning)"
     try:
         path = dm.binned_h5(bin_size, scan=scan)
     except Exception:
         path = None
-    if not path:
-        return f"{bin_size}×{bin_size}: raw frames (no binned file)"
-    if os.path.exists(path):
+    if path and os.path.exists(path):
         ts = datetime.datetime.fromtimestamp(Path(path).stat().st_mtime)
         return f"{bin_size}×{bin_size}: built {ts:%Y-%m-%d %H:%M}"
+    if bin_size == 1:
+        return "1×1: raw frames (per-frame, no binning)"
+    if not path:
+        return f"{bin_size}×{bin_size}: raw frames (no binned file)"
     return f"{bin_size}×{bin_size}: not built — run Programs → Create bins"
 
 

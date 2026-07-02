@@ -816,6 +816,12 @@ def generate_grid_mapping(
     result = {
         "bin_size": bin_size,
         "coordinate_source": coordinate_source,
+        # Positions provenance — whether this grid was built from a REAL (X, Y)
+        # coordinate CSV (vs the file-per-row layout / a synthetic raster). `bin`
+        # requires positions_real to be true, so a layout-reconstructed or
+        # synthesized grid can never be silently binned.
+        "positions_csv": str(pos_csv) if pos_csv is not None else None,
+        "positions_real": bool(have_positions),
         "n_rows": n_rows,
         "n_cols": n_cols,
         "n_bin_rows": n_bin_rows,
@@ -1147,13 +1153,14 @@ def open_bin_source(dm, bin_size, scan=None, n_cols=None, grid_mapping=None) -> 
     """Open the best per-bin image source for a scan + bin size.
 
     Uses the prebuilt ``xrd_NxN_bins.h5`` when it exists (fast); otherwise falls
-    back to summing raw frames on demand (``is_raw`` True, slower). 1×1 has no
-    binned file by convention and always uses the raw source. ``grid_mapping``
-    overrides which grid the raw source bins against (so a feature catalog built
-    on a non-default grid maps its bins correctly).
+    back to summing raw frames on demand (``is_raw`` True, slower). This includes
+    1×1: a built ``xrd_1x1_bins.h5`` (one frame per bin) is used when present, so
+    a project stays fully browsable after its raw frames have been deleted to
+    save disk. Only when no binned file exists do we need the raw frames.
+    ``grid_mapping`` overrides which grid the raw source bins against (so a
+    feature catalog built on a non-default grid maps its bins correctly).
     """
-    if bin_size != 1:
-        h5 = dm.bins_h5(bin_size, scan=scan)
-        if h5 and os.path.exists(h5):
-            return _H5Source(h5)
+    h5 = dm.bins_h5(bin_size, scan=scan)
+    if h5 and os.path.exists(h5):
+        return _H5Source(h5)
     return _RawSource(dm, bin_size, scan=scan, n_cols=n_cols, grid_mapping=grid_mapping)

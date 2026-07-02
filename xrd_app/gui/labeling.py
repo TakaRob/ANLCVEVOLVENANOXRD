@@ -909,7 +909,10 @@ class LabelingTool(QMainWindow):
     def _load_bin_data_for_size(self, bin_size):
         """Load bin keys and mapping for the given bin size."""
         self.bin_size = bin_size
-        resolved = self.dm.bins_h5(bin_size) if bin_size != 1 else None
+        # Prefer a built HDF5 for any bin size, including 1×1 (one frame per
+        # bin). A bins-only project (raw frames deleted to save disk) then still
+        # labels off the h5; we only touch raw frames when no binned file exists.
+        resolved = self.dm.bins_h5(bin_size)
         self.bins_h5_path = str(resolved) if resolved else None
 
         raw_keys = None
