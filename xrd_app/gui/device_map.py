@@ -22,7 +22,7 @@ import pyqtgraph as pg
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QCheckBox, QPushButton, QGroupBox, QComboBox, QSplitter,
-    QSizePolicy, QSpinBox,
+    QSizePolicy, QSpinBox, QScrollArea,
 )
 from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtGui import QPainter, QColor, QBrush
@@ -603,12 +603,21 @@ class DeviceMapWindow(QMainWindow):
         self.arc_plot.setMouseEnabled(False, False)
         rl.addWidget(self.arc_plot)
 
+        # Feature/bin details. At 1×1 this text can get long; keep it inside a
+        # scroll area so it fills the leftover sidebar height and scrolls, rather
+        # than inflating the panel's minimum height and stretching the whole view.
         self.info_label = QLabel("")
         self.info_label.setWordWrap(True)
+        self.info_label.setAlignment(Qt.AlignTop)
         self.info_label.setStyleSheet("QLabel { font-size: 10pt; padding: 6px; }")
-        rl.addWidget(self.info_label)
+        self._info_scroll = QScrollArea()
+        self._info_scroll.setWidgetResizable(True)
+        self._info_scroll.setWidget(self.info_label)
+        self._info_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self._info_scroll.setMinimumHeight(80)
+        self._info_scroll.setFrameShape(QScrollArea.NoFrame)
+        rl.addWidget(self._info_scroll, 1)  # stretch: take remaining space, scroll inside
 
-        rl.addStretch()
         splitter.addWidget(right)
         splitter.setSizes([950, 450])
 

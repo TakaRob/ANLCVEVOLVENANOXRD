@@ -1698,6 +1698,140 @@ def xrf(scans, bin_size, me7_dir, config_path, no_deadtime, refine_roi, grid_map
                    f"totals={tot} -> {npz.name}")
 
 
+# ─────────────────────────────────────────────────────────────────────
+# studies — catalog / run whole rocking-study result sets
+# ─────────────────────────────────────────────────────────────────────
+@main.command(name='list-studies')
+@click.option('--root', default='.', help='Project root directory')
+def list_studies(root):
+    """List the rocking-study result sets discovered under the project.
+
+    A *study* is a directory carrying the cross-scan artifacts
+    (rsm.npz / rocking_curves.csv / combined_device.npz / tracks.json /
+    features.csv). Merges any names/notes from ``studies.json``. This is what the
+    Reciprocal-Space and Rocking-Study tabs offer in their study selector.
+    """
+    from .core import studies
+    found = studies.list_studies(root)
+    if not found:
+        click.echo("No studies found. Run 'xrd-app run-study' (or the "
+                   "aggregate→track→rocking→predict→combined-device chain).")
+        return
+    click.echo(f"{len(found)} stud{'y' if len(found) == 1 else 'ies'} under {root}:\n")
+    for e in found:
+        click.echo(f"  {e['name']}  [{e['path']}]")
+        desc = studies.describe(e)
+        if desc:
+            click.echo(f"      {desc}")
+        if e.get("notes"):
+            click.echo(f"      note: {e['notes']}")
+
+
+@main.command(name='register-study')
+@click.argument('path')
+@click.option('--name', default=None, help='Human-friendly study name (default: dir name)')
+@click.option('--notes', default=None, help='Free-text note stored in studies.json')
+@click.option('--root', default='.', help='Project root directory')
+def register_study_cmd(path, name, notes, root):
+    """Record a study directory in ``studies.json`` (name + notes overlay).
+
+    Discovery already lists any directory with artifacts; this just attaches a
+    friendly name/notes so it reads nicely in the study selector.
+    """
+    from datetime import datetime
+    from .core import studies
+    p = Path(path)
+    if not p.is_absolute():
+        p = Path(root) / p
+    if not studies.is_study_dir(p):
+        click.echo(f"Warning: {p} has no study artifacts yet "
+                   f"({', '.join(studies.PRIMARY_ARTIFACTS)}).")
+    entry = studies.register_study(
+        root, p, name=name, notes=notes,
+        created=datetime.now().isoformat(timespec="seconds"))
+    click.echo(f"Registered '{entry.get('name', p.name)}' -> {studies.registry_path(root)}")
+
+
+@main.command(name='run-study')
+@click.option('--scans', help='Comma-separated scans (default: all in Labels/)')
+@click.option('--bin-size', type=int, default=3, help='Bin size to analyze (default: 3)')
+@click.option('--out', 'out_dir', default='Study', help='Study output directory (default: Study/)')
+@click.option('--name', 'study_name', default=None, help='Study name for studies.json (default: dir name)')
+@click.option('--notes', default=None, help='Free-text note for studies.json')
+@click.option('--match-tol', type=float, default=2.0, help='Track match tolerance (bins)')
+@click.option('--repeat-pair', default='203,214', help='Same-orientation scan pair for the noise floor')
+@click.option('--with-rsm', is_flag=True,
+              help='Also build the 3D reciprocal-space map (runs qspace + rsm; needs xrd-app[qspace])')
+@click.option('--rsm-bins', type=int, default=128, help='Voxels per axis for --with-rsm')
+@click.option('--root', default='.', help='Project root directory')
+@click.pass_context
+def run_study(ctx, scans, bin_size, out_dir, study_name, notes, match_tol,
+              repeat_pair, with_rsm, rsm_bins, root):
+    """Run the whole rocking study in one command, then register it.
+
+    Chains aggregate → track → rocking → predict → combined-device (and, with
+    --with-rsm, qspace → rsm) into ``--out``, then writes a ``studies.json``
+    entry so the analysis shows up, named, in the GUI study selectors. This is
+    the one-button version of the per-θ-series pipeline shell script.
+    """
+    from datetime import datetime
+    from .core import studies
+
+    out = Path(out_dir)
+    if not out.is_absolute():
+        out = Path(root) / out
+    out.mkdir(parents=True, exist_ok=True)
+    tracks_json = f"{out_dir}/tracks.json"
+    fails = []
+
+    def _step(label, cmd, **kw):
+        click.echo(f"\n─── {label} ─────────────────────────────────────────")
+        try:
+            ctx.invoke(cmd, **kw)
+        except SystemExit as e:
+            if e.code not in (0, None):
+                click.echo(f"[{label}] FAILED (exit {e.code})")
+                fails.append(label)
+        except Exception as e:  # keep the chain going; report at the end
+            click.echo(f"[{label}] ERROR: {type(e).__name__}: {e}")
+            fails.append(label)
+
+    _step("aggregate", aggregate, scans=scans, bin_size=bin_size,
+          out_dir=out_dir, root=root)
+    _step("track", track, scans=scans, bin_size=bin_size, match_tol=match_tol,
+          out_path=tracks_json, root=root)
+    _step("rocking", rocking, tracks_path=tracks_json,
+          out_path=f"{out_dir}/rocking_curves.csv", root=root)
+    _step("predict", predict, tracks_path=tracks_json, scans=scans,
+          bin_size=bin_size, match_tol=match_tol,
+          rocking_path=f"{out_dir}/rocking_curves.csv", repeat_pair=repeat_pair,
+          out_path=f"{out_dir}/prediction_report.md", root=root)
+    _step("combined-device", combined_device,
+          device_map_path=f"{out_dir}/device_map.csv", tracks_path=tracks_json,
+          out_path=f"{out_dir}/combined_device.npz", root=root)
+
+    if with_rsm:
+        _step("qspace", qspace, scans=scans, bin_size=bin_size,
+              out_dir=f"{out_dir}/qspace", root=root)
+        _step("rsm", rsm, in_dir=f"{out_dir}/qspace", nbins=rsm_bins,
+              out_path=f"{out_dir}/rsm.npz", root=root)
+
+    # Register whatever got produced so the GUI can select it.
+    entry = studies.register_study(
+        root, out, name=study_name, notes=notes,
+        created=datetime.now().isoformat(timespec="seconds"),
+        extra={"bin_size": bin_size})
+    rel = studies._rel(root, out)
+    desc = next((studies.describe(e) for e in studies.list_studies(root)
+                 if e["path"] == rel), "")
+    click.echo(f"\nStudy '{entry.get('name', out.name)}' registered  {desc}")
+    click.echo(f"  {out}")
+    if fails:
+        click.echo(f"  incomplete steps: {', '.join(fails)}")
+        raise SystemExit(1)
+    click.echo("  all steps OK.")
+
+
 def _resolve_scan_list(scans, all_scans, root):
     if scans:
         return [DataManager.scan_name_of(s.strip()) for s in scans.split(',') if s.strip()]

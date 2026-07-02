@@ -102,6 +102,59 @@ def centers(edges: Sequence[np.ndarray]) -> List[np.ndarray]:
     return [0.5 * (e[:-1] + e[1:]) for e in edges]
 
 
+# ─────────────────────────────────────────────────────────────────────
+# 3D-view geometry (pure; drawing lives in gui/rsm_view.py)
+# ─────────────────────────────────────────────────────────────────────
+def reflection_shells(reflections, energy_ev=None) -> List[tuple]:
+    """Reciprocal-space shell radius ``|Q|`` for each reflection.
+
+    Each reflection ``{"name", "two_theta"}`` maps to its Debye–Scherrer shell
+    radius ``|Q| = 4π·sin(2θ/2)/λ`` (the same relation as
+    :func:`core.qspace.qmagnitude_map`, reused here). Returns a list of
+    ``(name, q_mag)`` sorted by ``q_mag``; reflections with a non-finite/absent
+    ``two_theta`` are skipped.
+    """
+    from . import qspace
+    ev = qspace.DEFAULT_ENERGY_EV if energy_ev is None else float(energy_ev)
+    lam = qspace.wavelength_angstrom(ev)
+    out = []
+    for r in reflections:
+        tth = r.get("two_theta") if isinstance(r, dict) else None
+        if tth is None:
+            continue
+        try:
+            q = float(qspace.qmagnitude_map(np.array([float(tth)]), lam)[0])
+        except (TypeError, ValueError):
+            continue
+        if np.isfinite(q):
+            out.append((str(r.get("name", "")), q))
+    return sorted(out, key=lambda t: t[1])
+
+
+def ring_points(radius: float, n: int = 180, plane: str = "xy",
+                offset=(0.0, 0.0, 0.0)) -> np.ndarray:
+    """Vertices of a circle of ``radius`` in ``plane``, as an ``(n, 3)`` array.
+
+    ``plane`` is ``"xy"``, ``"xz"``, or ``"yz"`` (the two axes the circle lies
+    in); the third coordinate is fixed by ``offset``. The ring is closed
+    (last vertex == first) so it draws as a continuous outline. Used for both
+    reflection shells and per-scan rings in the 3D view.
+    """
+    t = np.linspace(0.0, 2.0 * np.pi, int(n), endpoint=True)
+    c, s = radius * np.cos(t), radius * np.sin(t)
+    ox, oy, oz = (float(o) for o in offset)
+    pts = np.zeros((t.size, 3), dtype=np.float64)
+    if plane == "xy":
+        pts[:, 0], pts[:, 1], pts[:, 2] = c + ox, s + oy, oz
+    elif plane == "xz":
+        pts[:, 0], pts[:, 2], pts[:, 1] = c + ox, s + oz, oy
+    elif plane == "yz":
+        pts[:, 1], pts[:, 2], pts[:, 0] = c + oy, s + oz, ox
+    else:
+        raise ValueError(f"plane must be xy/xz/yz, got {plane!r}")
+    return pts
+
+
 def projections(volume: np.ndarray) -> dict:
     """Max-intensity 2D projections along each axis (quick 2D views of the RSM)."""
     return {

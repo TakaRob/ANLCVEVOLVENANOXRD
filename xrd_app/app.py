@@ -25,7 +25,12 @@ from .config import DataManager
 from .tabs._embed import placeholder
 
 # Built-in tab modules (module path under xrd_app.tabs).
-_BUILTIN_TABS = ["setup", "programs", "view_label", "shape_verify", "device", "territory", "orientation", "rsm"]
+# "territory" is intentionally not a tab: the skew-free territorial map opens as a
+# popup from the Device View when a scan has territorial artifacts (see
+# tabs/_embed.LineageCatalogTab territory_popup). It remains runnable standalone
+# via `python -m xrd_app.tabs.territory`.
+_BUILTIN_TABS = ["setup", "programs", "view_label", "shape_verify", "device",
+                 "orientation", "rocking_study", "rsm"]
 _BIN_SIZES = [1, 3, 4, 5]
 
 

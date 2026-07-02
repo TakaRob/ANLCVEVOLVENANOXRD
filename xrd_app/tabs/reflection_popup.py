@@ -17,8 +17,9 @@ import pyqtgraph as pg
 
 from PyQt5.QtWidgets import (
     QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog,
-    QDoubleSpinBox, QFileDialog, QHBoxLayout, QHeaderView, QLabel, QMessageBox,
-    QPushButton, QSpinBox, QTableWidget, QTableWidgetItem, QVBoxLayout,
+    QDoubleSpinBox, QFileDialog, QHBoxLayout, QHeaderView, QLabel, QLayout,
+    QMessageBox, QPushButton, QSizePolicy, QSpinBox, QTableWidget,
+    QTableWidgetItem, QVBoxLayout,
 )
 
 from ..config import DataManager
@@ -83,6 +84,10 @@ class ReflectionDialog(QDialog):
         self.setWindowTitle(f"Reflections — {self.dm.scan_name or project_root}")
         self.resize(1200, 760)
         lay = QVBoxLayout(self)
+        # Keep the dialog at its own size: don't let the figures' size hints grow
+        # it when a histogram/image is computed or loaded (the figures fit inside
+        # the dialog rather than the dialog stretching to fit them).
+        lay.setSizeConstraint(QLayout.SetNoConstraint)
 
         # ---- scan selector (top-left, like the main GUI) ---------------
         trow = QHBoxLayout()
@@ -99,6 +104,10 @@ class ReflectionDialog(QDialog):
         self.img_view = pg.ImageView()
         self.img_view.ui.roiBtn.hide()
         self.img_view.ui.menuBtn.hide()
+        # Ignored size policy + a modest minimum so the figure fills the space it
+        # is given but never dictates a larger dialog when an image is drawn.
+        self.img_view.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
+        self.img_view.setMinimumSize(320, 320)
         try:
             self.img_view.setColorMap(_get_cmap(self._cmap_name))
         except Exception:
@@ -106,6 +115,8 @@ class ReflectionDialog(QDialog):
         figs.addWidget(self.img_view, 1)
 
         self.hist = pg.PlotWidget()
+        self.hist.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
+        self.hist.setMinimumSize(320, 320)
         self.hist.setBackground("w")
         self.hist.setLabel("bottom", "2θ", units="deg")
         self.hist.setLabel("left", "mean intensity")

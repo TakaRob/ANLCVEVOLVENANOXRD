@@ -117,6 +117,36 @@ def test_load_feature_cloud_reads_csvs_and_theta(tmp_path):
     assert np.isclose(cloud["theta"][0], 20.5)
 
 
+def test_ring_points_radius_and_plane():
+    pts = R.ring_points(2.5, n=64, plane="xy", offset=(0.0, 0.0, 0.7))
+    assert pts.shape == (64, 3)
+    # in-plane radius is exact; the out-of-plane coord is fixed by the offset
+    assert np.allclose(np.hypot(pts[:, 0], pts[:, 1]), 2.5)
+    assert np.allclose(pts[:, 2], 0.7)
+    # closed ring: last vertex == first
+    assert np.allclose(pts[0], pts[-1])
+    # other planes place the constant axis correctly
+    pxz = R.ring_points(1.0, n=32, plane="xz", offset=(0.0, 0.3, 0.0))
+    assert np.allclose(pxz[:, 1], 0.3)
+    assert np.allclose(np.hypot(pxz[:, 0], pxz[:, 2]), 1.0)
+
+
+def test_reflection_shells_monotonic_and_matches_qmagnitude():
+    from xrd_app.core import qspace
+    refls = [{"name": "a", "two_theta": 7.0}, {"name": "b", "two_theta": 15.0},
+             {"name": "bad", "two_theta": None}]
+    shells = R.reflection_shells(refls)
+    # the None-2θ reflection is skipped; results are sorted by |Q|
+    names = [n for n, _q in shells]
+    qs = [q for _n, q in shells]
+    assert names == ["a", "b"]
+    assert qs[0] < qs[1]
+    # |Q| matches the exact qmagnitude relation used elsewhere
+    lam = qspace.wavelength_angstrom(qspace.DEFAULT_ENERGY_EV)
+    expect = float(qspace.qmagnitude_map(np.array([7.0]), lam)[0])
+    assert np.isclose(qs[0], expect)
+
+
 def test_load_qmap_reads_qspace_npz(tmp_path):
     # a qspace-style npz (subset of fields) must load into a QMap
     p = tmp_path / "Scan_0207_qmap.npz"

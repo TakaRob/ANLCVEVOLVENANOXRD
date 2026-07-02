@@ -36,8 +36,8 @@ from PyQt5.QtGui import QBrush, QColor, QPen
 from PyQt5.QtWidgets import (
     QAbstractItemView, QApplication, QComboBox, QGraphicsRectItem, QGridLayout,
     QGroupBox, QHBoxLayout, QLabel, QLayout, QLineEdit, QListWidget,
-    QListWidgetItem, QMainWindow, QMessageBox, QPushButton, QSizePolicy, QSlider,
-    QSpinBox, QSplitter, QVBoxLayout, QWidget, QCheckBox,
+    QListWidgetItem, QMainWindow, QMessageBox, QPushButton, QScrollArea,
+    QSizePolicy, QSlider, QSpinBox, QSplitter, QVBoxLayout, QWidget, QCheckBox,
 )
 
 pg.setConfigOptions(imageAxisOrder="row-major", antialias=True)
@@ -271,11 +271,18 @@ class HeatmapView(pg.GraphicsLayoutWidget):
     def __init__(self):
         super().__init__()
         self.setBackground("#1a1a1a")
-        self.setMinimumSize(300, 300)
-        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        # Small minimum + a size hint that never grows: the pane fits inside
+        # whatever window space it's given rather than pushing the window wider.
+        self.setMinimumSize(200, 200)
+        self.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
         self.plot = self.addPlot(row=0, col=0)
         self.plot.setAspectLocked(True)
         self.plot.invertY(True)            # origin='upper': row 0 at top
+        # Keep auto-range OFF: every render frames the view explicitly via
+        # fit_to_rect(). With auto-range on, adding pixel-sized overlays
+        # (selection markers, the colorbar, 1×1 outlines) re-fits the view each
+        # time → visible jitter and a size-hint that ratchets the window bigger.
+        self.plot.getViewBox().disableAutoRange()
         self.plot.getViewBox().setBackgroundColor("k")
         self.plot.getAxis("bottom").setPen("#888")
         self.plot.getAxis("left").setPen("#888")
@@ -461,12 +468,18 @@ class DetectorView(pg.GraphicsLayoutWidget):
     def __init__(self):
         super().__init__()
         self.setBackground("#1a1a1a")
-        self.setMinimumSize(400, 400)
-        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        # Small minimum + non-growing size hint so the detector pane fits inside
+        # the window instead of forcing it wider (see HeatmapView for the why).
+        self.setMinimumSize(300, 300)
+        self.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
         self.vb = _DragViewBox()
         self.plot = self.addPlot(row=0, col=0, viewBox=self.vb)
         self.plot.setAspectLocked(True)
         self.plot.invertY(True)
+        # Auto-range OFF: show_image() frames the frame explicitly. Otherwise
+        # each overlay we add afterwards (peak circles, feature labels, the 2θ
+        # band) re-fits the view — the source of the jitter / runaway growth.
+        self.vb.disableAutoRange()
         self.vb.setBackgroundColor("k")
         self.plot.getAxis("bottom").setPen("#888")
         self.plot.getAxis("left").setPen("#888")
@@ -500,12 +513,19 @@ class DetectorView(pg.GraphicsLayoutWidget):
     # ── rendering ────────────────────────────────────────────────
     def show_image(self, display, vmin, vmax, cmap_name, reverse=False):
         self.clear_overlays()
+        prev = self._display_data
         self._display_data = display
         cmap = _get_cmap(cmap_name + "_r") if reverse else _get_cmap(cmap_name)
         self.img.setImage(display, autoLevels=False)
         self.img.setLookupTable(cmap.getLookupTable(0.0, 1.0, 256))
         self.img.setLevels((vmin, vmax))
         self.img.setZValue(0)
+        # Frame the full frame explicitly (auto-range is off). Only re-fit when
+        # the image shape changes so panning/zooming a same-size frame (e.g.
+        # stepping through bins) is preserved rather than snapping back.
+        h, w = display.shape[:2]
+        if prev is None or prev.shape[:2] != (h, w):
+            self.vb.setRange(QRectF(0, 0, w, h), padding=0.02)
 
     def clear_image(self):
         self.clear_overlays()
@@ -1124,6 +1144,12 @@ class FeatureViewer(QMainWindow):
         layout = QVBoxLayout(central)
         layout.setContentsMargins(4, 4, 4, 4)
         layout.setSpacing(4)
+        # Don't let the content's minimum size dictate the window size. Embedded
+        # in a tab, a growing content min-hint would ratchet the whole app window
+        # bigger (and it couldn't shrink back); with no constraint the three
+        # panes fit within whatever window space exists — drag the splitters to
+        # rebalance them.
+        layout.setSizeConstraint(QLayout.SetNoConstraint)
 
         self._build_top_bar()
         # Embedded: the bar is lifted into the app header (see header_bar());
@@ -1741,7 +1767,17 @@ class FeatureViewer(QMainWindow):
         self.info_label.setWordWrap(True)
         self.info_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         self.info_label.setStyleSheet("font-family: monospace; font-size: 0.9em;")
-        lay.addWidget(self.info_label)
+        self.info_label.setAlignment(Qt.AlignTop | Qt.AlignLeft)
+        # Cap the info area's height and scroll instead of stretching: in 1×1
+        # view a scan can list many peaks, and an unbounded label would grow the
+        # sidebar (and the whole window) to fit them all.
+        info_scroll = QScrollArea()
+        info_scroll.setWidgetResizable(True)
+        info_scroll.setWidget(self.info_label)
+        info_scroll.setFrameShape(QScrollArea.NoFrame)
+        info_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        info_scroll.setMaximumHeight(240)
+        lay.addWidget(info_scroll)
         parent_layout.addWidget(grp)
 
     def _build_pending_panel(self, parent_layout):

@@ -27,6 +27,7 @@ dependencies = [
 [project.optional-dependencies]
 poni = ["pyFAI"]            # .poni → tth conversion (core/geometry.py) + qspace --poni tilt path
 qspace = ["xrayutilities"]  # pixel → 3D reciprocal-space (q) mapping (core/qspace.py; see QSPACE.md)
+gl = ["PyOpenGL"]           # 3D RSM volume view (gui/rsm_view.py; degrades to 2D + a hint when absent)
 notebook = ["ipykernel", "jupyter"]
 
 [project.scripts]
