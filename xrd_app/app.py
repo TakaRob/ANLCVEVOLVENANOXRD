@@ -30,7 +30,7 @@ from .tabs._embed import placeholder
 # tabs/_embed.LineageCatalogTab territory_popup). It remains runnable standalone
 # via `python -m xrd_app.tabs.territory`.
 _BUILTIN_TABS = ["setup", "programs", "view_label", "shape_verify", "device",
-                 "orientation", "rocking_study", "rsm"]
+                 "hd_device", "orientation", "rocking_study", "rsm"]
 _BIN_SIZES = [1, 3, 4, 5]
 
 

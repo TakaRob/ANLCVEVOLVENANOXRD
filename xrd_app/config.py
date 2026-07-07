@@ -347,6 +347,15 @@ class DataManager:
         tag = f"_{variant}" if variant else ""
         return self.labels_dir(scan) / f"{algo}_shapes_{bin_size}x{bin_size}{tag}.json"
 
+    def hd_map_json(self, algo: str, bin_size: int, scan: object = None,
+                    variant: Optional[str] = None) -> Path:
+        """High-def (1×1) intensity map sampled beneath a binned feature map.
+
+        ``<algo>_hdmap_<NxN>[_<tag>].json`` alongside the shapes catalog it was
+        built from (``bin_size`` is that source feature-map bin, e.g. 3)."""
+        tag = f"_{variant}" if variant else ""
+        return self.labels_dir(scan) / f"{algo}_hdmap_{bin_size}x{bin_size}{tag}.json"
+
     def manual_labels_json(self, scan: object = None) -> Path:
         return self.labels_dir(scan) / "manual_labels.json"
 

@@ -24,8 +24,8 @@ from PyQt5.QtWidgets import (
     QLabel, QCheckBox, QPushButton, QGroupBox, QComboBox, QSplitter,
     QSizePolicy, QSpinBox, QScrollArea,
 )
-from PyQt5.QtCore import Qt, pyqtSignal
-from PyQt5.QtGui import QPainter, QColor, QBrush
+from PyQt5.QtCore import Qt, pyqtSignal, QTimer
+from PyQt5.QtGui import QPainter, QColor, QBrush, QFont
 
 from ..config import DataManager
 from ..core import catalogs
@@ -402,8 +402,15 @@ class DeviceMapWindow(QMainWindow):
         self._highlight_items = []
         self._point_items = []
         self._outline_items = []
+        self._points_state = None      # (chi_range, only_idx) of the last _draw_points
         self._highlighted_idx = None
         self._locked_idx = None
+        # Debounce resizes so the labels re-scale once the drag settles, not on
+        # every intermediate resize event.
+        self._resize_timer = QTimer(self)
+        self._resize_timer.setSingleShot(True)
+        self._resize_timer.setInterval(120)
+        self._resize_timer.timeout.connect(self._relayout_labels)
         self._isolate = True   # clicked feature dims the rest (Photoshop-style)
         self._chi_hist_ref = None
         self._chi_weight = "count"
@@ -839,7 +846,17 @@ class DeviceMapWindow(QMainWindow):
             label=METRIC_ZLABELS.get(self.metric, ""))
         self.glw.addItem(self.colorbar, row=0, col=1)
 
+    def _label_font_pt(self):
+        """Index-label point size, scaled to the plot's on-screen height so labels
+        stay legible on a large window and don't dominate a small one."""
+        h = self.glw.height() or 600
+        return max(8, min(24, int(round(h / 45))))
+
     def _draw_points(self, chi_range, only_idx=None):
+        # Cache args so a window resize can re-lay the labels at the new font size.
+        self._points_state = (chi_range, only_idx)
+        font = QFont()
+        font.setPointSize(self._label_font_pt())
         spots = []
         for i, feat in enumerate(self.features):
             if only_idx is not None and i != only_idx:
@@ -847,14 +864,19 @@ class DeviceMapWindow(QMainWindow):
             ref = feat["reflection"]
             if ref not in self.visible_refs or not _feat_in_chi_range(feat, chi_range):
                 continue
-            c, r = feat["center_col"], feat["center_row"]
+            # Bin (row, col) → pixel *center* (col+0.5, row+0.5); the ImageItem fill
+            # and IsocurveItem outline both center the cell there, so plotting at the
+            # raw (col, row) corner leaves the marker half a bin up-left of the
+            # feature — invisible at 3×3 but a full-cell miss at 1×1.
+            c, r = feat["center_col"] + 0.5, feat["center_row"] + 0.5
             spots.append({"pos": (c, r), "brush": pg.mkBrush(REF_COLORS.get(ref, "k")),
                           "size": 6, "pen": None})
             fid = feat.get("feature_id", "?")
             chi = feat.get("chi_deg", 0)
             t = pg.TextItem(f"#{fid} χ={chi:.0f}°", color=REF_COLORS.get(ref, "k"),
                             anchor=(0, 1))
-            t.setPos(c + 1, r - 1)
+            t.setFont(font)
+            t.setPos(c + 0.5, r - 0.5)
             t.setZValue(15)
             self.plot.addItem(t)
             self._point_items.append(t)
@@ -863,6 +885,20 @@ class DeviceMapWindow(QMainWindow):
             sc.setZValue(14)
             self.plot.addItem(sc)
             self._point_items.append(sc)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        # Re-scale the index labels to the new window size (debounced).
+        if self.show_labels and self._points_state is not None:
+            self._resize_timer.start()
+
+    def _relayout_labels(self):
+        """Redraw only the point/label layer at the current font size."""
+        if not self.show_labels or self._points_state is None:
+            return
+        self._clear_items(self._point_items)
+        chi_range, only_idx = self._points_state
+        self._draw_points(chi_range, only_idx=only_idx)
 
     # ----- layer / metric controls ------------------------------------
     def _check_all_layers(self):
@@ -1078,8 +1114,8 @@ class DeviceMapWindow(QMainWindow):
                 continue
             if not _feat_in_chi_range(feat, chi_r):
                 continue
-            dc = mx - feat["center_col"]
-            dr = my - feat["center_row"]
+            dc = mx - (feat["center_col"] + 0.5)
+            dr = my - (feat["center_row"] + 0.5)
             d = (dc * dc + dr * dr) ** 0.5
             if d < best_dist:
                 best_dist, best_idx = d, i

@@ -223,6 +223,11 @@ def shape_catalog_peak_source(path):
 
 def _qcolor(color, alpha=None):
     c = QColor(color)
+    if not c.isValid() and isinstance(color, str):
+        # Qt's QColor doesn't understand pyqtgraph's single-letter shorthand
+        # ("w", "k", "r", …) and returns an invalid (→ black) color; fall back
+        # to pyqtgraph's mkColor so those codes render as intended.
+        c = pg.mkColor(color)
     if alpha is not None:
         c.setAlphaF(alpha)
     return c
@@ -2528,7 +2533,7 @@ class FeatureViewer(QMainWindow):
                 if not (r_lo <= r <= r_hi and c_lo <= c <= c_hi):
                     continue
                 rect = QGraphicsRectItem(c - 0.5, r - 0.5, 1, 1)
-                pen = QPen(_qcolor("w"))
+                pen = QPen(_qcolor("white"))
                 pen.setCosmetic(True)
                 pen.setWidthF(1.5)
                 rect.setPen(pen)
@@ -2973,10 +2978,10 @@ class FeatureViewer(QMainWindow):
             oy = int(prof.get("det_y", other.get("detector_y", 0)))
             self._detector_other_features.append({**other, "detector_x": ox,
                                                   "detector_y": oy})
-            dv.add_overlay(_circle_item(ox, oy, 14, "w", width=1.5))
+            dv.add_overlay(_circle_item(ox, oy, 14, "#7fff00", width=1.5))
             dv.add_overlay(_label_item(
                 ox + 18, oy - 10,
-                f"#{other.get('feature_id', '')} {other.get('reflection', '')}", "w"))
+                f"#{other.get('feature_id', '')} {other.get('reflection', '')}", "#7fff00"))
 
         # The parent binned feature's peak, for reference (lime).
         dv.add_overlay(_circle_item(feat["detector_x"], feat["detector_y"], 15,

@@ -254,6 +254,30 @@ def _chi_mask(chi_map, chi_lo, chi_hi, wraps):
     return (chi_map >= chi_lo) & (chi_map <= chi_hi)
 
 
+def _circular_frame(chis):
+    """Frame azimuthal (χ) data on its minimal enclosing arc.
+
+    χ is circular (−180..180 wraps). Unwrapping with a *fixed* hinge at χ=0 splits
+    any distribution that straddles the 0 (or ±180) boundary into two clumps at
+    opposite ends of a linear axis, leaving a false empty gap — the "dead space"
+    seen on the wide, often-multimodal inner rings. Instead put the cut at the
+    largest empty gap on the circle so all data stays contiguous. Returns a mapping
+    function ``χ → plot coordinate`` and the ``(lo, hi)`` extent of the data.
+    """
+    v = np.sort(np.asarray(chis, dtype=float))
+    if len(v) < 2:
+        c = float(v[0]) if len(v) else 0.0
+        return (lambda x: x), c, c
+    gaps = np.diff(v)
+    wrap_gap = 360.0 - (v[-1] - v[0])
+    if gaps.size == 0 or wrap_gap >= gaps.max():
+        # data already contiguous; the empty side is the natural wrap-around
+        return (lambda x: x), float(v[0]), float(v[-1])
+    k = int(np.argmax(gaps))          # widest interior gap sits between v[k], v[k+1]
+    thr = (v[k] + v[k + 1]) / 2.0     # everything at/below the gap lifts by +360
+    return (lambda x: x + 360.0 if x < thr else x), float(v[k + 1]), float(v[k] + 360.0)
+
+
 # ── Density overlay ───────────────────────────────────────────────
 def build_density_overlay(tth_map, chi_map, features_by_ref, active_refs,
                           band_tol, cmap_name, sigma=3.0,
@@ -832,18 +856,12 @@ class OrientationMapWindow(QMainWindow):
         if not all_pairs:
             return
         all_chis = [c for c, _ in all_pairs]
-        chi_min, chi_max = min(all_chis), max(all_chis)
-        wraps = (chi_max - chi_min) > 180
-        _wrap = (lambda c: c + 360 if c < 0 else c) if wraps else (lambda c: c)
+        _wrap, x_lo, x_hi = _circular_frame(all_chis)
         all_plot = [_wrap(c) for c, _ in all_pairs]; all_w = [w for _, w in all_pairs]
         cl_plot = [_wrap(c) for c, _ in cl_pairs]; cl_w = [w for _, w in cl_pairs]
-        if wraps:
-            lo_plot = cluster["chi_lo"] + (360 if cluster["chi_lo"] < 0 else 0)
-            hi_plot = cluster["chi_hi"] + (360 if cluster["chi_hi"] < 0 else 0)
-        else:
-            lo_plot, hi_plot = cluster["chi_lo"], cluster["chi_hi"]
+        lo_plot, hi_plot = _wrap(cluster["chi_lo"]), _wrap(cluster["chi_hi"])
 
-        edges = np.arange(min(all_plot) - 5, max(all_plot) + 10, 5)
+        edges = np.arange(x_lo - 5, x_hi + 10, 5)
         centers = (edges[:-1] + edges[1:]) / 2
         h_all, _ = np.histogram(all_plot, bins=edges, weights=all_w)
         h_cl, _ = np.histogram(cl_plot, bins=edges, weights=cl_w or None)
@@ -858,6 +876,11 @@ class OrientationMapWindow(QMainWindow):
         self.az_hist.setLabel("left", WEIGHT_LABELS.get(WEIGHT_MODE, "Count"))
         self.az_hist.setTitle(f"{ref} — azimuthal ({cluster['pct']:.0f}%, "
                               f"{cluster['chi_span']:.0f}° span)")
+        # Frame tightly to the data (plus the cluster markers, now unwrapped onto the
+        # same arc) so multimodal inner rings don't render acres of empty χ.
+        lo_bound = min(x_lo, lo_plot, hi_plot)
+        hi_bound = max(x_hi, lo_plot, hi_plot)
+        self.az_hist.setXRange(lo_bound - 5, hi_bound + 5, padding=0)
 
     def _draw_arc_histogram(self, ref, cluster):
         self.arc_hist.clear()

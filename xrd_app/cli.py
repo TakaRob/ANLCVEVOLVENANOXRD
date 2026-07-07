@@ -1404,6 +1404,109 @@ def combined_device(device_map_path, tracks_path, intensity_key, out_path, root)
 
 
 # ─────────────────────────────────────────────────────────────────────
+# hd-device-map — 1×1 intensity sampled beneath a binned feature map
+# ─────────────────────────────────────────────────────────────────────
+@main.command(name='hd-device-map')
+@click.option('--bin-size', type=int, default=3, help='Source feature-map bin size (e.g. 3)')
+@click.option('--scan', default=None, help='Scan number/name (defaults to config scan)')
+@click.option('--catalog', default=None,
+              help='3×3 shapes/feature catalog (path or name in Labels/<scan>). '
+                   'Default: newest shapes/combined for --bin-size.')
+@click.option('--win', type=int, default=4,
+              help='Detector-peak sampling half-window (px); widen for broad peaks')
+@click.option('--max-cells', type=int, default=0,
+              help='Cap 1×1 cells per feature (0 = unlimited)')
+@click.option('--name', 'out_name', default=None,
+              help='Algorithm name for the output file (default: source catalog algo)')
+@click.option('--root', default='.', help='Project root directory')
+def hd_device_map(bin_size, scan, catalog, win, max_cells, out_name, root):
+    """Sample raw 1×1 intensity at each feature's detector peak (Labels/<scan>/).
+
+    Reads a binned (N×N) feature catalog, and for every 1×1 pixel inside each
+    feature's footprint reads that raw frame and records the intensity at the
+    feature's detector peak — the high-def layer the HD Device View renders
+    beneath the N×N outlines. Real stage (x, y) per pixel is attached when the
+    scan has a real position CSV, for the real-position scatter mode.
+
+    Heavy (reads thousands of raw frames); run once — the JSON is cached.
+    """
+    import json
+    from .core import catalogs, hd_map, io
+
+    dm = DataManager(root, scan=scan)
+
+    # Source catalog: explicit path/name, else newest shapes/combined for the bin.
+    if catalog:
+        cat_path = Path(catalog)
+        if not cat_path.exists():
+            cat_path = dm.labels_dir(scan) / catalog
+    else:
+        cat_path = catalogs.default_feature_source(dm.results_dir(scan), bin_size)
+    _require(cat_path, f"{bin_size}×{bin_size} feature catalog "
+                       "(run 'xrd-app shapes' first, or pass --catalog)")
+
+    features, _ = catalogs.load_features_any(cat_path)
+    if not features:
+        click.echo(f"Error: no features in {cat_path}")
+        raise SystemExit(1)
+    algo = out_name or (catalogs.parse_name(Path(cat_path).name) or {}).get("algo") or "hd"
+
+    # 1×1 raw-frame source (h5 if built, else summed raw frames on demand).
+    click.echo(f"[hd-device-map] catalog: {cat_path}\n[hd-device-map] "
+               f"{len(features)} features, win={win}px")
+    source = io.open_bin_source(dm, 1, scan)
+    try:
+        # 1×1 grid dims + real per-cell (x, y) from the 1×1 grid mapping.
+        gm_path = dm.grid_mapping(bin_size=1, scan=scan)
+        gm = {}
+        if gm_path and Path(gm_path).exists():
+            with open(gm_path) as f:
+                gm = json.load(f)
+        # Real per-cell (x, y): try any resolvable position CSV. build_cell_xy
+        # returns {} for X-only / missing CSVs (older grid mappings omit the
+        # positions_real flag, so don't gate on it).
+        pos_csv = gm.get("positions_csv") or dm.position_csv(scan=scan)
+        cell_xy = hd_map.build_cell_xy(gm, pos_csv) if gm.get("bins") else {}
+
+        hd_features = hd_map.sample_hd_intensity(
+            features, source, bin_size, win=win, cell_xy=cell_xy,
+            max_cells_per_feature=(max_cells or None),
+            progress=_make_progress("hd-map"), log=click.echo)
+    finally:
+        source.close()
+
+    # 1×1 grid dims: prefer the 1×1 grid mapping, else derive from sampled cells.
+    n_rows = gm.get("n_bin_rows") or gm.get("n_rows")
+    n_cols = gm.get("n_bin_cols") or gm.get("n_cols")
+    if not (n_rows and n_cols):
+        mr = mc = -1
+        for f in hd_features:
+            for k in f["hd_profile"]:
+                r, c = (int(p) for p in k.split("_"))
+                mr, mc = max(mr, r), max(mc, c)
+        n_rows, n_cols = mr + 1, mc + 1
+
+    summary = hd_map.summarize(hd_features)
+    result = {
+        "kind": "hd_map",
+        "scan": dm.scan_name,
+        "bin_size": bin_size,
+        "win": win,
+        "source_catalog": Path(cat_path).name,
+        "n_bin_rows_1x1": int(n_rows),
+        "n_bin_cols_1x1": int(n_cols),
+        "positions_real": bool(cell_xy),
+        "features": hd_features,
+    }
+    out = dm.hd_map_json(algo, bin_size, scan)
+    _write_json(out, result)
+    click.echo(
+        f"\nDone: {summary['n_features']} features, {summary['n_cells']} 1×1 cells "
+        f"sampled ({summary['n_features_empty']} empty, "
+        f"{summary['n_cells_with_position']} with (x,y)) -> {out}")
+
+
+# ─────────────────────────────────────────────────────────────────────
 # qspace — pixel → 3D reciprocal-space (q) mapping
 # ─────────────────────────────────────────────────────────────────────
 @main.command()
