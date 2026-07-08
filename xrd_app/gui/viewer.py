@@ -223,11 +223,6 @@ def shape_catalog_peak_source(path):
 
 def _qcolor(color, alpha=None):
     c = QColor(color)
-    if not c.isValid() and isinstance(color, str):
-        # Qt's QColor doesn't understand pyqtgraph's single-letter shorthand
-        # ("w", "k", "r", …) and returns an invalid (→ black) color; fall back
-        # to pyqtgraph's mkColor so those codes render as intended.
-        c = pg.mkColor(color)
     if alpha is not None:
         c.setAlphaF(alpha)
     return c
@@ -2533,7 +2528,7 @@ class FeatureViewer(QMainWindow):
                 if not (r_lo <= r <= r_hi and c_lo <= c <= c_hi):
                     continue
                 rect = QGraphicsRectItem(c - 0.5, r - 0.5, 1, 1)
-                pen = QPen(_qcolor("white"))
+                pen = QPen(_qcolor("black"))
                 pen.setCosmetic(True)
                 pen.setWidthF(1.5)
                 rect.setPen(pen)

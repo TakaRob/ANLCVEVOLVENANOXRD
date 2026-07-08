@@ -30,7 +30,7 @@ from PyQt5.QtWidgets import (
     QLabel, QCheckBox, QPushButton, QGroupBox, QComboBox, QSplitter,
     QSpinBox, QScrollArea,
 )
-from PyQt5.QtCore import Qt
+from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtGui import QColor
 
 from ..config import DataManager
@@ -130,14 +130,27 @@ class HDDeviceMapWindow(QMainWindow):
         self.display = DISPLAY_GRID
         self.show_points = False
         self.show_trajectory = False
+        self.dot_size = 6           # scatter point diameter (screen px)
+        self.reflect_xy = True      # reflect across x=y to match the binned images
         self._isolate = True
         self._locked_idx = None
         self._highlighted_idx = None
         self._items = []          # transient overlay items (outlines/highlight/scatter)
 
+        # Debounce: rapid spinbox/slider changes coalesce into one redraw so a
+        # burst of clicks doesn't re-render 10k+ points on every step.
+        self._redraw_timer = QTimer(self)
+        self._redraw_timer.setSingleShot(True)
+        self._redraw_timer.setInterval(220)
+        self._redraw_timer.timeout.connect(self._redraw)
+
         self._load(catalog_path)
         self._build_ui()
         self._redraw()
+
+    def _schedule_redraw(self):
+        """Coalesce a burst of control changes into a single delayed redraw."""
+        self._redraw_timer.start()   # restarts the countdown on each call
 
     # ----- data ------------------------------------------------------
     def _load(self, catalog_path):
@@ -146,14 +159,23 @@ class HDDeviceMapWindow(QMainWindow):
         self.reflections = sorted(set(f.get("reflection", "unknown")
                                       for f in self.features))
         self.ref_colors = dv._assign_ref_colors(self.reflections)
-        chis = [f.get("chi_deg") for f in self.features if f.get("chi_deg") is not None]
-        if chis:
-            self._chi_data_min = int(np.floor(min(chis)))
-            self._chi_data_max = int(np.ceil(max(chis)))
+        # χ is wrapped to ±180 in the catalog; a cluster straddling ±180 would
+        # otherwise span nearly the whole circle. Unwrap (like Device View) so the
+        # slider/histogram cover only the data's real angular span (e.g. 163–235).
+        all_chi = [f.get("chi_deg") for f in self.features if f.get("chi_deg") is not None]
+        self._chi_wraps = bool(all_chi) and (max(all_chi) - min(all_chi)) > 180
+        unwrapped = [self._unwrap_chi(c) for c in all_chi]
+        if unwrapped:
+            self._chi_data_min = int(np.floor(min(unwrapped)))
+            self._chi_data_max = int(np.ceil(max(unwrapped)))
         else:
             self._chi_data_min, self._chi_data_max = -180, 180
         self._chi_lo = float(self._chi_data_min)
         self._chi_hi = float(self._chi_data_max)
+
+    def _unwrap_chi(self, c):
+        """Lift a wrapped (±180) angle into the continuous range (matches Device View)."""
+        return c + 360 if (self._chi_wraps and c < 0) else c
 
     def _chi_range(self):
         if self._chi_lo <= self._chi_data_min and self._chi_hi >= self._chi_data_max:
@@ -231,6 +253,25 @@ class HDDeviceMapWindow(QMainWindow):
                 "hd map has none (positions_real = false).")
         self.display_combo.currentIndexChanged.connect(self._on_display_changed)
         dl.addWidget(self.display_combo)
+        dot_row = QHBoxLayout()
+        dot_row.addWidget(QLabel("Dot size:"))
+        self.dot_spin = QSpinBox()
+        self.dot_spin.setRange(1, 60)
+        self.dot_spin.setValue(self.dot_size)
+        self.dot_spin.setToolTip(
+            "Diameter (px) of each 1×1 pixel dot in the real-position scatter. "
+            "Increase it when zooming in so the sampled pixels don't look sparse.")
+        self.dot_spin.valueChanged.connect(self._on_dot_size_changed)
+        dot_row.addWidget(self.dot_spin)
+        dot_row.addStretch()
+        dl.addLayout(dot_row)
+        self.reflect_cb = QCheckBox("Reflect X↔Y (match binned images)")
+        self.reflect_cb.setToolTip(
+            "Reflect the map across the x=y diagonal so its orientation matches "
+            "the binned device images.")
+        self.reflect_cb.setChecked(self.reflect_xy)
+        self.reflect_cb.toggled.connect(self._on_reflect_toggle)
+        dl.addWidget(self.reflect_cb)
         rl.addWidget(disp)
 
         # Layers
@@ -290,17 +331,24 @@ class HDDeviceMapWindow(QMainWindow):
         ch = QHBoxLayout()
         ch.addWidget(QLabel("Contrast %:"))
         self.lo_spin = QSpinBox(); self.lo_spin.setRange(0, 100); self.lo_spin.setValue(2)
-        self.lo_spin.valueChanged.connect(self._redraw)
+        self.lo_spin.valueChanged.connect(self._schedule_redraw)
         ch.addWidget(self.lo_spin)
         self.hi_spin = QSpinBox(); self.hi_spin.setRange(0, 100); self.hi_spin.setValue(99)
-        self.hi_spin.valueChanged.connect(self._redraw)
+        self.hi_spin.valueChanged.connect(self._schedule_redraw)
         ch.addWidget(self.hi_spin); ch.addStretch()
         mgl.addLayout(ch)
         rl.addWidget(mg)
 
-        # Chi range
+        # Chi range: histogram above the slider (like Device View)
         cg = QGroupBox("χ angle range")
         cgl = QVBoxLayout(cg)
+        self.chi_hist = pg.PlotWidget()
+        self.chi_hist.setBackground("w")
+        self.chi_hist.setFixedHeight(150)
+        self.chi_hist.setLabel("bottom", "χ (°)")
+        self.chi_hist.setLabel("left", "Features")
+        self.chi_hist.setMouseEnabled(False, False)
+        cgl.addWidget(self.chi_hist)
         self.chi_slider = dv.QRangeSlider(self._chi_data_min, self._chi_data_max)
         self.chi_slider.rangeChanged.connect(self._on_chi_range)
         cgl.addWidget(self.chi_slider)
@@ -309,6 +357,7 @@ class HDDeviceMapWindow(QMainWindow):
             "font-family: monospace; font-size: 0.9em; color:#555; padding:2px;")
         cgl.addWidget(self.chi_label)
         rl.addWidget(cg)
+        self._draw_chi_histogram()
 
         self.info_label = QLabel("")
         self.info_label.setWordWrap(True)
@@ -322,18 +371,33 @@ class HDDeviceMapWindow(QMainWindow):
         splitter.setSizes([980, 420])
 
     # ----- grid / value helpers --------------------------------------
+    def _feature_peak(self, feat):
+        """A feature's representative brightness = its max sample in the current metric."""
+        return max((e.get(self.metric) for e in feat.get("hd_profile", {}).values()
+                    if e.get(self.metric) is not None), default=None)
+
     def _combined_grid(self, visible, chi_range):
+        # Where features overlap in a 1×1 cell, the *brighter feature* should own
+        # the cell (show its own pixels), not whichever feature happens to have the
+        # larger local sample there. Rank visible features by peak intensity and
+        # paint brightest last, so it overwrites dimmer features on any shared cell.
         grid = np.full((self.n_rows, self.n_cols), np.nan)
+        ranked = []
         for f in self.features:
             if not self._feature_visible(f, visible, chi_range):
                 continue
+            peak = self._feature_peak(f)
+            if peak is not None:
+                ranked.append((peak, f))
+        ranked.sort(key=lambda t: t[0])           # ascending → brightest painted last
+        for _peak, f in ranked:
             for k, e in f.get("hd_profile", {}).items():
                 v = e.get(self.metric)
                 if v is None:
                     continue
                 r, c = _parse_cell(k)
                 if 0 <= r < self.n_rows and 0 <= c < self.n_cols:
-                    grid[r, c] = v if np.isnan(grid[r, c]) else max(grid[r, c], v)
+                    grid[r, c] = v
         return grid
 
     def _levels(self, grid):
@@ -359,6 +423,8 @@ class HDDeviceMapWindow(QMainWindow):
     # ----- redraw ----------------------------------------------------
     def _redraw(self):
         self._clear_items()
+        if hasattr(self, "chi_hist"):
+            self._draw_chi_histogram()   # reflect layer changes in the histogram
         visible = self._visible_refs()
         chi_range = self._chi_range()
         isolate = (self._isolate and self._locked_idx is not None
@@ -380,8 +446,10 @@ class HDDeviceMapWindow(QMainWindow):
             self._show_feature_info(self._locked_idx)
 
     def _redraw_grid(self, visible, chi_range, isolate):
-        self.plot.setLabel("bottom", "Col (1×1)")
-        self.plot.setLabel("left", "Row (1×1)")
+        # Reflect across x=y (swap row/col) to match the binned device images.
+        flip = self.reflect_xy
+        self.plot.setLabel("bottom", "Row (1×1)" if flip else "Col (1×1)")
+        self.plot.setLabel("left", "Col (1×1)" if flip else "Row (1×1)")
         self.plot.invertY(True)
         cmap = dv._get_cmap("viridis")
         if self.metric == "none":
@@ -397,9 +465,11 @@ class HDDeviceMapWindow(QMainWindow):
             else:
                 grid = self._combined_grid(visible, chi_range)
             vmin, vmax = self._levels(grid)
+            rgba = dv._scalar_to_rgba(grid, vmin, vmax, cmap)
+            if flip:
+                rgba = np.ascontiguousarray(rgba.transpose(1, 0, 2))
             self.img_item.setVisible(True)
-            self.img_item.setImage(dv._scalar_to_rgba(grid, vmin, vmax, cmap),
-                                   autoLevels=False)
+            self.img_item.setImage(rgba, autoLevels=False)
             self._update_colorbar(cmap, vmin, vmax)
         if self.metric == "none":
             self._update_colorbar(None, None, None)
@@ -414,8 +484,9 @@ class HDDeviceMapWindow(QMainWindow):
                     if m is not None:
                         merged |= m
             if merged.any():
+                data = merged.T if flip else merged
                 col = QColor(self.ref_colors[ref])
-                iso = pg.IsocurveItem(data=merged.astype(float), level=0.5,
+                iso = pg.IsocurveItem(data=data.astype(float), level=0.5,
                                       pen=pg.mkPen(col, width=1.5))
                 iso.setZValue(5)
                 self.plot.addItem(iso)
@@ -425,8 +496,9 @@ class HDDeviceMapWindow(QMainWindow):
                               only_idx=self._locked_idx if isolate else None)
 
     def _redraw_xy(self, visible, chi_range, isolate):
-        self.plot.setLabel("bottom", "Stage X (µm)")
-        self.plot.setLabel("left", "Stage Y (µm)")
+        flip = self.reflect_xy
+        self.plot.setLabel("bottom", "Stage Y (µm)" if flip else "Stage X (µm)")
+        self.plot.setLabel("left", "Stage X (µm)" if flip else "Stage Y (µm)")
         self.plot.invertY(False)
         self._update_colorbar(None, None, None)
         cmap = dv._get_cmap("viridis")
@@ -446,9 +518,10 @@ class HDDeviceMapWindow(QMainWindow):
         if not xs:
             return
         vals = np.asarray(vals, float)
+        size = self.dot_size
         if self.metric == "none":
             # Color by reflection only.
-            spots = [{"pos": (x, y), "size": 6, "pen": None,
+            spots = [{"pos": self._pxy(x, y), "size": size, "pen": None,
                       "brush": pg.mkBrush(self.ref_colors.get(r, "#888"))}
                      for x, y, r in zip(xs, ys, refs)]
         else:
@@ -456,7 +529,7 @@ class HDDeviceMapWindow(QMainWindow):
             lut = cmap.getLookupTable(0.0, 1.0, 256)
             norm = np.clip((vals - vmin) / max(vmax - vmin, 1e-9), 0, 1)
             idx = (norm * 255).astype(int)
-            spots = [{"pos": (x, y), "size": 6, "pen": None,
+            spots = [{"pos": self._pxy(x, y), "size": size, "pen": None,
                       "brush": pg.mkBrush(int(lut[j, 0]), int(lut[j, 1]), int(lut[j, 2]))}
                      for x, y, j in zip(xs, ys, idx)]
             self._update_colorbar(cmap, vmin, vmax)
@@ -477,11 +550,11 @@ class HDDeviceMapWindow(QMainWindow):
             if not self._feature_visible(f, visible, chi_range):
                 continue
             if space == DISPLAY_GRID:
-                pos = (f["center_col"], f["center_row"])
+                pos = self._pxy(f["center_col"], f["center_row"])
             else:
                 if f.get("center_x") is None:
                     continue
-                pos = (f["center_x"], f["center_y"])
+                pos = self._pxy(f["center_x"], f["center_y"])
             spots.append({"pos": pos, "size": 7, "pen": pg.mkPen("k", width=0.5),
                           "brush": pg.mkBrush(self.ref_colors.get(f.get("reflection"), "k"))})
         if spots:
@@ -531,6 +604,10 @@ class HDDeviceMapWindow(QMainWindow):
         self.show_trajectory = bool(checked)
         self._redraw()
 
+    def _on_dot_size_changed(self, val):
+        self.dot_size = int(val)
+        self._schedule_redraw()
+
     def _draw_trajectory(self, space):
         """Dotted polyline along the acquisition path in the current space."""
         pts = self._trajectory.get("grid") if space == DISPLAY_GRID \
@@ -538,9 +615,9 @@ class HDDeviceMapWindow(QMainWindow):
         if not pts:
             return
         arr = np.asarray(pts, dtype=float)
+        px, py = (arr[:, 1], arr[:, 0]) if self.reflect_xy else (arr[:, 0], arr[:, 1])
         pen = pg.mkPen(QColor(60, 60, 60, 150), width=0.8, style=Qt.DotLine)
-        line = pg.PlotDataItem(arr[:, 0], arr[:, 1], pen=pen,
-                               antialias=True, connect="all")
+        line = pg.PlotDataItem(px, py, pen=pen, antialias=True, connect="all")
         line.setZValue(8)
         self.plot.addItem(line)
         self._items.append(line)
@@ -556,8 +633,44 @@ class HDDeviceMapWindow(QMainWindow):
 
     def _on_chi_range(self, lo, hi):
         self._chi_lo, self._chi_hi = float(lo), float(hi)
-        self.chi_label.setText(f"χ: {lo}° to {hi}°")
+        self.chi_label.setText(f"χ: {lo}° to {hi}°")   # label updates immediately
+        self._draw_chi_histogram()                     # selection band moves live
+        self._schedule_redraw()                        # heavy redraw coalesced
+
+    def _on_reflect_toggle(self, checked):
+        self.reflect_xy = bool(checked)
         self._redraw()
+        self.plot.autoRange()
+
+    def _draw_chi_histogram(self):
+        """Feature-count distribution over χ, with the selected band highlighted
+        (unwrapped/continuous — the slider, label and axis all agree)."""
+        self.chi_hist.clear()
+        visible = self._visible_refs()
+        chis = [self._unwrap_chi(f.get("chi_deg")) for f in self.features
+                if f.get("chi_deg") is not None and f.get("reflection") in visible]
+        if not chis:
+            return
+        edges = np.arange(self._chi_data_min, self._chi_data_max + 5, 5.0)
+        if len(edges) < 2:
+            edges = np.array([self._chi_data_min, self._chi_data_max + 1.0])
+        centers = (edges[:-1] + edges[1:]) / 2
+        h_all, _ = np.histogram(chis, bins=edges)
+        inside = [c for c in chis if self._chi_lo <= c <= self._chi_hi]
+        h_in, _ = np.histogram(inside, bins=edges) if inside \
+            else (np.zeros(len(centers)), None)
+        w = float(edges[1] - edges[0]) * 0.9
+        self.chi_hist.addItem(pg.BarGraphItem(
+            x=centers, height=h_all, width=w, brush=(204, 204, 204, 130), pen=None))
+        self.chi_hist.addItem(pg.BarGraphItem(
+            x=centers, height=h_in, width=w, brush=(67, 99, 216, 220), pen=None))
+        for v in (self._chi_lo, self._chi_hi):
+            self.chi_hist.addItem(pg.InfiniteLine(
+                pos=v, angle=90, pen=pg.mkPen("r", width=1.2, style=Qt.DashLine)))
+
+    def _pxy(self, x, y):
+        """Map plot coordinates through the x=y reflection when enabled."""
+        return (y, x) if self.reflect_xy else (x, y)
 
     def _on_catalog_changed(self):
         path = self.cat_combo.currentData()
@@ -579,11 +692,11 @@ class HDDeviceMapWindow(QMainWindow):
             if not self._feature_visible(f, visible, chi_range):
                 continue
             if space == DISPLAY_GRID:
-                cx, cy = f["center_col"], f["center_row"]
+                cx, cy = self._pxy(f["center_col"], f["center_row"])
             else:
                 if f.get("center_x") is None:
                     continue
-                cx, cy = f["center_x"], f["center_y"]
+                cx, cy = self._pxy(f["center_x"], f["center_y"])
             d = ((x - cx) ** 2 + (y - cy) ** 2) ** 0.5
             if d < best_d:
                 best_d, best_idx = d, i
@@ -648,7 +761,8 @@ class HDDeviceMapWindow(QMainWindow):
     # ----- view-state carry-over (BinnedTab rebuilds on bin change) ---
     def get_view_state(self):
         return {"metric": self.metric, "display": self.display,
-                "isolate": self._isolate, "trajectory": self.show_trajectory}
+                "isolate": self._isolate, "trajectory": self.show_trajectory,
+                "dot_size": self.dot_size, "reflect_xy": self.reflect_xy}
 
     def apply_view_state(self, state):
         if not state:
@@ -666,6 +780,12 @@ class HDDeviceMapWindow(QMainWindow):
         if "trajectory" in state and self.traj_cb.isEnabled():
             self.show_trajectory = bool(state["trajectory"])
             self.traj_cb.setChecked(self.show_trajectory)
+        if "dot_size" in state:
+            self.dot_size = int(state["dot_size"])
+            self.dot_spin.setValue(self.dot_size)
+        if "reflect_xy" in state:
+            self.reflect_xy = bool(state["reflect_xy"])
+            self.reflect_cb.setChecked(self.reflect_xy)
         self._redraw()
 
 

@@ -1000,6 +1000,21 @@ class BinImageSource:
     def image(self, key: str) -> Optional[np.ndarray]:
         raise NotImplementedError
 
+    def region(self, key: str, y0: int, y1: int, x0: int,
+               x1: int) -> Optional[np.ndarray]:
+        """A detector-space window ``[y0:y1, x0:x1]`` of a bin's image.
+
+        Default: read the full image and crop. Backends that can read a slice
+        directly (e.g. an HDF5 dataset) override this to avoid materializing the
+        whole frame — used by the HD-map sampler, which only needs a small window
+        around each feature's detector peak. Bounds are clamped to ``>= 0``;
+        upper bounds past the frame edge are fine (slicing clamps them).
+        """
+        img = self.image(key)
+        if img is None:
+            return None
+        return img[max(0, y0):y1, max(0, x0):x1]
+
     def sum_all(self, max_bins: Optional[int] = None,
                 progress: Optional[Callable[[int, int], None]] = None) -> np.ndarray:
         raise NotImplementedError
@@ -1038,6 +1053,13 @@ class _H5Source(BinImageSource):
         if key not in self._f:
             return None
         return np.clip(self._f[key][:].astype(np.float64), 0, 1e9)
+
+    def region(self, key, y0, y1, x0, x1):
+        if key not in self._f:
+            return None
+        # h5py reads only the requested slice from disk (clamps stop past edge).
+        sub = self._f[key][max(0, y0):y1, max(0, x0):x1]
+        return np.clip(sub.astype(np.float64), 0, 1e9)
 
     def sum_all(self, max_bins=None, progress=None) -> np.ndarray:
         keys = self.keys()

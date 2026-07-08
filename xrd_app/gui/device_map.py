@@ -208,6 +208,25 @@ def build_device_grids(features, n_rows, n_cols, metric="intensity"):
     return grids
 
 
+def _feat_grid_rc(feat):
+    """Feature center as (row, col) in *grid* space, matching the mask / heatmap.
+
+    ``center_bin`` ("row_col") is always the strongest bin in grid coordinates,
+    the same space the ImageItem fill and outlines live in. ``center_row`` /
+    ``center_col`` are NOT reliable here: coordinate-based catalogs
+    (``coord_shapes``) store them in physical XY, which would scatter the markers
+    far off the features. Fall back to them only when ``center_bin`` is absent.
+    """
+    cb = feat.get("center_bin")
+    if isinstance(cb, str) and "_" in cb:
+        parts = cb.split("_")
+        try:
+            return float(parts[0]), float(parts[1])
+        except (ValueError, IndexError):
+            pass
+    return float(feat.get("center_row", 0)), float(feat.get("center_col", 0))
+
+
 def _feat_in_chi_range(feat, chi_range):
     if chi_range is None:
         return True
@@ -577,7 +596,10 @@ class DeviceMapWindow(QMainWindow):
 
         entry_row = QHBoxLayout()
         entry_row.addWidget(QLabel("Min:"))
-        self.chi_min_spin = _WrapSpinBox()
+        # Unwrapped display (continuous, matches the histogram's x-axis) — a wrap
+        # -to-±180 spin here made the slider read e.g. "163 to -125" while the
+        # histogram showed "160 to 240" for the same range.
+        self.chi_min_spin = QSpinBox()
         self.chi_min_spin.setRange(self._chi_data_min, self._chi_data_max)
         self.chi_min_spin.setValue(self._chi_data_min)
         self.chi_min_spin.setSuffix("°")
@@ -586,7 +608,7 @@ class DeviceMapWindow(QMainWindow):
         entry_row.addWidget(self.chi_min_spin)
         entry_row.addStretch()
         entry_row.addWidget(QLabel("Max:"))
-        self.chi_max_spin = _WrapSpinBox()
+        self.chi_max_spin = QSpinBox()
         self.chi_max_spin.setRange(self._chi_data_min, self._chi_data_max)
         self.chi_max_spin.setValue(self._chi_data_max)
         self.chi_max_spin.setSuffix("°")
@@ -864,11 +886,13 @@ class DeviceMapWindow(QMainWindow):
             ref = feat["reflection"]
             if ref not in self.visible_refs or not _feat_in_chi_range(feat, chi_range):
                 continue
-            # Bin (row, col) → pixel *center* (col+0.5, row+0.5); the ImageItem fill
-            # and IsocurveItem outline both center the cell there, so plotting at the
-            # raw (col, row) corner leaves the marker half a bin up-left of the
-            # feature — invisible at 3×3 but a full-cell miss at 1×1.
-            c, r = feat["center_col"] + 0.5, feat["center_row"] + 0.5
+            # Grid (row, col) → pixel *center* (col+0.5, row+0.5); the ImageItem
+            # fill and IsocurveItem outline both center the cell there, so plotting
+            # at the raw corner leaves the marker half a bin up-left of the feature
+            # — invisible at 3×3 but a full-cell miss at 1×1. Use grid space (not
+            # center_row/col, which are physical XY in coord-based catalogs).
+            gr, gc = _feat_grid_rc(feat)
+            c, r = gc + 0.5, gr + 0.5
             spots.append({"pos": (c, r), "brush": pg.mkBrush(REF_COLORS.get(ref, "k")),
                           "size": 6, "pen": None})
             fid = feat.get("feature_id", "?")
@@ -979,8 +1003,9 @@ class DeviceMapWindow(QMainWindow):
     def _update_chi_visuals(self):
         self._draw_chi_histogram()
         self._draw_chi_arc()
+        # Unwrapped (continuous) to match the histogram x-axis and the spin boxes.
         self.chi_range_label.setText(
-            f"χ: {self._wrap_chi(self._chi_lo):.0f}° to {self._wrap_chi(self._chi_hi):.0f}°")
+            f"χ: {self._chi_lo:.0f}° to {self._chi_hi:.0f}°")
 
     def _draw_chi_histogram(self):
         self.chi_hist.clear()
@@ -1114,8 +1139,9 @@ class DeviceMapWindow(QMainWindow):
                 continue
             if not _feat_in_chi_range(feat, chi_r):
                 continue
-            dc = mx - (feat["center_col"] + 0.5)
-            dr = my - (feat["center_row"] + 0.5)
+            gr, gc = _feat_grid_rc(feat)
+            dc = mx - (gc + 0.5)
+            dr = my - (gr + 0.5)
             d = (dc * dc + dr * dr) ** 0.5
             if d < best_dist:
                 best_dist, best_idx = d, i

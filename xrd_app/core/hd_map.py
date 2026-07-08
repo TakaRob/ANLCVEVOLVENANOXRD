@@ -162,15 +162,11 @@ def sample_hd_intensity(
 
         hd = {}
         for cell in cells:
-            img = source.image(cell)
-            if img is None:
+            # Read only the window around the detector peak (h5 slices from disk).
+            patch = source.region(cell, det_y - win, det_y + win + 1,
+                                  det_x - win, det_x + win + 1)
+            if patch is None or patch.size == 0:
                 continue  # missing / incomplete frame → hole
-            h, w = img.shape[:2]
-            y0, y1 = max(0, det_y - win), min(h, det_y + win + 1)
-            x0, x1 = max(0, det_x - win), min(w, det_x + win + 1)
-            patch = img[y0:y1, x0:x1]
-            if patch.size == 0:
-                continue
             entry = {"intensity": float(patch.max()),
                      "integrated": float(patch.sum())}
             xy = cell_xy.get(cell)
