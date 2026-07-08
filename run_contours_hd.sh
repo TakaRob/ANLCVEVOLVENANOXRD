@@ -30,6 +30,8 @@
 # ---------------------------------------------------------------------------
 set -uo pipefail
 
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 PROJECT="${PROJECT:-${1:-}}"
 SCANS="${SCANS:-$(seq 179 201)}"
 BIN="${BIN:-3}"
@@ -49,9 +51,27 @@ fi
 if [ ! -f "$PROJECT/config.yaml" ]; then
   say "❌ '$PROJECT' is not an xrd-app project (no config.yaml)."; exit 2
 fi
-if ! command -v xrd-app >/dev/null 2>&1; then
-  say "❌ 'xrd-app' not found — activate the venv / pip install -e . first."; exit 3
+# --- resolve the CLI so this works over a fresh SSH shell -----------------
+# Prefer an installed console script; fall back to the module form. Auto-activate
+# a repo .venv if present, and put common user-install bins on PATH first.
+[ -f "$HERE/.venv/bin/activate" ] && . "$HERE/.venv/bin/activate"
+export PATH="$HOME/.local/bin:$PATH"
+if command -v xrd-app >/dev/null 2>&1; then
+  XRD=(xrd-app)
+elif python3 -c "import xrd_app" >/dev/null 2>&1; then
+  XRD=(python3 -m xrd_app.cli)
+elif python -c "import xrd_app" >/dev/null 2>&1; then
+  XRD=(python -m xrd_app.cli)
+else
+  say "❌ can't find 'xrd-app' or the xrd_app package on PATH."
+  say "   Activate the env you used for 'pip install -e .', e.g. ONE of:"
+  say "     source .venv/bin/activate            # a repo virtualenv"
+  say "     conda activate <env>                 # a conda env"
+  say "     export PATH=\"\$HOME/.local/bin:\$PATH\"    # after 'pip install --user -e .'"
+  say "   …then re-run. (This script already tries .venv and ~/.local/bin.)"
+  exit 3
 fi
+say "cli: ${XRD[*]}"
 
 SUF="${BIN}x${BIN}"
 hr
@@ -77,7 +97,7 @@ for n in $SCANS; do
     say "  = shapes exist — skip ($shapes_json)"
   else
     t0=$SECONDS
-    if run xrd-app run-pipeline --root "$PROJECT" --scan "$s" --bin-size "$BIN" --snr "$SNR"; then
+    if run "${XRD[@]}" run-pipeline --root "$PROJECT" --scan "$s" --bin-size "$BIN" --snr "$SNR"; then
       say "   ✓ contours $s (${SUF}) in $(( SECONDS - t0 ))s"; ok=$((ok+1))
     else
       say "   ✗ contours $s FAILED — skipping hd for this scan"; failed="$failed ${s}:contours"; continue
@@ -91,7 +111,7 @@ for n in $SCANS; do
     say "  = hd-map exists — skip ($hd_json)"; continue
   fi
   t0=$SECONDS
-  if run xrd-app hd-device-map --root "$PROJECT" --scan "$s" --bin-size "$BIN" --win "$WIN"; then
+  if run "${XRD[@]}" hd-device-map --root "$PROJECT" --scan "$s" --bin-size "$BIN" --win "$WIN"; then
     say "   ✓ hd-map $s (${SUF}) in $(( SECONDS - t0 ))s"; ok=$((ok+1))
   else
     say "   ✗ hd-map $s FAILED — continuing"; failed="$failed ${s}:hd"
