@@ -1465,7 +1465,13 @@ def hd_device_map(bin_size, scan, catalog, win, max_cells, out_name, root):
         # Real per-cell (x, y): try any resolvable position CSV. build_cell_xy
         # returns {} for X-only / missing CSVs (older grid mappings omit the
         # positions_real flag, so don't gate on it).
-        pos_csv = gm.get("positions_csv") or dm.position_csv(scan=scan)
+        # Prefer the grid mapping's stored CSV, but it may be an absolute path
+        # from another machine (e.g. /net/micdata on the LAN host vs /mnt/z on a
+        # laptop). Fall back to the project-relative CSV when it doesn't resolve
+        # here, so real (x, y) still attaches regardless of where we run.
+        pos_csv = gm.get("positions_csv")
+        if not pos_csv or not Path(pos_csv).exists():
+            pos_csv = dm.position_csv(scan=scan)
         cell_xy = hd_map.build_cell_xy(gm, pos_csv) if gm.get("bins") else {}
 
         hd_features = hd_map.sample_hd_intensity(
