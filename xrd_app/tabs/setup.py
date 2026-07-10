@@ -4,8 +4,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import (
-    QComboBox, QFileDialog, QGroupBox, QHBoxLayout, QInputDialog, QLabel,
+    QAbstractItemView, QComboBox, QDialog, QDialogButtonBox, QFileDialog,
+    QGroupBox, QHBoxLayout, QInputDialog, QLabel, QListWidget, QListWidgetItem,
     QMessageBox, QPushButton, QVBoxLayout, QWidget, QSizePolicy,
 )
 
@@ -96,11 +98,11 @@ class SetupTab(QWidget):
             "Pick one scan folder (e.g. Scan_0203); the XRD/ frames inside are "
             "found automatically — no need to drill down to a single .h5.")
         b_file.clicked.connect(self._pick_scan_folder)
-        b_dir = QPushButton("Select Scans parent dir…")
+        b_dir = QPushButton("Select scan set…")
         b_dir.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.MinimumExpanding)
         b_dir.setMinimumHeight(40)
-        b_dir.setToolTip("Pick a folder that contains several Scan_*/ directories.")
-        b_dir.clicked.connect(self._pick_dir)
+        b_dir.setToolTip("Pick a folder containing Scan_*/ directories, then choose which scans to register.")
+        b_dir.clicked.connect(self._pick_scan_set)
         b_pos = QPushButton("Load positions…")
         b_pos.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.MinimumExpanding)
         b_pos.setMinimumHeight(40)
@@ -289,16 +291,69 @@ class SetupTab(QWidget):
         if path:
             # discover_scans treats a folder that contains an XRD/ subdir (or
             # loose .h5 frames) as a single scan, so no need to pick a file.
-            self.console.run(["scan-detect", "--root", self.project_root,
-                              "--scans-dir", path])
+            self._run_setup_job(["scan-detect", "--root", self.project_root,
+                                 "--scans-dir", path])
 
-    def _pick_dir(self):
+    def _pick_scan_set(self):
         path = QFileDialog.getExistingDirectory(
-            self, "Select a folder containing several Scan_*/ directories",
+            self, "Select a folder containing Scan_*/ directories",
             self.project_root or "")
-        if path:
-            self.console.run(["scan-detect", "--root", self.project_root,
-                              "--scans-dir", path])
+        if not path:
+            return
+        try:
+            from ..core import io
+            scans = io.discover_scans(path, deep=False)
+        except Exception as e:
+            QMessageBox.critical(self, "Could not inspect scans",
+                                 f"{type(e).__name__}: {e}")
+            return
+        if not scans:
+            QMessageBox.information(self, "No scans found",
+                                    "No scan folders with XRD frames were found there.")
+            return
+        selected = self._choose_scans(scans)
+        if selected is None:
+            return
+        if not selected:
+            QMessageBox.information(self, "No scans selected",
+                                    "Select one or more scans to register.")
+            return
+        args = ["scan-detect", "--root", self.project_root, "--scans-dir", path]
+        if len(selected) < len(scans):
+            args += ["--scans", ",".join(selected)]
+        self._run_setup_job(args)
+
+    def _choose_scans(self, scans):
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Choose scans")
+        lay = QVBoxLayout(dlg)
+        lay.addWidget(QLabel("Select the scans to register in this project:"))
+        lst = QListWidget()
+        lst.setSelectionMode(QAbstractItemView.MultiSelection)
+        for scan in scans:
+            approx = "~" if scan.get("frames_estimated") else ""
+            text = (f"{scan['name']}  ({scan.get('n_files', 0)} files / "
+                    f"{approx}{scan.get('n_frames', 0)} frames)")
+            item = QListWidgetItem(text)
+            item.setData(Qt.UserRole, scan["name"])
+            lst.addItem(item)
+        lay.addWidget(lst, 1)
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(dlg.accept)
+        buttons.rejected.connect(dlg.reject)
+        lay.addWidget(buttons)
+        if dlg.exec_() != QDialog.Accepted:
+            return None
+        return [lst.item(i).data(Qt.UserRole) for i in range(lst.count())
+                if lst.item(i).isSelected()]
+
+    def _run_setup_job(self, args):
+        self.console.run(args, on_finished=lambda _code: self._refresh_after_job())
+
+    def _refresh_after_job(self):
+        self._refresh_summary()
+        if self._host is not None and hasattr(self._host, "refresh_project_context"):
+            self._host.refresh_project_context()
 
     def _load_positions(self):
         """Load scan positions as either a single CSV (this scan) or a folder
@@ -320,8 +375,8 @@ class SetupTab(QWidget):
                 self, "Select a folder of scan_NNNN_position.csv files",
                 self.project_root or "")
             if path:
-                self.console.run(["link", "--root", self.project_root,
-                                  "--position-root", path])
+                self._run_setup_job(["link", "--root", self.project_root,
+                                     "--position-root", path])
         elif clicked is b_file:
             path, _ = QFileDialog.getOpenFileName(
                 self, "Select a scan position CSV", self.project_root or "",
@@ -331,13 +386,13 @@ class SetupTab(QWidget):
             args = ["link", "--root", self.project_root, "--position-csv", path]
             if self.scan:
                 args += ["--scan", str(self.scan)]
-            self.console.run(args)
+            self._run_setup_job(args)
 
     def _load_tth(self):
         path, _ = QFileDialog.getOpenFileName(
             self, "Select tth.tiff", self.project_root or "", "TIFF (*.tif *.tiff)")
         if path:
-            self.console.run(["link", "--root", self.project_root, "--tth", path])
+            self._run_setup_job(["link", "--root", self.project_root, "--tth", path])
 
     def _convert_poni(self):
         path, _ = QFileDialog.getOpenFileName(
@@ -346,7 +401,7 @@ class SetupTab(QWidget):
             args = ["convert-poni", "--root", self.project_root, "--poni", path]
             if self.scan:
                 args += ["--scan", str(self.scan)]
-            self.console.run(args)
+            self._run_setup_job(args)
 
     def _open_reflections(self):
         from .reflection_popup import open_reflection_dialog

@@ -189,15 +189,22 @@ class TerritoryMap(QWidget):
 
         sbox = QGroupBox(f"Shapes ({len(self.shapes)} kept)")
         sl = QVBoxLayout(sbox)
+        self.sort_combo = QComboBox()
+        self.sort_combo.addItems([
+            "Feature ID",
+            "Size (largest first)",
+            "Size (smallest first)",
+            "Reflection, then size (largest)",
+            "Reflection, then size (smallest)",
+        ])
+        self.sort_combo.setToolTip("Order the shape list by cell count and/or reflection")
+        self.sort_combo.currentIndexChanged.connect(self._populate_shape_list)
+        sl.addWidget(QLabel("Sort by:"))
+        sl.addWidget(self.sort_combo)
         self.flist = QListWidget()
-        for s in self.shapes:
-            label = (f"#{s.get('feature_id','?')} {s.get('reflection','?')} · "
-                     f"{s.get('n_bins','?')} cells · χ={s.get('chi_deg','?')}°")
-            it = QListWidgetItem(label)
-            it.setData(Qt.UserRole, s)
-            self.flist.addItem(it)
         sl.addWidget(self.flist)
         lyt.addWidget(sbox, 1)
+        self._populate_shape_list()
 
         self.info = QLabel("Select a shape to inspect its territories.")
         self.info.setWordWrap(True)
@@ -216,6 +223,51 @@ class TerritoryMap(QWidget):
         self.reflection.currentIndexChanged.connect(self._refresh_metric)
         self.cmap.currentIndexChanged.connect(self._refresh_metric)
         self.flist.currentItemChanged.connect(self._on_select)
+
+    # ── shape list ordering ──────────────────────────────────────────
+    def _populate_shape_list(self):
+        """Rebuild the shape list in the order chosen by the sort combo.
+
+        Size is the shape's cell count (``n_bins``); reflection is a secondary
+        alphabetical key so shapes group by reflection then descend/ascend by
+        size within each group.
+        """
+        def size_of(s):
+            try:
+                return float(s.get("n_bins", 0) or 0)
+            except (TypeError, ValueError):
+                return 0.0
+
+        def refl_of(s):
+            return str(s.get("reflection", "") or "")
+
+        mode = self.sort_combo.currentText()
+        shapes = list(self.shapes)
+        if mode == "Size (largest first)":
+            shapes.sort(key=size_of, reverse=True)
+        elif mode == "Size (smallest first)":
+            shapes.sort(key=size_of)
+        elif mode == "Reflection, then size (largest)":
+            shapes.sort(key=lambda s: (refl_of(s), -size_of(s)))
+        elif mode == "Reflection, then size (smallest)":
+            shapes.sort(key=lambda s: (refl_of(s), size_of(s)))
+        else:  # "Feature ID"
+            def fid_of(s):
+                try:
+                    return (0, float(s.get("feature_id")))
+                except (TypeError, ValueError):
+                    return (1, str(s.get("feature_id", "")))
+            shapes.sort(key=fid_of)
+
+        self.flist.blockSignals(True)
+        self.flist.clear()
+        for s in shapes:
+            label = (f"#{s.get('feature_id','?')} {s.get('reflection','?')} · "
+                     f"{s.get('n_bins','?')} cells · χ={s.get('chi_deg','?')}°")
+            it = QListWidgetItem(label)
+            it.setData(Qt.UserRole, s)
+            self.flist.addItem(it)
+        self.flist.blockSignals(False)
 
     # ── metric colouring ─────────────────────────────────────────────
     def _refresh_metric(self):

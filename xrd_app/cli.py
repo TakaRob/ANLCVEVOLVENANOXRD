@@ -472,9 +472,10 @@ def _write_json(path, data):
 @main.command(name='scan-detect')
 @click.option('--scans-dir', help='Parent dir of Scan_*/ (or one scan dir)')
 @click.option('--scan-file', help='A single .hdf5 file → its scan dir is registered')
+@click.option('--scans', help='Comma-separated scan numbers/names to keep from --scans-dir')
 @click.option('--deep', is_flag=True, help='Open every file (exact counts, catches corrupt files). Slow on WSL/OneDrive.')
 @click.option('--root', default='.', help='Project root directory')
-def scan_detect(scans_dir, scan_file, deep, root):
+def scan_detect(scans_dir, scan_file, scans, deep, root):
     """Discover scans from a file or directory, validate them, write Raw/scans.json.
 
     Fast by default: samples the first file per scan (frame count is then an
@@ -497,8 +498,13 @@ def scan_detect(scans_dir, scan_file, deep, root):
         raise SystemExit(1)
 
     found = io.discover_scans(target, deep=deep)
+    if scans:
+        requested = {DataManager.scan_name_of(s) or str(s).strip()
+                     for s in scans.split(',') if str(s).strip()}
+        found = [s for s in found if s.get('name') in requested]
     if not found:
-        click.echo(f"No scans found under {target}.")
+        suffix = f" matching --scans {scans}" if scans else ""
+        click.echo(f"No scans{suffix} found under {target}.")
         raise SystemExit(1)
 
     # Adopt the first valid scan's frame shape as the project detector shape.
@@ -550,15 +556,18 @@ def scan_detect(scans_dir, scan_file, deep, root):
 @click.option('--rawgrid', is_flag=True,
               help='Bypass (X,Y) de-skew: use the legacy serpentine X-only grid.')
 @click.option('--deskew-method',
-              type=click.Choice(['faithful', 'faithful_native', 'commanded', 'perrow_offset']),
-              default='faithful',
-              help='Column assignment from the real (X, Y) coordinate CSV: faithful '
-                   '(DEFAULT — snap columns to true Y on a square-pixel lattice: '
-                   'to-scale, de-skewed, best for viewing), faithful_native (snap to '
-                   'true Y at native frame density — de-skewed with ~1 frame/cell, best '
-                   'for detection/recall), commanded (align by rank), or perrow_offset '
-                   '(DEPRECATED). For skew-free true-(X,Y) territories use '
-                   "'xrd-app territory-grid' instead.")
+              type=click.Choice(['auto', 'positions_xy', 'faithful', 'faithful_native',
+                                 'commanded', 'perrow_offset']),
+              default='auto',
+              help='How frames map to the lattice, from the real (X, Y) CSV. '
+                   'auto (DEFAULT): positions_xy at 1x1 (both axes snapped to true '
+                   '(X, Y) — skew-free, avoids the file-index-row bowtie/"X"), '
+                   'faithful at >=2x2 (already clean there). Override with: '
+                   'positions_xy (force the true-(X,Y) grid at any bin), faithful '
+                   '(snap columns to true Y on a square-pixel, file-index-row '
+                   'lattice), faithful_native (faithful at native frame density), '
+                   'commanded (align columns by rank), or perrow_offset (DEPRECATED). '
+                   "For zero-collision irregular cells use 'xrd-app territory-grid'.")
 @click.option('--variant', default=None,
               help='Tag appended to default output names (e.g. "faithful") so a '
                    'coordinate variant sits alongside the default instead of overwriting it.')
@@ -752,7 +761,7 @@ def create_positions(scan, socket_dir, method, theta, reduction, output, force, 
               help='Coordinate variant tag (e.g. "faithful") — resolves the matching '
                    'tagged grid mapping and writes a tagged binned HDF5.')
 @click.option('--output', help='Output binned HDF5 path (defaults to per-scan Binned/)')
-@click.option('--compression', type=click.Choice(['gzip', 'lz4', 'none']), default='gzip')
+@click.option('--compression', type=click.Choice(['zstd', 'gzip', 'lz4', 'none']), default='zstd')
 @click.option('--root', default='.', help='Project root directory')
 def bin(bin_size, scan, grid_mapping, variant, output, compression, root):
     """Pre-build the binned HDF5 (xrd_NxN_bins.h5) used by 'peaks'."""
@@ -971,7 +980,7 @@ def shapes(bin_size, scan, algorithm, from_peaks, peak_algo, link_tolerance, var
 @click.option('--shape', 'grid_shape', default=None, help='Synthesize grids: ROWSxCOLS or COLS')
 @click.option('--rawgrid', is_flag=True,
               help='Bypass (X,Y) de-skew: use the legacy serpentine X-only grid.')
-@click.option('--compression', type=click.Choice(['gzip', 'lz4', 'none']), default='gzip')
+@click.option('--compression', type=click.Choice(['zstd', 'gzip', 'lz4', 'none']), default='zstd')
 @click.option('--skip-existing', is_flag=True, help='Skip a scan whose shapes already exist')
 @click.option('--root', default='.', help='Project root directory')
 @click.pass_context
@@ -1059,7 +1068,7 @@ def run_pipeline(ctx, bin_size, scan, algorithm, shape_algo, snr, root):
               help='Synthesize a grid (no positions): ROWSxCOLS or COLS')
 @click.option('--rawgrid', is_flag=True,
               help='Bypass (X,Y) de-skew: use the legacy serpentine X-only grid.')
-@click.option('--compression', type=click.Choice(['gzip', 'lz4', 'none']), default='gzip')
+@click.option('--compression', type=click.Choice(['zstd', 'gzip', 'lz4', 'none']), default='zstd')
 @click.option('--root', default='.', help='Project root directory')
 @click.pass_context
 def make_bins(ctx, bin_size, scan, grid_shape, rawgrid, compression, root):
@@ -1069,6 +1078,73 @@ def make_bins(ctx, bin_size, scan, grid_shape, rawgrid, compression, root):
     ctx.invoke(bin, bin_size=bin_size, scan=scan, compression=compression, root=root)
     dm = DataManager(root, scan=scan)
     click.echo(f"\nBins ready: {dm.binned_h5(bin_size)}")
+
+    # A completed bin build is exactly when the fast (h5) grand-sum becomes
+    # available, so refresh the manual-reflections sum here (best-effort: a
+    # sum failure must not fail the bin build the user actually asked for).
+    from .core import reflection_sum
+    try:
+        res = reflection_sum.compute_and_save(dm, scan, overwrite=True,
+                                              progress=_make_progress("summing bins"))
+        click.echo(f"Reflection sum: {res['path']}  {res['shape']}")
+    except Exception as e:
+        click.echo(f"(reflection sum skipped: {e})")
+
+
+# ─────────────────────────────────────────────────────────────────────
+# reflection-sum — grand-sum a scan's bins (the "Compute histogram" artifact)
+# ─────────────────────────────────────────────────────────────────────
+@main.command(name='reflection-sum')
+@click.option('--scan', default=None, help='Scan number/name (defaults to config scan)')
+@click.option('--all-scans', is_flag=True,
+              help='Process every discovered scan that has built bins.')
+@click.option('--include-raw', is_flag=True,
+              help='With --all-scans, also sum scans that lack built bins '
+                   '(raw frames — slow over a network share).')
+@click.option('--overwrite/--no-overwrite', default=False,
+              help='Recompute even if reflection_sum.npz already exists.')
+@click.option('--max-bins', type=int, default=0,
+              help='Cap bins summed (0 = all); recorded in the file.')
+@click.option('--root', default='.', help='Project root directory')
+def reflection_sum_cmd(scan, all_scans, include_raw, max_bins, overwrite, root):
+    """Sum all of a scan's bins into Metadata/<scan>/reflection_sum.npz.
+
+    This is the artifact behind Setup → manual reflections → "Compute histogram":
+    the 2θ histogram is re-derived from it instantly, so precomputing it here
+    means the GUI opens with the histogram ready. Reads from a prebuilt NxN h5
+    when present (fast), else sums raw frames (slower).
+    """
+    from .core import reflection_sum
+    dm = DataManager(root, scan=scan)
+    scans = dm.discover_scans(usable_only=True) if all_scans else [scan]
+    if not scans:
+        click.echo("No scans to process.")
+        return
+    done = skipped = failed = 0
+    for name in scans:
+        # A "bin sum" needs bins: in batch mode, skip scans with no built h5
+        # rather than silently summing raw frames over the network share.
+        if all_scans and not include_raw:
+            bdir = dm.binned_dir(name)
+            if not (bdir.is_dir() and any(bdir.glob("xrd_*x*_bins.h5"))):
+                skipped += 1
+                continue
+        try:
+            res = reflection_sum.compute_and_save(
+                dm, name, max_bins=max_bins, overwrite=overwrite,
+                progress=_make_progress(f"summing {name or dm.scan_name}"))
+        except Exception as e:
+            failed += 1
+            click.echo(f"  {name}: FAILED — {e}")
+            continue
+        if res["skipped"]:
+            skipped += 1
+            click.echo(f"  {res['scan']}: exists, skipped (use --overwrite)")
+        else:
+            done += 1
+            src = "raw" if res["is_raw"] else f"{res['bin_size']}x{res['bin_size']}"
+            click.echo(f"  {res['scan']}: {res['shape']} from {src} → {res['path']}")
+    click.echo(f"\nreflection-sum: {done} computed, {skipped} skipped, {failed} failed.")
 
 
 # ─────────────────────────────────────────────────────────────────────

@@ -170,6 +170,22 @@ class MainWindow(QMainWindow):
             self._update_general()
         QTimer.singleShot(0, _do)
 
+    def refresh_project_context(self):
+        """Reload project metadata after Setup changes scans or linked inputs."""
+        if self.project_root is None:
+            return
+        self.dm = DataManager(self.project_root)
+        current = self.scan
+        self._populate_scans()
+        scans = self.dm.discover_scans()
+        if current in scans:
+            self.scan = current
+            self.scan_combo.setCurrentText(current)
+        elif scans:
+            self.scan = scans[0]
+        self._populate_reflections()
+        self._refresh_context()
+
     # ----- header -----------------------------------------------------
     def _build_header(self):
         row = QHBoxLayout()

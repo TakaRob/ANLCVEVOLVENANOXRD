@@ -25,6 +25,7 @@ from PyQt5.QtWidgets import (
 from ..config import DataManager
 from ..core import algorithms as nralgo
 from ..core import io
+from ..core import reflection_sum
 from ..core import reflections as refl_io
 from ..gui.palette import ARC_COLORS, COLORMAPS, _get_cmap, _hex_rgb
 
@@ -432,7 +433,7 @@ class ReflectionDialog(QDialog):
         return self.dm.metadata_scan_dir(self.scan) if self.scan else self.dm.metadata_dir
 
     def _sum_path(self):
-        return Path(self._sum_dir()) / "reflection_sum.npz"
+        return reflection_sum.sum_path(self.dm, self.scan)
 
     # ----- saved 2θ offset/scale (per scan) ---------------------------
     # The offset/scale are a living calibration preview (tth' = scale·tth +
@@ -474,18 +475,11 @@ class ReflectionDialog(QDialog):
         """Persist the current summed image for this scan. Returns path/None."""
         if self._image is None:
             return None
-        path = self._sum_path()
         try:
-            import os
-            path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = path.parent / (path.stem + ".tmp.npz")
-            np.savez_compressed(
-                str(tmp),
-                image=self._image.astype(np.float32),
-                is_raw=np.array(bool(getattr(self, "_raw_active", False))),
-                max_bins=np.array(int(self.max_bins.value())))
-            os.replace(str(tmp), str(path))
-            return path
+            return reflection_sum.save(
+                self.dm, self.scan, self._image,
+                is_raw=bool(getattr(self, "_raw_active", False)),
+                max_bins=int(self.max_bins.value()))
         except Exception:
             return None
 

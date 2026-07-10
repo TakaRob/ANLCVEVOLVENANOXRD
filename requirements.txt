@@ -1,0 +1,2 @@
+-e .
+hdf5plugin

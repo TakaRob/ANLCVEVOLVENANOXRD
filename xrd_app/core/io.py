@@ -428,6 +428,7 @@ def _corr(a, b) -> float:
 
 
 def assign_grid_from_positions(frame_x, frame_y, frame_map=None,
+                               force_xy: bool = False,
                                log: Callable[[str], None] = print):
     """Per-frame ``(row, col)`` for a scan, using true stage positions (X, Y).
 
@@ -446,13 +447,18 @@ def assign_grid_from_positions(frame_x, frame_y, frame_map=None,
     serpentine turn-counted lattice from the positions (the de-skew used for scans
     where file index ≠ scan row).
 
+    ``force_xy=True`` takes that same both-axes turn-counted path even for a clean
+    one-file-per-row scan — used by the ``positions_xy`` grid mode, where file
+    index is *not* a trustworthy spatial row (e.g. sweeps that pinch to a point
+    mid-scan) so rows must come from true X, not the file layout.
+
     Returns ``(grid_row, grid_col, n_rows, n_cols)``.
     """
     n_total = len(frame_x)
     x = _interp_nan(frame_x)
     y = _interp_nan(frame_y)
 
-    file_per_row = frame_map is not None and is_file_per_row(frame_map)[0]
+    file_per_row = (not force_xy) and frame_map is not None and is_file_per_row(frame_map)[0]
     if not file_per_row:
         # Irregular / non-file-per-row scan: snap both axes onto a turn-counted
         # lattice (best effort when file index ≠ scan row).
@@ -712,7 +718,7 @@ def generate_grid_mapping(
     output: Optional[Union[str, Path]] = None,
     n_cols: Optional[int] = None,
     deskew: bool = True,
-    deskew_method: str = "commanded",
+    deskew_method: str = "auto",
     log: Callable[[str], None] = print,
 ) -> dict:
     """Build the grid-mapping dict (and optionally write it to ``output``).
@@ -727,10 +733,12 @@ def generate_grid_mapping(
         or the CSV has no ``Y_Position``).
       - ``synthetic``: a regular serpentine raster from ``n_cols`` (last resort).
 
-    ``deskew_method`` selects the column assignment for file-per-row scans:
-    ``"commanded"`` (default, align by rank) or ``"perrow_offset"`` (DEPRECATED —
-    the per-row encoder offset / "triangle" method, kept only for comparison; see
-    :mod:`xrd_app.core.deskew_legacy`).
+    ``deskew_method`` selects how frames map to the lattice. ``"auto"`` (default)
+    picks ``"positions_xy"`` at 1×1 (both axes snapped to true (X, Y) — skew-free,
+    avoids the file-index-row bowtie) and ``"faithful"`` at coarser bins. Explicit
+    options: ``"positions_xy"``, ``"faithful"``/``"faithful_native"`` (file-index
+    rows, true-Y columns), ``"commanded"`` (align columns by rank), or
+    ``"perrow_offset"`` (DEPRECATED; see :mod:`xrd_app.core.deskew_legacy`).
 
     A CSV we recreated ourselves (tagged with :data:`RECREATED_CSV_MARKER`) is not
     treated as real positions — it routes to ``file_per_row``. The chosen source is
@@ -740,13 +748,26 @@ def generate_grid_mapping(
     xrd_files, frame_map, n_total = load_xrd_metadata(xrd_dir, scan_number)
     log(f"  {n_total} frames across {len(xrd_files)} H5 files")
 
+    # "auto" (the default): true-(X, Y) both-axes lattice at 1×1 — where the
+    # file-index-row `faithful` grid produces the skew "X"/bowtie — and the
+    # feature-preserving `faithful` grid at coarser bins (where it's already
+    # clean). Pass an explicit method to override.
+    if deskew_method in (None, "auto"):
+        deskew_method = "positions_xy" if bin_size == 1 else "faithful"
+
     have_positions = (pos_csv is not None and Path(pos_csv).exists()
                       and not is_recreated_csv(pos_csv))
     if have_positions and deskew:
         frame_x, frame_y = load_positions_xy(pos_csv, n_total)
         if np.isfinite(frame_y).any():
             fpr = is_file_per_row(frame_map)[0]
-            if fpr and deskew_method == "perrow_offset":
+            if deskew_method == "positions_xy":
+                log("Computing scan grid from true (X, Y) positions "
+                    "(positions_xy, both axes) ...")
+                grid_row, grid_col, n_rows, n_cols = assign_grid_from_positions(
+                    frame_x, frame_y, frame_map=frame_map, force_xy=True, log=log)
+                coordinate_source = "positions_xy"
+            elif fpr and deskew_method == "perrow_offset":
                 from .deskew_legacy import assign_grid_perrow_offset
                 log("Computing scan grid (DEPRECATED perrow_offset method) ...")
                 grid_row, grid_col, n_rows, n_cols = assign_grid_perrow_offset(
@@ -848,13 +869,22 @@ def generate_grid_mapping(
 # Binning (port of prebuild_bins.py)
 # ─────────────────────────────────────────────────────────────────────
 def get_compression_kwargs(compression: str):
-    if compression == "gzip":
-        return {"compression": "gzip", "compression_opts": 4}
+    if compression == "zstd":
+        try:
+            import hdf5plugin
+            return {**hdf5plugin.Zstd(clevel=3), "shuffle": True}, "zstd3+shuffle"
+        except (ImportError, AttributeError):
+            return {"compression": "gzip", "compression_opts": 4, "shuffle": True}, "gzip4+shuffle fallback"
+    elif compression == "gzip":
+        return {"compression": "gzip", "compression_opts": 4, "shuffle": True}, "gzip4+shuffle"
     elif compression == "lz4":
-        import hdf5plugin
-        return hdf5plugin.LZ4()
+        try:
+            import hdf5plugin
+            return hdf5plugin.LZ4(), "lz4"
+        except (ImportError, AttributeError):
+            return {"compression": "gzip", "compression_opts": 4, "shuffle": True}, "gzip4+shuffle fallback"
     elif compression == "none":
-        return {}
+        return {}, "none"
     else:
         raise ValueError(f"Unknown compression: {compression}")
 
@@ -863,7 +893,7 @@ def build_bins(
     grid_mapping: Union[str, Path, dict],
     output: Union[str, Path],
     bin_size: Optional[int] = None,
-    compression: str = "gzip",
+    compression: str = "zstd",
     log: Callable[[str], None] = print,
 ) -> Path:
     """Sum each bin's raw frames into a single binned HDF5 file.
@@ -883,9 +913,9 @@ def build_bins(
     h5_dataset = gm.get("h5_dataset", H5_DATASET)
     n_bins = len(bins)
 
-    comp_kwargs = get_compression_kwargs(compression)
+    comp_kwargs, compression_label = get_compression_kwargs(compression)
     log(f"Building {n_bins} bin images ({bin_size}x{bin_size}) -> {output}")
-    log(f"  Compression: {compression}")
+    log(f"  Compression: {compression_label}")
 
     # Write to a temporary file and atomically rename it onto `output` only
     # after a fully successful build. A ctrl+C / crash mid-build then leaves the

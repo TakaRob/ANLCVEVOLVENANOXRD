@@ -814,7 +814,13 @@ def _load_trajectory(dm, scan):
             return {"grid": [], "xy": None}
         with open(gm_path) as f:
             gm = json.load(f)
-        pos_csv = gm.get("positions_csv") or dm.position_csv(scan=scan)
+        # The stored positions_csv may be an absolute path from another machine
+        # (e.g. /net/micdata on the LAN host vs /mnt/z on a laptop). Fall back to
+        # the project-relative CSV when it doesn't resolve here, so the real-(x,y)
+        # trajectory still loads regardless of where the GUI runs.
+        pos_csv = gm.get("positions_csv")
+        if not pos_csv or not Path(pos_csv).exists():
+            pos_csv = dm.position_csv(scan=scan)
         return hd_core.scan_trajectory(gm, pos_csv)
     except Exception:
         return {"grid": [], "xy": None}

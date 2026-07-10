@@ -59,6 +59,37 @@ context that applies everywhere.
 - Don't commit large data (raw scans, `.tiff`, `.h5`, `mlruns/`); check
   `.gitignore` before adding files.
 
+## Data / project locations
+
+Processed data lives in several **project trees** (each a `config.yaml` +
+`Raw/ Binned/ Metadata/ Labels/ Study/`). Analysis scripts and `xrd-app` point at
+one via its project root. The three we actively pull data from:
+
+1. `TakaTest/TakaProject` (in-repo) — sandbox project; only **Scan_0203**
+   processed, but with many detector/bin/variant catalog combos.
+2. `/mnt/z/isn/2026-1/2026-1-Luo/ANLCVEVOLVENANOXRD` — a full working copy on the
+   `/mnt/z` share. Holds **two multi-scan projects**: `179-201/` (Scan_0179…0201)
+   and `215-226/` (Scan_0215…0226). Point at the sub-dir, not the top level.
+3. `/home/takaji/rocking_203_214` — the rocking-study project, scans **203–214**
+   (Scan_0203, 0204, 0205, 0207, …), with `Study/` + `Study_1x1/` outputs.
+
+**Local WSL copies of the priority scans (as of 2026-07-10):** the six focus
+scans now live on the fast local disk under `/home/takaji/`, each tree mirroring
+the `/mnt/z` layout so `xrd-app` can point straight at it — prefer these over the
+share for these scans:
+
+- `/home/takaji/179-201/` — Scan_0179, Scan_0182 (Binned: 1x1 + 3x3 + territory)
+- `/home/takaji/215-226/` — Scan_0215, Scan_0218 (Binned: 1x1 + 3x3)
+- `/home/takaji/rocking_203_214/` — Scan_0203, Scan_0207 (+ full rocking study)
+
+These are copies (verified byte-for-byte); originals remain on `/mnt/z`.
+
+Notes: `/mnt/z` is the slow WAN-mounted beamline share (~23 MB/s) — copy/cache
+locally for heavy reads rather than churning over it. Each tree is keyed by the
+`Scan_NNNN` dir name; use the app's own discovery (`workspace` /
+`DataManager.discover_scans()` / `core.catalogs`) rather than hardcoding scan
+paths. See also the memory notes on beamline data layout and the rocking study.
+
 ## Working style here
 
 - The user is a beamline scientist comfortable with notebooks and CLI batch
