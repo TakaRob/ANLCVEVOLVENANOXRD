@@ -205,3 +205,72 @@ def test_save_npz_and_summary(tmp_path):
     s = xrf.summary(res)
     assert s["elements"]["Test"]["total"] == 400.0
     assert s["shape"] == [1, 2]
+
+
+def test_element_maps_accumulates_grand_sum_spectrum(tmp_path):
+    # 2 files × 2 points, spike value 100 at bin 1000 → grand sum = 4×100 at bin 1000
+    _write_me7(tmp_path / "scan_0001_00001.h5", _spike(2, 0, 1000, 100))
+    _write_me7(tmp_path / "scan_0001_00002.h5", _spike(2, 0, 1000, 100))
+    res = xrf.element_maps(tmp_path, _grid_mapping(), _cfg())
+    spec = res["spectrum"]
+    assert spec.shape == (xrf.N_BINS,)
+    assert spec[1000] == 400.0
+    assert spec.sum() == 400.0
+
+
+def test_point_spectrum_sums_only_that_bins_frames(tmp_path):
+    # 2 files × 2 points. bins: 0_0→globals[0,1] (file0), 0_1→globals[2,3] (file1).
+    _write_me7(tmp_path / "scan_0001_00001.h5", _spike(2, 0, 1000, 100))
+    _write_me7(tmp_path / "scan_0001_00002.h5", _spike(2, 0, 1000, 50))
+    gm = _grid_mapping()
+    s00 = xrf.point_spectrum(tmp_path, gm, "0_0", [0, 1, 2], deadtime=False)
+    s01 = xrf.point_spectrum(tmp_path, gm, "0_1", [0, 1, 2], deadtime=False)
+    assert s00[1000] == 200.0      # 2 points × 100 (file 0)
+    assert s01[1000] == 100.0      # 2 points × 50  (file 1)
+    # a bin with no frames returns None (not an all-zero spectrum)
+    assert xrf.point_spectrum(tmp_path, gm, "9_9", [0], deadtime=False) is None
+
+
+def test_point_spectrum_respects_deadtime(tmp_path):
+    _write_me7(tmp_path / "scan_0001_00001.h5", _spike(2, 0, 1000, 100),
+               dtfactors=[[2.0, 2.0]] + [[1.0, 1.0]] * 6)
+    gm = _grid_mapping()
+    on = xrf.point_spectrum(tmp_path, gm, "0_0", [0], deadtime=True)
+    off = xrf.point_spectrum(tmp_path, gm, "0_0", [0], deadtime=False)
+    assert on[1000] == 2.0 * off[1000]
+
+
+def test_point_store_matches_raw_and_roundtrips(tmp_path):
+    _write_me7(tmp_path / "scan_0001_00001.h5", _spike(2, 0, 1000, 100))
+    _write_me7(tmp_path / "scan_0001_00002.h5", _spike(2, 0, 1000, 50))
+    gm = _grid_mapping()
+    store = xrf.build_point_store(tmp_path, gm, [0, 1, 2], deadtime=False)
+    assert store.shape == (4, xrf.N_BINS)   # 4 global frames
+    # store lookup == raw ME7 lookup, for every bin
+    for bk in ("0_0", "0_1"):
+        from_store = xrf.point_spectrum_from_store(store, gm, bk)
+        from_raw = xrf.point_spectrum(tmp_path, gm, bk, [0, 1, 2], deadtime=False)
+        assert np.array_equal(from_store, from_raw)
+    # save/load roundtrip (values preserved even if downcast to uint16)
+    p = tmp_path / "x_points.npz"
+    xrf.save_point_store(p, store, [0, 1, 2], False,
+                         {"ev_per_bin": 10.0, "offset_ev": 0.0})
+    d = xrf.load_point_store(p)
+    assert np.array_equal(d["frames"], store)
+    assert xrf.point_spectrum_from_store(store, gm, "9_9") is None
+
+
+def test_save_load_product_roundtrip(tmp_path):
+    _write_me7(tmp_path / "scan_0001_00001.h5", _spike(2, 0, 1000, 100))
+    _write_me7(tmp_path / "scan_0001_00002.h5", _spike(2, 0, 1000, 100))
+    res = xrf.element_maps(tmp_path, _grid_mapping(), _cfg())
+    out = tmp_path / "Scan_0001_xrf_1x1.npz"
+    xrf.save_npz(out, res)
+    prod = xrf.load_product(out)
+    assert prod["elements"] == ["Test"]
+    assert prod["shape"] == (1, 2)
+    assert prod["maps"]["Test"].shape == (1, 2)
+    assert prod["spectrum"][1000] == 400.0
+    # energy axis: bin × ev_per_bin + offset_ev (default 10 eV/bin, 0 offset)
+    assert prod["energy_ev"][1000] == pytest.approx(10000.0)
+    assert prod["rois"]["Test"]["line_ev"] == 10000.0

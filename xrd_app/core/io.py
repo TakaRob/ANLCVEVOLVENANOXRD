@@ -1201,7 +1201,8 @@ class _RawSource(BinImageSource):
         return acc if acc is not None else np.zeros((1, 1))
 
 
-def open_bin_source(dm, bin_size, scan=None, n_cols=None, grid_mapping=None) -> BinImageSource:
+def open_bin_source(dm, bin_size, scan=None, n_cols=None, grid_mapping=None,
+                    variant=None) -> BinImageSource:
     """Open the best per-bin image source for a scan + bin size.
 
     Uses the prebuilt ``xrd_NxN_bins.h5`` when it exists (fast); otherwise falls
@@ -1211,8 +1212,11 @@ def open_bin_source(dm, bin_size, scan=None, n_cols=None, grid_mapping=None) -> 
     save disk. Only when no binned file exists do we need the raw frames.
     ``grid_mapping`` overrides which grid the raw source bins against (so a
     feature catalog built on a non-default grid maps its bins correctly).
+    ``variant`` selects a non-default bins file (e.g. ``"territory"`` →
+    ``xrd_1x1_bins_territory.h5``, keyed by ``"<tid>_0"``), so a territorial
+    catalog loads its own per-territory frames rather than the plain grid's.
     """
-    h5 = dm.bins_h5(bin_size, scan=scan)
+    h5 = dm.bins_h5(bin_size, scan=scan, variant=variant)
     if h5 and os.path.exists(h5):
         return _H5Source(h5)
     return _RawSource(dm, bin_size, scan=scan, n_cols=n_cols, grid_mapping=grid_mapping)

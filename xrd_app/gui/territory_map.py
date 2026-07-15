@@ -187,7 +187,8 @@ class TerritoryMap(QWidget):
         bl.addWidget(self.cmap)
         lyt.addWidget(box)
 
-        sbox = QGroupBox(f"Shapes ({len(self.shapes)} kept)")
+        self.sbox = QGroupBox(f"Shapes ({len(self.shapes)} kept)")
+        sbox = self.sbox
         sl = QVBoxLayout(sbox)
         self.sort_combo = QComboBox()
         self.sort_combo.addItems([
@@ -221,13 +222,34 @@ class TerritoryMap(QWidget):
 
         self.metric.currentIndexChanged.connect(self._refresh_metric)
         self.reflection.currentIndexChanged.connect(self._refresh_metric)
+        self.reflection.currentIndexChanged.connect(self._update_sort_options)
+        self.reflection.currentIndexChanged.connect(self._populate_shape_list)
         self.cmap.currentIndexChanged.connect(self._refresh_metric)
         self.flist.currentItemChanged.connect(self._on_select)
 
     # ── shape list ordering ──────────────────────────────────────────
+    def _update_sort_options(self):
+        """Hide the reflection-grouping sort modes when a single reflection is
+        selected — with the list already filtered to one reflection they
+        collapse to plain size ordering, so they'd be redundant."""
+        single = self.reflection.currentText() != "(all reflections)"
+        view = self.sort_combo.view()
+        idx_large = self.sort_combo.findText("Reflection, then size (largest)")
+        idx_small = self.sort_combo.findText("Reflection, then size (smallest)")
+        for i in (idx_large, idx_small):
+            if i >= 0:
+                view.setRowHidden(i, single)
+        cur = self.sort_combo.currentIndex()
+        if single and cur in (idx_large, idx_small):
+            # Fall back to the equivalent plain-size ordering.
+            self.sort_combo.setCurrentText(
+                "Size (largest first)" if cur == idx_large else "Size (smallest first)")
+
     def _populate_shape_list(self):
         """Rebuild the shape list in the order chosen by the sort combo.
 
+        The list is first filtered to the reflection picked in the reflection
+        combo above (``(all reflections)`` keeps everything), then ordered.
         Size is the shape's cell count (``n_bins``); reflection is a secondary
         alphabetical key so shapes group by reflection then descend/ascend by
         size within each group.
@@ -241,8 +263,17 @@ class TerritoryMap(QWidget):
         def refl_of(s):
             return str(s.get("reflection", "") or "")
 
-        mode = self.sort_combo.currentText()
+        # Filter to the selected reflection (matches the combo's own key).
+        want = self.reflection.currentText()
         shapes = list(self.shapes)
+        if want != "(all reflections)":
+            shapes = [s for s in shapes if s.get("reflection", "?") == want]
+        self.sbox.setTitle(
+            f"Shapes ({len(shapes)} of {len(self.shapes)} kept)"
+            if want != "(all reflections)"
+            else f"Shapes ({len(self.shapes)} kept)")
+
+        mode = self.sort_combo.currentText()
         if mode == "Size (largest first)":
             shapes.sort(key=size_of, reverse=True)
         elif mode == "Size (smallest first)":

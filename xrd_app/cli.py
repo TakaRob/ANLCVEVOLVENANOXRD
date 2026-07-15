@@ -696,6 +696,41 @@ def territory_grid(target_size, scan, xrd_dir, positions, variant, output, root)
 
 
 # ─────────────────────────────────────────────────────────────────────
+# territory-build — the whole skew-free territorial reference in one command
+# ─────────────────────────────────────────────────────────────────────
+@main.command(name='territory-build')
+@click.option('--target-size', type=int, default=9,
+              help='Frames per territory before it stops growing (see territory-grid).')
+@click.option('--scan', default=None, help='Scan number/name (defaults to config scan)')
+@click.option('--algorithm', default=None, help='Peak detector path OR bundled name')
+@click.option('--snr', type=float, default=4.0, help='SNR threshold for detection')
+@click.option('--compression', type=click.Choice(['zstd', 'gzip', 'lz4', 'none']), default='zstd')
+@click.option('--root', default='.', help='Project root directory')
+@click.pass_context
+def territory_build(ctx, target_size, scan, algorithm, snr, compression, root):
+    """Build the whole skew-free territorial reference in one command.
+
+    Chains territory-grid → bin → peaks → shapes (all ``--variant territory`` at
+    1×1, with coordinate linking) so the Territory Map and the Device-View
+    "Territorial reference available →" button can be produced without running
+    the four steps by hand. This is the one-button version of the TERRITORY.md
+    chain — the GUI's "Build territorial reference" button shells out to it.
+    """
+    dm = DataManager(root, scan=scan)
+    # The peak set name shapes will pick up (same rule peaks/batch use).
+    algo = algorithm or Path(dm.detector_script(algorithm, bin_size=1)).stem
+    ctx.invoke(territory_grid, target_size=target_size, scan=scan, root=root)
+    ctx.invoke(bin, bin_size=1, scan=scan, variant='territory',
+               compression=compression, root=root)
+    ctx.invoke(peaks, bin_size=1, scan=scan, algorithm=algorithm, snr=snr,
+               variant='territory', root=root)
+    ctx.invoke(shapes, bin_size=1, scan=scan, algorithm='territory',
+               variant='territory', peak_algo=algo, root=root)
+    click.echo("\nTerritorial reference complete: "
+               "territory-grid → bin → peaks → shapes (--variant territory)")
+
+
+# ─────────────────────────────────────────────────────────────────────
 # create-positions — build a REAL position CSV from SOCKETSERVER interferometry
 # ─────────────────────────────────────────────────────────────────────
 @main.command(name='create-positions')
@@ -1783,16 +1818,20 @@ def rsm(scans, in_dir, nbins, min_intensity, subtract_median, out_path, root):
 # ─────────────────────────────────────────────────────────────────────
 @main.command()
 @click.option('--scans', help='Comma-separated scans (default: config scan)')
-@click.option('--bin-size', type=int, default=3, help='Grid bin size to map XRF onto')
+@click.option('--bin-size', type=int, default=1,
+              help='Grid bin size to map XRF onto (default 1: finest, underlays any bin size)')
 @click.option('--me7-dir', help='ME7 directory (defaults to <scan raw>/ME7)')
 @click.option('--config', 'config_path', help='XRF elements/calibration JSON (defaults to Metadata)')
 @click.option('--no-deadtime', is_flag=True, help='Disable XSPRESS3 deadtime correction')
 @click.option('--refine-roi', is_flag=True,
               help='Data-driven ROI: center windows on observed peaks in the grand-sum spectrum')
+@click.option('--save-points', is_flag=True,
+              help='Also write <scan>_xrf_points.npz: compact per-frame spectra so the '
+                   'GUI histogram needs no raw ME7 (~10x smaller than raw)')
 @click.option('--grid-mapping', help='Grid mapping JSON (defaults to resolved)')
 @click.option('--out-dir', default=None, help='Output dir (default: per-scan Metadata dir)')
 @click.option('--root', default='.', help='Project root directory')
-def xrf(scans, bin_size, me7_dir, config_path, no_deadtime, refine_roi, grid_mapping, out_dir, root):
+def xrf(scans, bin_size, me7_dir, config_path, no_deadtime, refine_roi, save_points, grid_mapping, out_dir, root):
     """ME7 (XSPRESS3) fluorescence → per-element spatial maps on the XRD grid.
 
     For each scan: read the ME7 MCA spectra, deadtime-correct + sum the enabled
@@ -1832,12 +1871,11 @@ def xrf(scans, bin_size, me7_dir, config_path, no_deadtime, refine_roi, grid_map
         if no_deadtime:
             cfg["deadtime_correction"] = False
 
-        # ME7 dir: override → <raw scan>/ME7
+        # ME7 dir: override → local copy → config raw sibling
         if me7_dir:
             me7 = Path(me7_dir)
         else:
-            xrd = dm.xrd_frames_dir(scan=scan)
-            me7 = (xrd.parent if xrd.name.upper() == "XRD" else xrd) / "ME7"
+            me7 = dm.me7_dir(scan=scan)
         _require(me7, f"ME7 directory for {scan}")
 
         gm_path = Path(grid_mapping) if grid_mapping else dm.grid_mapping(bin_size=bin_size, scan=scan)
@@ -1867,10 +1905,13 @@ def xrf(scans, bin_size, me7_dir, config_path, no_deadtime, refine_roi, grid_map
 
         result = xrf_core.element_maps(me7, gm, cfg, log=click.echo)
 
-        out_base = Path(out_dir) if out_dir else dm.metadata_scan_dir(scan)
-        if out_dir and not out_base.is_absolute():
-            out_base = Path(root) / out_base
-        npz = out_base / f"{scan}_xrf.npz"
+        if out_dir:
+            out_base = Path(out_dir)
+            if not out_base.is_absolute():
+                out_base = Path(root) / out_base
+            npz = out_base / f"{scan}_xrf.npz"
+        else:
+            npz = dm.xrf_product(scan=scan)
         xrf_core.save_npz(npz, result)
         smry = xrf_core.summary(result)
         if refine_diag is not None:
@@ -1881,6 +1922,19 @@ def xrf(scans, bin_size, me7_dir, config_path, no_deadtime, refine_roi, grid_map
         tot = {n: f"{result['maps'][n].sum():.3g}" for n in result["elements"]}
         click.echo(f"  {scan}: grid {nr}x{nc}  dropped={result['dropped']}  "
                    f"totals={tot} -> {npz.name}")
+
+        if save_points:
+            click.echo("[xrf] building per-frame spectrum store (--save-points)…")
+            store = xrf_core.build_point_store(
+                me7, gm, cfg["channels"], cfg["deadtime_correction"], log=click.echo)
+            if out_dir:
+                pnpz = out_base / f"{scan}_xrf_points.npz"
+            else:
+                pnpz = dm.xrf_points_product(scan=scan)
+            xrf_core.save_point_store(pnpz, store, cfg["channels"],
+                                      cfg["deadtime_correction"], cfg["calibration"])
+            mb = pnpz.stat().st_size / 1e6
+            click.echo(f"  {scan}: {store.shape[0]} frames -> {pnpz.name} ({mb:.1f} MB)")
 
 
 # ─────────────────────────────────────────────────────────────────────

@@ -298,13 +298,16 @@ class DataManager:
             json.dump(registry, f, indent=2)
         return p
 
-    def discover_scans(self, usable_only: bool = False) -> list:
+    def discover_scans(self, usable_only: bool = False,
+                       selected_only: bool = False) -> list:
         """List ``Scan_NNNN`` names known to this project.
 
         Prefers the Raw/scans.json registry; falls back to scanning the per-scan
         subdirectories under ``Binned/`` and ``Labels/``. With ``usable_only``,
         drops registry scans that have no frames (incomplete / no ``XRD/`` files)
-        so batch runs skip them.
+        so batch runs skip them. With ``selected_only``, further narrows to the
+        user-curated :meth:`visible_scans` subset (what the GUI Scan selector
+        shows) — a stale/empty selection is ignored so the list never goes empty.
         """
         reg = self.scans_registry()
         if reg:
@@ -313,14 +316,49 @@ class DataManager:
                 names = [n for n in names
                          if (reg[n].get("n_files") or 0) > 0
                          and (reg[n].get("n_frames") or 0) > 0]
-            return names
-        found = set()
-        for base in (self.binned_dir_root, self.labels_dir_root):
-            if base.is_dir():
-                for p in base.iterdir():
-                    if p.is_dir() and re.fullmatch(r"Scan_\d+", p.name):
-                        found.add(p.name)
-        return sorted(found, key=lambda n: self.scan_number_of(n) or 0)
+        else:
+            found = set()
+            for base in (self.binned_dir_root, self.labels_dir_root):
+                if base.is_dir():
+                    for p in base.iterdir():
+                        if p.is_dir() and re.fullmatch(r"Scan_\d+", p.name):
+                            found.add(p.name)
+            names = sorted(found, key=lambda n: self.scan_number_of(n) or 0)
+        if selected_only:
+            vis = self.visible_scans()
+            if vis:
+                keep = set(vis)
+                filtered = [n for n in names if n in keep]
+                if filtered:  # ignore a stale selection that hides everything
+                    names = filtered
+        return names
+
+    def visible_scans(self) -> Optional[list]:
+        """User-curated subset of registered scans shown in the GUI selector.
+
+        Stored as a top-level ``visible_scans`` list in ``config.yaml`` and set
+        via Setup → "Choose scans to show…". ``None`` (absent or empty) means
+        show every registered scan. Names are normalized to ``Scan_NNNN``.
+        """
+        v = self.config.get("visible_scans")
+        if not v:
+            return None
+        names = [self.scan_name_of(n) for n in v]
+        names = [n for n in names if n]
+        return names or None
+
+    def set_visible_scans(self, names) -> None:
+        """Persist the curated visible-scan subset (None/empty clears → all)."""
+        if names:
+            norm = []
+            for n in names:
+                nm = self.scan_name_of(n)
+                if nm and nm not in norm:
+                    norm.append(nm)
+            self.config.data["visible_scans"] = norm
+        else:
+            self.config.data.pop("visible_scans", None)
+        self.config.save()
 
     # ----- per-scan directories ---------------------------------------
     def labels_dir(self, scan: object = None) -> Path:
@@ -398,6 +436,33 @@ class DataManager:
         base = self.raw_scan_dir(override, scan)
         sub = base / "SOCKETSERVER"
         return sub if sub.is_dir() else base
+
+    def me7_dir(self, override: Optional[str] = None, scan: object = None) -> Optional[Path]:
+        """Directory of the scan's ME7 (XSPRESS3) XRF H5 files, or ``None``.
+
+        Prefers a **local** ``<project>/Raw/<scan>/ME7`` copy (as mirrored for the
+        focus scans) over the config's ``data_sources`` raw path, which may point
+        at the beamline share/LAN (``/net/micdata`` or ``/mnt/z``) that isn't
+        mounted here. Sibling of :meth:`xrd_frames_dir`.
+        """
+        if override:
+            p = self._abs(override)
+            return p if p and p.is_dir() else None
+        name = self.scan_name_of(scan) if scan is not None else self.scan_name
+        # 1) local project copy (fast disk, mirrors the /mnt/z layout)
+        if name:
+            local = self.root / "Raw" / name / "ME7"
+            if local.is_dir():
+                return local
+        # 2) sibling of the resolved raw XRD dir (share/LAN or elsewhere)
+        try:
+            xrd = self.xrd_frames_dir(scan=scan)
+            cand = (xrd.parent if xrd.name.upper() == "XRD" else xrd) / "ME7"
+            if cand.is_dir():
+                return cand
+        except Exception:
+            pass
+        return None
 
     def position_csv(self, override: Optional[str] = None, scan: object = None) -> Path:
         if override:
@@ -544,6 +609,28 @@ class DataManager:
         tag = f"_{variant}" if variant else ""
         return self.binned_dir(scan) / f"xrd_{bin_size}x{bin_size}_bins{tag}.h5"
 
+    def xrf_product(self, scan: object = None) -> Path:
+        """Saved XRF element-map product for a scan.
+
+        Written by ``xrd-app xrf`` into the per-scan Metadata dir as
+        ``<scan>_xrf.npz``. One product per scan, computed at 1×1 so it can
+        underlay a device map at any bin size (the maps are scaled onto the bin
+        grid). The GUI loads this via ``core.xrf.load_product`` — never raw ME7.
+        """
+        name = self.scan_name_of(scan) if scan is not None else self.scan_name
+        return self.metadata_scan_dir(scan) / f"{name}_xrf.npz"
+
+    def xrf_points_product(self, scan: object = None) -> Path:
+        """Per-frame XRF spectrum store for a scan (``<scan>_xrf_points.npz``).
+
+        Compact, lossless per-global-frame summed spectra (see
+        ``core.xrf.build_point_store``). Lets the Shape/Verify per-frame histogram
+        read a small file instead of raw ME7. Loaded lazily — separate from the
+        small ``xrf_product`` maps the device-view underlay uses.
+        """
+        name = self.scan_name_of(scan) if scan is not None else self.scan_name
+        return self.metadata_scan_dir(scan) / f"{name}_xrf_points.npz"
+
     # ----- compatibility shims for the embedded legacy GUIs -----------
     # The viewer/device_map/orientation modules were written against the old
     # DataManager API (results_dir / holdout_dir / bins_h5). Keep thin aliases
@@ -556,8 +643,8 @@ class DataManager:
         return self.metadata_dir
 
     def bins_h5(self, bin_size: int, override: Optional[str] = None,
-                scan: object = None) -> Path:
-        return self.binned_h5(bin_size, override, scan)
+                scan: object = None, variant: Optional[str] = None) -> Path:
+        return self.binned_h5(bin_size, override, scan, variant=variant)
 
     # ----- detector / algorithm libraries -----------------------------
     def algorithms_dir(self, kind: str = "peak") -> Path:

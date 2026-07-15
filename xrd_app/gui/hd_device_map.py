@@ -115,7 +115,7 @@ def load_hd_features(catalog_path):
 # ── main window ────────────────────────────────────────────────────
 class HDDeviceMapWindow(QMainWindow):
     def __init__(self, results_dir, bin_size, catalog_path, catalogs_list,
-                 trajectory=None):
+                 trajectory=None, xrf=None):
         super().__init__()
         self.setWindowTitle("HD Device View — 1×1 beneath the feature map")
         self.setGeometry(50, 30, 1450, 900)
@@ -145,6 +145,18 @@ class HDDeviceMapWindow(QMainWindow):
         self._redraw_timer.timeout.connect(self._redraw)
 
         self._load(catalog_path)
+        # XRF underlay: only usable if its 1×1 grid matches this HD grid.
+        if xrf and any(np.asarray(m).shape != (self.n_rows, self.n_cols)
+                       for m in xrf["maps"].values()):
+            xrf = None
+        self.xrf = xrf
+        self.xrf_elements = list(xrf["elements"]) if xrf else []
+        self.xrf_colors = dv._element_colors(self.xrf_elements)
+        self.visible_xrf = list(self.xrf_elements)
+        self.xrf_on = False
+        self.xrf_mode = "dominant"
+        self.xrf_normalize = True
+        self.xrf_opacity = 0.75
         self._build_ui()
         self._redraw()
 
@@ -207,6 +219,12 @@ class HDDeviceMapWindow(QMainWindow):
         self.plot = self.glw.addPlot(row=0, col=0)
         self.plot.setAspectLocked(True)
         self.plot.getViewBox().setBackgroundColor("w")
+        # XRF underlay beneath the 1×1 heatmap (shows through the scan's holes and
+        # the "none" metric); same lower-Z pattern as the binned Device View.
+        self.xrf_img = pg.ImageItem()
+        self.xrf_img.setZValue(-10)
+        self.xrf_img.setVisible(False)
+        self.plot.addItem(self.xrf_img)
         self.img_item = pg.ImageItem()
         self.plot.addItem(self.img_item)
         self.colorbar = None
@@ -339,6 +357,8 @@ class HDDeviceMapWindow(QMainWindow):
         mgl.addLayout(ch)
         rl.addWidget(mg)
 
+        self._build_xrf_group(rl)
+
         # Chi range: histogram above the slider (like Device View)
         cg = QGroupBox("χ angle range")
         cgl = QVBoxLayout(cg)
@@ -437,11 +457,13 @@ class HDDeviceMapWindow(QMainWindow):
         else:
             self.img_item.setVisible(True)
             self._redraw_grid(visible, chi_range, isolate)
+        self._update_xrf_underlay()
         if self.show_trajectory:
             self._draw_trajectory(
                 DISPLAY_XY if (self.display == DISPLAY_XY and self.positions_real)
                 else DISPLAY_GRID)
         self._rebuild_legend(visible)
+        self.plot.setTitle(f"HD 1×1  —  {self.n_cols}×{self.n_rows} (col×row)")
         if self._locked_idx is not None and isolate:
             self._show_feature_info(self._locked_idx)
 
@@ -582,6 +604,120 @@ class HDDeviceMapWindow(QMainWindow):
             interactive=False, values=(vmin, vmax), colorMap=cmap,
             label=METRIC_ZLABELS.get(self.metric, ""))
         self.glw.addItem(self.colorbar, row=0, col=1)
+
+    # ----- XRF underlay ----------------------------------------------
+    def _build_xrf_group(self, parent_layout):
+        """1×1 element-fluorescence underlay controls (mirrors Device View)."""
+        grp = QGroupBox("XRF underlay (1×1)")
+        gl = QVBoxLayout(grp)
+        have = bool(self.xrf)
+
+        self.xrf_on_cb = QCheckBox("Underlay XRF map")
+        self.xrf_on_cb.setEnabled(have)
+        self.xrf_on_cb.setToolTip(
+            "Show the 1×1 ME7 fluorescence element map beneath the feature map."
+            if have else
+            "No 1×1 XRF product for this scan.\n"
+            "Run:  xrd-app xrf --scans <scan> --bin-size 1 --refine-roi")
+        self.xrf_on_cb.toggled.connect(self._on_xrf_toggle)
+        gl.addWidget(self.xrf_on_cb)
+
+        mode_row = QHBoxLayout()
+        mode_row.addWidget(QLabel("Show:"))
+        self.xrf_mode_combo = QComboBox()
+        self.xrf_mode_combo.addItem("Dominant element (ranked)", "dominant")
+        self.xrf_mode_combo.addItem("Total intensity", "total")
+        self.xrf_mode_combo.setEnabled(have)
+        self.xrf_mode_combo.currentIndexChanged.connect(self._on_xrf_mode_changed)
+        mode_row.addWidget(self.xrf_mode_combo)
+        mode_row.addStretch()
+        gl.addLayout(mode_row)
+
+        opt_row = QHBoxLayout()
+        self.xrf_norm_cb = QCheckBox("Normalize per element")
+        self.xrf_norm_cb.setChecked(self.xrf_normalize)
+        self.xrf_norm_cb.setEnabled(have)
+        self.xrf_norm_cb.toggled.connect(self._on_xrf_norm_toggle)
+        opt_row.addWidget(self.xrf_norm_cb)
+        opt_row.addStretch()
+        opt_row.addWidget(QLabel("Opacity %:"))
+        self.xrf_opacity_spin = QSpinBox()
+        self.xrf_opacity_spin.setRange(0, 100)
+        self.xrf_opacity_spin.setValue(int(self.xrf_opacity * 100))
+        self.xrf_opacity_spin.setEnabled(have)
+        self.xrf_opacity_spin.valueChanged.connect(self._on_xrf_opacity_changed)
+        opt_row.addWidget(self.xrf_opacity_spin)
+        gl.addLayout(opt_row)
+
+        self.xrf_cbs = {}
+        if have:
+            btn_row = QHBoxLayout()
+            ab = QPushButton("All"); ab.setFixedWidth(45)
+            ab.clicked.connect(lambda: self._set_all_xrf(True))
+            nb = QPushButton("None"); nb.setFixedWidth(45)
+            nb.clicked.connect(lambda: self._set_all_xrf(False))
+            btn_row.addWidget(ab); btn_row.addWidget(nb); btn_row.addStretch()
+            gl.addLayout(btn_row)
+            row = QHBoxLayout()
+            for i, el in enumerate(self.xrf_elements):
+                cb = QCheckBox(el)
+                cb.setChecked(True)
+                cb.setStyleSheet(f"QCheckBox {{ color: {self.xrf_colors[el]}; }}")
+                cb.toggled.connect(self._on_xrf_layer_toggle)
+                row.addWidget(cb)
+                self.xrf_cbs[el] = cb
+                if (i + 1) % 3 == 0:
+                    gl.addLayout(row)
+                    row = QHBoxLayout()
+            if row.count():
+                gl.addLayout(row)
+        parent_layout.addWidget(grp)
+
+    def _update_xrf_underlay(self):
+        """Refresh the underlay image (grid space only) from the current state."""
+        if not hasattr(self, "xrf_img"):
+            return
+        grid_space = not (self.display == DISPLAY_XY and self.positions_real)
+        if not (self.xrf_on and self.xrf and grid_space):
+            self.xrf_img.setVisible(False)
+            return
+        rgba = dv.compute_xrf_rgba(self.xrf, self.visible_xrf, self.xrf_mode,
+                                   self.xrf_normalize, self.xrf_opacity, self.xrf_colors)
+        if rgba is None:
+            self.xrf_img.setVisible(False)
+            return
+        if self.reflect_xy:   # match the flipped 1×1 heatmap
+            rgba = np.ascontiguousarray(rgba.transpose(1, 0, 2))
+        self.xrf_img.setImage(rgba, autoLevels=False)
+        self.xrf_img.setVisible(True)
+
+    def _on_xrf_toggle(self, checked):
+        self.xrf_on = bool(checked)
+        self._update_xrf_underlay()
+
+    def _on_xrf_mode_changed(self):
+        self.xrf_mode = self.xrf_mode_combo.currentData()
+        self._update_xrf_underlay()
+
+    def _on_xrf_norm_toggle(self, checked):
+        self.xrf_normalize = bool(checked)
+        self._update_xrf_underlay()
+
+    def _on_xrf_opacity_changed(self, val):
+        self.xrf_opacity = val / 100.0
+        self._update_xrf_underlay()
+
+    def _on_xrf_layer_toggle(self):
+        self.visible_xrf = [e for e in self.xrf_elements if self.xrf_cbs[e].isChecked()]
+        self._update_xrf_underlay()
+
+    def _set_all_xrf(self, state):
+        for cb in self.xrf_cbs.values():
+            cb.blockSignals(True)
+            cb.setChecked(state)
+            cb.blockSignals(False)
+        self.visible_xrf = [e for e in self.xrf_elements if self.xrf_cbs[e].isChecked()]
+        self._update_xrf_underlay()
 
     # ----- interactions ----------------------------------------------
     def _check_all(self):
@@ -762,7 +898,11 @@ class HDDeviceMapWindow(QMainWindow):
     def get_view_state(self):
         return {"metric": self.metric, "display": self.display,
                 "isolate": self._isolate, "trajectory": self.show_trajectory,
-                "dot_size": self.dot_size, "reflect_xy": self.reflect_xy}
+                "dot_size": self.dot_size, "reflect_xy": self.reflect_xy,
+                "xrf_on": self.xrf_on, "xrf_mode": self.xrf_mode,
+                "xrf_normalize": self.xrf_normalize, "xrf_opacity": self.xrf_opacity,
+                "xrf_hidden": [e for e, cb in self.xrf_cbs.items()
+                               if not cb.isChecked()]}
 
     def apply_view_state(self, state):
         if not state:
@@ -786,7 +926,36 @@ class HDDeviceMapWindow(QMainWindow):
         if "reflect_xy" in state:
             self.reflect_xy = bool(state["reflect_xy"])
             self.reflect_cb.setChecked(self.reflect_xy)
+        self._apply_xrf_view_state(state)
         self._redraw()
+
+    def _apply_xrf_view_state(self, state):
+        if "xrf_mode" in state and self.xrf_mode_combo.findData(state["xrf_mode"]) >= 0:
+            self.xrf_mode = state["xrf_mode"]
+            self.xrf_mode_combo.blockSignals(True)
+            self.xrf_mode_combo.setCurrentIndex(self.xrf_mode_combo.findData(self.xrf_mode))
+            self.xrf_mode_combo.blockSignals(False)
+        if "xrf_normalize" in state:
+            self.xrf_normalize = bool(state["xrf_normalize"])
+            self.xrf_norm_cb.blockSignals(True)
+            self.xrf_norm_cb.setChecked(self.xrf_normalize)
+            self.xrf_norm_cb.blockSignals(False)
+        if "xrf_opacity" in state:
+            self.xrf_opacity = float(state["xrf_opacity"])
+            self.xrf_opacity_spin.blockSignals(True)
+            self.xrf_opacity_spin.setValue(int(self.xrf_opacity * 100))
+            self.xrf_opacity_spin.blockSignals(False)
+        hidden = set(state.get("xrf_hidden", []))
+        for e, cb in self.xrf_cbs.items():
+            cb.blockSignals(True)
+            cb.setChecked(e not in hidden)
+            cb.blockSignals(False)
+        self.visible_xrf = [e for e in self.xrf_elements if self.xrf_cbs[e].isChecked()]
+        if "xrf_on" in state and self.xrf:
+            self.xrf_on = bool(state["xrf_on"])
+            self.xrf_on_cb.blockSignals(True)
+            self.xrf_on_cb.setChecked(self.xrf_on)
+            self.xrf_on_cb.blockSignals(False)
 
 
 def _message_window(message, detail=""):
@@ -840,7 +1009,36 @@ def build_window(project_root=".", scan=None, bin_size=3, catalog=None):
     if not cats:
         cats = [Path(path)]
     trajectory = _load_trajectory(dm, scan)
-    return HDDeviceMapWindow(results_dir, bin_size, path, cats, trajectory=trajectory)
+    # HD is 1×1, so load the 1×1 XRF product (matching the fine grid) for the
+    # underlay. Shape is validated against the HD grid inside the window.
+    xrf = _load_hd_xrf(dm, scan)
+    return HDDeviceMapWindow(results_dir, bin_size, path, cats,
+                             trajectory=trajectory, xrf=xrf)
+
+
+def _load_hd_xrf(dm, scan):
+    """1×1 XRF element maps for the HD underlay, or ``None`` (best-effort)."""
+    try:
+        from ..core import xrf as xrf_core
+        path = dm.xrf_product(scan=scan)
+        if not path.exists():
+            return None
+        prod = xrf_core.load_product(path)
+    except Exception:
+        return None
+    maps = prod.get("maps") or {}
+    elements = [e for e in prod.get("elements", []) if e in maps]
+    if not elements:
+        return None
+    norm = {}
+    for e in elements:
+        m = np.asarray(maps[e], dtype=float)
+        pos = m[m > 0]
+        hi = np.percentile(pos, 99.0) if pos.size else 0.0
+        norm[e] = np.clip(m / hi, 0.0, 1.0) if hi > 0 else np.zeros_like(m)
+    return {"elements": elements,
+            "maps": {e: np.asarray(maps[e], dtype=float) for e in elements},
+            "norm": norm}
 
 
 def launch_gui(project_root=".", bin_size=3, scan=None):

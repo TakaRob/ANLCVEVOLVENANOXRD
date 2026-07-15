@@ -106,5 +106,20 @@ def create_project(name: str, workspace: Optional[Path] = None,
     cfg = ProjectConfig(root, data=default_config(name, root, scan_number))
     cfg.create_tree()
     cfg.save()
+
+    # Seed an editable default reflection set so a GUI-created project resolves
+    # reflections from its own Metadata/ out of the box — identical to what
+    # ``xrd-app init`` does. Without this, a project made via New project… would
+    # silently fall back to the hidden bundled set (no "Project default" in the
+    # reflections selector). Best-effort: a seeding failure must not block
+    # project creation.
+    try:
+        from .core import reflections as refl_io
+        mdir = cfg.root / cfg.get("paths", "metadata_dir", default="Metadata")
+        refl_io.save(refl_io.default_reflections(),
+                     mdir / "reflections.json", mdir / "reflections.py")
+    except Exception:
+        pass
+
     set_last_project(root)
     return root

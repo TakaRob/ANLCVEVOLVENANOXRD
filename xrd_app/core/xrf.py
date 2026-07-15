@@ -67,6 +67,89 @@ DEFAULT_REFINEMENT = {
 }
 
 
+# ─────────────────────────────────────────────────────────────────────
+# characteristic X-ray emission-line reference (the "public dictionary")
+# ─────────────────────────────────────────────────────────────────────
+# Principal emission energies (eV) from standard X-ray tables (X-ray Data
+# Booklet). Kα1 / Kβ1 for light-to-mid Z; Lα1 / Lβ1 / Mα1 for heavy elements
+# whose K edge sits above the 15 keV incident beam (only their L/M lines are
+# excited here). Used by the XRF calibration dialog to pick/label lines and to
+# match detected peaks. Not exhaustive — covers the perovskite/halide sample set,
+# common substrates, and likely contaminants.
+EMISSION_LINES = [
+    # light / mid-Z K lines
+    {"element": "Al", "line": "Ka", "energy_ev": 1487.0},
+    {"element": "Si", "line": "Ka", "energy_ev": 1740.0},
+    {"element": "P",  "line": "Ka", "energy_ev": 2014.0},
+    {"element": "S",  "line": "Ka", "energy_ev": 2308.0},
+    {"element": "Cl", "line": "Ka", "energy_ev": 2622.0},
+    {"element": "Ar", "line": "Ka", "energy_ev": 2958.0},
+    {"element": "K",  "line": "Ka", "energy_ev": 3314.0},
+    {"element": "Ca", "line": "Ka", "energy_ev": 3692.0},
+    {"element": "Ti", "line": "Ka", "energy_ev": 4511.0},
+    {"element": "Ti", "line": "Kb", "energy_ev": 4932.0},
+    {"element": "V",  "line": "Ka", "energy_ev": 4952.0},
+    {"element": "Cr", "line": "Ka", "energy_ev": 5415.0},
+    {"element": "Mn", "line": "Ka", "energy_ev": 5899.0},
+    {"element": "Fe", "line": "Ka", "energy_ev": 6404.0},
+    {"element": "Fe", "line": "Kb", "energy_ev": 7058.0},
+    {"element": "Co", "line": "Ka", "energy_ev": 6930.0},
+    {"element": "Ni", "line": "Ka", "energy_ev": 7478.0},
+    {"element": "Cu", "line": "Ka", "energy_ev": 8048.0},
+    {"element": "Cu", "line": "Kb", "energy_ev": 8905.0},
+    {"element": "Zn", "line": "Ka", "energy_ev": 8639.0},
+    {"element": "Ga", "line": "Ka", "energy_ev": 9252.0},
+    {"element": "Ge", "line": "Ka", "energy_ev": 9886.0},
+    {"element": "As", "line": "Ka", "energy_ev": 10544.0},
+    {"element": "Se", "line": "Ka", "energy_ev": 11222.0},
+    {"element": "Br", "line": "Ka", "energy_ev": 11924.0},
+    {"element": "Br", "line": "Kb", "energy_ev": 13291.0},
+    {"element": "Rb", "line": "Ka", "energy_ev": 13395.0},
+    {"element": "Sr", "line": "Ka", "energy_ev": 14165.0},
+    {"element": "Y",  "line": "Ka", "energy_ev": 14958.0},
+    # heavy-element L / M lines (K edge above the 15 keV beam)
+    {"element": "Ag", "line": "La", "energy_ev": 2984.0},
+    {"element": "Cd", "line": "La", "energy_ev": 3133.0},
+    {"element": "In", "line": "La", "energy_ev": 3287.0},
+    {"element": "In", "line": "Lb", "energy_ev": 3487.0},
+    {"element": "Sn", "line": "La", "energy_ev": 3444.0},
+    {"element": "Sn", "line": "Lb", "energy_ev": 3663.0},
+    {"element": "Sb", "line": "La", "energy_ev": 3604.0},
+    {"element": "Te", "line": "La", "energy_ev": 3769.0},
+    {"element": "I",  "line": "La", "energy_ev": 3938.0},
+    {"element": "I",  "line": "Lb", "energy_ev": 4221.0},
+    {"element": "Cs", "line": "La", "energy_ev": 4286.0},
+    {"element": "Cs", "line": "Lb", "energy_ev": 4620.0},
+    {"element": "Ba", "line": "La", "energy_ev": 4466.0},
+    {"element": "Ba", "line": "Lb", "energy_ev": 4828.0},
+    {"element": "W",  "line": "La", "energy_ev": 8398.0},
+    {"element": "W",  "line": "Ma", "energy_ev": 1775.0},
+    {"element": "Au", "line": "Ma", "energy_ev": 2123.0},
+    {"element": "Au", "line": "La", "energy_ev": 9713.0},
+    {"element": "Au", "line": "Lb", "energy_ev": 11442.0},
+    {"element": "Hg", "line": "La", "energy_ev": 9989.0},
+    {"element": "Pb", "line": "Ma", "energy_ev": 2346.0},
+    {"element": "Pb", "line": "La", "energy_ev": 10551.0},
+    {"element": "Pb", "line": "Lb", "energy_ev": 12614.0},
+    {"element": "Bi", "line": "La", "energy_ev": 10839.0},
+]
+
+
+def emission_line_name(entry: dict) -> str:
+    """Canonical ``El_Line`` name for an emission-line dict (e.g. ``Pb_La``)."""
+    return f"{entry['element']}_{entry['line']}"
+
+
+def nearest_emission_line(energy_ev: float, tol_ev: float = 150.0) -> Optional[dict]:
+    """Closest tabulated emission line to an energy, or ``None`` beyond ``tol_ev``."""
+    best, best_d = None, tol_ev
+    for e in EMISSION_LINES:
+        d = abs(e["energy_ev"] - energy_ev)
+        if d <= best_d:
+            best, best_d = e, d
+    return best
+
+
 def default_config() -> dict:
     """Fresh default XRF config (all channels on, 10 eV/bin, standard lines).
 
@@ -228,6 +311,149 @@ def grand_sum_spectrum(me7_dir, channels: Sequence[int], deadtime: bool = True,
     return acc
 
 
+def point_spectrum(me7_dir, grid_mapping: dict, bin_key: str,
+                   channels: Sequence[int], deadtime: bool = True) -> Optional[np.ndarray]:
+    """Summed MCA spectrum for the ME7 frames that map to one grid bin.
+
+    This is the XRF counterpart of a single displayed (summed) detector image:
+    a device bin gathers ``bin_size²`` raw frames, and this returns the same
+    frames' fluorescence summed — so at 1×1 it is one scan point, at N×N it is
+    the N² points behind that binned frame. Reads only the needed rows from the
+    relevant ME7 files (fast enough for interactive navigation).
+
+    Returns the ``(N_BINS,)`` spectrum, or ``None`` if the bin has no frames / no
+    ME7 data. ``grid_mapping`` must be the mapping for the bin's grid.
+    """
+    import h5py
+    bins = grid_mapping.get("bins", {})
+    frame_map = grid_mapping.get("frame_map", [])
+    globals_ = bins.get(bin_key)
+    if not globals_ or not frame_map:
+        return None
+    # group needed (local index) reads per ME7 file to minimise opens
+    by_file: Dict[int, List[int]] = {}
+    for gi in globals_:
+        if 0 <= gi < len(frame_map):
+            fi, li = frame_map[gi]
+            by_file.setdefault(int(fi), []).append(int(li))
+    if not by_file:
+        return None
+    files = me7_files(me7_dir)
+    acc = np.zeros(N_BINS, dtype=np.float64)
+    got = False
+    for fi, lis in by_file.items():
+        if fi >= len(files):
+            continue
+        with h5py.File(files[fi], "r") as h5:
+            if H5_DATASET not in h5:
+                continue
+            data = h5[H5_DATASET]            # (points, N_CHANNELS, N_BINS)
+            npts = data.shape[0]
+            dt = {}
+            if deadtime:
+                for ch in channels:
+                    attr = DT_ATTR.format(ch1=ch + 1)
+                    if attr in h5:
+                        dt[ch] = np.asarray(h5[attr][:], dtype=np.float64)
+            for li in lis:
+                if not (0 <= li < npts):
+                    continue
+                frame = data[li, :, :].astype(np.float64)   # (N_CHANNELS, N_BINS)
+                for ch in channels:
+                    s = frame[ch]
+                    if deadtime and ch in dt:
+                        s = s * dt[ch][li]
+                    acc += s
+                got = True
+    return acc if got else None
+
+
+def build_point_store(me7_dir, grid_mapping: dict, channels: Sequence[int],
+                      deadtime: bool = True,
+                      log: Callable[[str], None] = lambda *_: None) -> np.ndarray:
+    """Per-global-frame deadtime-corrected, channel-summed MCA spectra.
+
+    Returns a ``(n_global_frames, N_BINS)`` integer array indexed by the grid
+    mapping's global frame index — a compact stand-in for the raw ME7 storing the
+    exact quantity XRF ever uses (deadtime-corrected, channel-summed spectrum),
+    to integer-count precision (the correction is rounded per frame; sub-count,
+    and photon counts are physically integers). Because the ``frame_map`` global
+    order is identical across bin sizes, a store built once serves the histogram
+    at any bin size (sum the frames in ``grid_mapping['bins'][bin_key]``). ~10×
+    smaller than raw ME7; lets the GUI drop the raw-ME7 dependency.
+    """
+    import h5py
+    frame_map = grid_mapping.get("frame_map", [])
+    n_global = len(frame_map)
+    if not n_global:
+        raise ValueError("grid mapping has no frame_map")
+    files = me7_files(me7_dir)
+    if not files:
+        raise FileNotFoundError(f"No ME7 files (scan_*.h5) in {me7_dir}")
+    by_file: Dict[int, List[tuple]] = {}
+    for gi, (fi, li) in enumerate(frame_map):
+        by_file.setdefault(int(fi), []).append((gi, int(li)))
+    store = np.zeros((n_global, N_BINS), dtype=np.uint32)   # counts → small ints
+    for fi in sorted(by_file):
+        if fi >= len(files):
+            continue
+        with h5py.File(files[fi], "r") as h5:
+            if H5_DATASET not in h5:
+                continue
+            spectra = _summed_spectra(h5, channels, deadtime)   # (points, N_BINS)
+        npts = spectra.shape[0]
+        for gi, li in by_file[fi]:
+            if 0 <= li < npts:
+                store[gi] = np.rint(spectra[li]).astype(np.uint32)
+        log(f"  {files[fi].name}: stored {len(by_file[fi])} frames")
+    return store
+
+
+def save_point_store(path, store: np.ndarray, channels: Sequence[int],
+                     deadtime: bool, calibration: dict) -> Path:
+    """Write the per-frame spectrum store (compressed) + provenance."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    # uint16 is exact when counts fit (they do for single frames); else keep uint32.
+    arr = store
+    if store.dtype != np.uint16 and int(store.max()) < 65535:
+        arr = store.astype(np.uint16)
+    np.savez_compressed(
+        path, frames=arr, channels=np.array(list(channels)),
+        deadtime=bool(deadtime),
+        ev_per_bin=float(calibration.get("ev_per_bin", DEFAULT_EV_PER_BIN)),
+        offset_ev=float(calibration.get("offset_ev", DEFAULT_OFFSET_EV)))
+    return path
+
+
+def load_point_store(path) -> dict:
+    """Load a per-frame spectrum store → ``{frames, channels, deadtime, ...}``."""
+    with np.load(path, allow_pickle=False) as z:
+        return {
+            "frames": z["frames"],
+            "channels": list(z["channels"]) if "channels" in z else [],
+            "deadtime": bool(z["deadtime"]) if "deadtime" in z else True,
+            "ev_per_bin": float(z["ev_per_bin"]) if "ev_per_bin" in z else DEFAULT_EV_PER_BIN,
+            "offset_ev": float(z["offset_ev"]) if "offset_ev" in z else DEFAULT_OFFSET_EV,
+        }
+
+
+def point_spectrum_from_store(frames: np.ndarray, grid_mapping: dict,
+                              bin_key: str) -> Optional[np.ndarray]:
+    """Summed MCA spectrum for one grid bin, read from a per-frame store.
+
+    Store counterpart of :func:`point_spectrum` — same result (sum of the bin's
+    frames) but from the compact ``<scan>_xrf_points.npz`` instead of raw ME7.
+    """
+    globals_ = grid_mapping.get("bins", {}).get(bin_key)
+    if not globals_:
+        return None
+    idx = [g for g in globals_ if 0 <= g < frames.shape[0]]
+    if not idx:
+        return None
+    return frames[idx].sum(axis=0).astype(np.float64)
+
+
 def find_spectrum_peaks(spectrum: np.ndarray, ev_per_bin: float, offset_ev: float,
                         prominence_frac: float = 0.01, min_width_bins: float = 2,
                         noise_floor_ev: float = 1200.0, incident_ev: float = 15000.0,
@@ -381,6 +607,10 @@ def element_maps(me7_dir, grid_mapping: dict, config: Optional[dict] = None,
 
     maps = {el["name"]: np.zeros((nr, nc), dtype=np.float64) for el in elements}
     npoints = np.zeros((nr, nc), dtype=np.int64)
+    # whole-scan grand-sum MCA spectrum (all points, incl. those with no bin) —
+    # accumulated here for free since we already load every point's spectrum. This
+    # is the XRF "fingerprint" the GUI plots per scan.
+    spectrum = np.zeros(N_BINS, dtype=np.float64)
 
     import h5py
     files = me7_files(me7_dir)
@@ -393,6 +623,7 @@ def element_maps(me7_dir, grid_mapping: dict, config: Optional[dict] = None,
                 log(f"  {fp.name}: no {H5_DATASET}; skipped")
                 continue
             spectra = _summed_spectra(h5, channels, deadtime)  # (points, n_bins)
+        spectrum += spectra.sum(axis=0)
         # per-element ROI sums for every point in this file
         el_vals = {name: spectra[:, r["lo_bin"]:r["hi_bin"]].sum(axis=1)
                    for name, r in rois.items()}
@@ -414,6 +645,7 @@ def element_maps(me7_dir, grid_mapping: dict, config: Optional[dict] = None,
         "elements": [el["name"] for el in elements],
         "maps": maps,
         "n_points": npoints,
+        "spectrum": spectrum,
         "rois": rois,
         "shape": (nr, nc),
         "channels": channels,
@@ -437,6 +669,10 @@ def save_npz(path, result: dict) -> Path:
         "offset_ev": result["calibration"]["offset_ev"],
         "dropped": int(result["dropped"]),
     }
+    # whole-scan grand-sum MCA spectrum (float32; ~16 KB) — the GUI's per-scan
+    # XRF histogram. Energy axis reconstructs as bin * ev_per_bin + offset_ev.
+    if result.get("spectrum") is not None:
+        payload["spectrum"] = np.asarray(result["spectrum"], dtype=np.float32)
     for name, m in result["maps"].items():
         payload[f"map_{name}"] = m.astype(np.float32)
     for name, r in result["rois"].items():
@@ -446,6 +682,48 @@ def save_npz(path, result: dict) -> Path:
              float(r.get("matched", False))], float)
     np.savez_compressed(path, **payload)
     return path
+
+
+def load_product(path) -> dict:
+    """Load a saved ``<scan>_xrf_NxN.npz`` back into a friendly dict for the GUI.
+
+    Returns ``elements`` (list[str]), ``maps`` (``{name: (nr,nc) float32}``),
+    ``n_points`` (``(nr,nc)``), ``shape`` (nr, nc), ``spectrum`` (``(N_BINS,)`` or
+    ``None``), ``energy_ev`` (per-bin energy axis when a spectrum is present),
+    ``rois`` (``{name: {...}}``) and ``calibration``. Pure IO — no h5py needed, so
+    the GUI can call it without touching the raw ME7 files.
+    """
+    path = Path(path)
+    with np.load(path, allow_pickle=False) as z:
+        elements = [str(e) for e in z["elements"]]
+        nr, nc = int(z["n_rows"]), int(z["n_cols"])
+        ev_per_bin = float(z["ev_per_bin"])
+        offset_ev = float(z["offset_ev"])
+        maps = {name: z[f"map_{name}"] for name in elements if f"map_{name}" in z}
+        spectrum = z["spectrum"] if "spectrum" in z else None
+        rois = {}
+        for name in elements:
+            key = f"roi_{name}"
+            if key in z:
+                v = z[key]
+                rois[name] = {"line_ev": float(v[0]), "center_ev": float(v[1]),
+                              "lo_ev": float(v[2]), "hi_ev": float(v[3]),
+                              "lo_bin": int(v[4]), "hi_bin": int(v[5]),
+                              "matched": bool(v[6]) if len(v) > 6 else False}
+        out = {
+            "elements": elements,
+            "maps": maps,
+            "n_points": z["n_points"] if "n_points" in z else None,
+            "shape": (nr, nc),
+            "spectrum": None if spectrum is None else np.asarray(spectrum),
+            "rois": rois,
+            "calibration": {"ev_per_bin": ev_per_bin, "offset_ev": offset_ev},
+        }
+    if out["spectrum"] is not None:
+        out["energy_ev"] = np.arange(out["spectrum"].shape[0]) * ev_per_bin + offset_ev
+    else:
+        out["energy_ev"] = None
+    return out
 
 
 def summary(result: dict) -> dict:

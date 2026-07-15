@@ -177,7 +177,7 @@ class MainWindow(QMainWindow):
         self.dm = DataManager(self.project_root)
         current = self.scan
         self._populate_scans()
-        scans = self.dm.discover_scans()
+        scans = self.dm.discover_scans(selected_only=True)
         if current in scans:
             self.scan = current
             self.scan_combo.setCurrentText(current)
@@ -223,7 +223,7 @@ class MainWindow(QMainWindow):
         return row
 
     def _populate_scans(self):
-        scans = self.dm.discover_scans() if self.dm else []
+        scans = self.dm.discover_scans(selected_only=True) if self.dm else []
         self.scan_combo.blockSignals(True)
         self.scan_combo.clear()
         if self.dm is None:

@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Callable, Union
 
 import h5py
+import hdf5plugin  # noqa: F401 — registers Zstd/LZ4 filters so compressed bins are readable
 import numpy as np
 
 from . import io

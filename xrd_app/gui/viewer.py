@@ -120,6 +120,7 @@ DETECTOR_PATH = None
 H5_PATH = None
 
 from .palette import COLORMAPS, ARC_COLORS, _get_cmap, _hex_rgb
+from .palette import element_colors as _xrf_element_colors, hex_to_rgba as _hex_to_rgba
 from ..core.algorithms import (
     ALGORITHM_NAMES, ALGORITHM_DISPLAY,
     compute_radial_profile, fit_all_models, build_background_image,
@@ -793,6 +794,14 @@ class FeatureViewer(QMainWindow):
         self._n_rows_1x1 = None
         self._n_cols_1x1 = None
         self._grid_is_1x1 = False          # heatmap currently drawn in 1×1 space
+        # Territory 1×1 catalogs key cells "<tid>_0" (one per frame) instead of
+        # "row_col" and store raw frames in xrd_1x1_bins_territory.h5. These
+        # bridge that space, mirroring the binned view's _terr_rc / _rc_terr.
+        self._sub_variant = None           # "territory" or None (plain grid)
+        self._sub_terr_rc = None           # "<tid>_0" → (row, col) for placement
+        self._sub_rc_terr = None           # (row, col) → "<tid>_0" (click resolve)
+        self._binned_bins = None           # binned grid: bin_key → [frame idx, …]
+        self._sub_region_keys = None       # territory cells under the current feat
         self._heat_outline_items = []      # white per-feature outlines (1×1 view)
         # On-demand "Load intensity from raw" layer (used when no 1×1 catalog):
         # {bin_key: {"intensity", "integrated"}}, sampled for the current feature.
@@ -876,6 +885,10 @@ class FeatureViewer(QMainWindow):
             gm = json.load(f)
         self._n_rows = gm["n_bin_rows"]
         self._n_cols = gm["n_bin_cols"]
+        self._build_territory_remap(gm)
+        # Frame membership of the binned grid: lets a plain binned feature be
+        # bridged to the 1×1 territory cells (keyed by frame index) under it.
+        self._binned_bins = gm.get("bins")
 
         import tifffile
         self._tth_map = tifffile.imread(str(_DM.tth_map())).astype(np.float64)
@@ -915,13 +928,78 @@ class FeatureViewer(QMainWindow):
         except Exception:
             return default
 
+    def _build_territory_remap(self, gm):
+        """Map each territorial cell key → integer (row, col) for grid placement.
+
+        Territorial catalogs (``core/territory.py``) key every cell ``"<tid>_0"``
+        — column is always 0 — so the grid heatmap/3-D would stack a whole
+        feature into a single column: a flat line rather than a 2-D footprint.
+        The true position lives in the grid mapping's
+        ``territories[key].centroid_rc``; snap it to the nearest (row, col) so
+        the views place cells in real space. Left ``None`` for ordinary
+        ``row_col`` grids, where keys parse directly (see :meth:`_key_rc`)."""
+        terrs = gm.get("territories") if isinstance(gm, dict) else None
+        if not terrs:
+            self._terr_rc = None
+            self._rc_terr = None
+            return
+        remap, inv = {}, {}
+        for key, t in terrs.items():
+            rc = t.get("centroid_rc")
+            if rc and len(rc) == 2:
+                try:
+                    cell = (int(round(float(rc[0]))), int(round(float(rc[1]))))
+                except (TypeError, ValueError):
+                    continue
+                remap[key] = cell
+                inv[cell] = key          # last territory wins a shared (row, col)
+        self._terr_rc = remap or None
+        # Inverse map so a heatmap click at (row, col) resolves back to the
+        # territory occupying that cell — the key its raw frame is stored under.
+        self._rc_terr = inv or None
+
+    def _key_rc(self, key):
+        """(row, col) grid coords for a bin key, or ``None``.
+
+        Territorial catalogs remap through ``self._terr_rc`` (only keys present
+        there are valid cells); ordinary catalogs parse ``"row_col"`` directly."""
+        if not key:
+            return None
+        remap = getattr(self, "_terr_rc", None)
+        if remap is not None:
+            return remap.get(key)
+        parts = key.split("_")
+        if len(parts) != 2:
+            return None
+        try:
+            return int(parts[0]), int(parts[1])
+        except ValueError:
+            return None
+
+    def _click_to_bin_key(self, row, col):
+        """Grid (row, col) → the bin key whose raw frame to load, or ``None``.
+
+        Territorial catalogs resolve the territory occupying that cell (keys are
+        ``"<tid>_0"``, not ``"row_col"``); ordinary grids use ``"row_col"``."""
+        inv = getattr(self, "_rc_terr", None)
+        if inv is not None:
+            return inv.get((row, col))
+        return f"{row}_{col}"
+
+    def _bin_variant(self):
+        """Bins-file variant for the raw detector source (``"territory"`` when a
+        territorial mapping is loaded, else ``None``). Territorial frames live in
+        ``xrd_1x1_bins_territory.h5`` keyed by ``"<tid>_0"``."""
+        return "territory" if getattr(self, "_terr_rc", None) is not None else None
+
     def _get_source(self):
         """Lazily open the per-bin image source (built h5, or raw frames)."""
         with self.h5_lock:
             if self._source is None:
                 self._source = io.open_bin_source(
                     _DM, self._bin_size, self._scan,
-                    grid_mapping=getattr(self, "_grid_path", None))
+                    grid_mapping=getattr(self, "_grid_path", None),
+                    variant=self._bin_variant())
             return self._source
 
     def _load_raw_image(self, bin_key):
@@ -977,10 +1055,16 @@ class FeatureViewer(QMainWindow):
         return self._denoise(raw, ("1x1", bin_key)) if self._noise_enabled else raw
 
     def _get_sub_source(self):
-        """Lazily open the 1×1 raw-frame image source for the current scan."""
+        """Lazily open the 1×1 raw-frame image source for the current scan.
+
+        Uses the same ``variant`` as the selected 1×1 catalog so a territorial
+        catalog (cells ``"<tid>_0"``) reads ``xrd_1x1_bins_territory.h5`` rather
+        than the plain ``xrd_1x1_bins.h5`` (whose ``row_col`` keys it never
+        matches — the cause of the black 'raw frame not found' panel)."""
         with self.h5_lock:
             if self._sub_source is None:
-                self._sub_source = io.open_bin_source(_DM, 1, self._scan)
+                self._sub_source = io.open_bin_source(
+                    _DM, 1, self._scan, variant=self._sub_variant)
             return self._sub_source
 
     def _load_sub_raw_image(self, bin_key):
@@ -1017,19 +1101,81 @@ class FeatureViewer(QMainWindow):
         for f in feats:
             for bk in f.get("spatial_extent", []):
                 self._sub_bin_to_features[bk].append(f)
+        # Resolve the 1×1 grid this catalog's bins live in (plain "row_col" or a
+        # territorial "<tid>_0" grid) and, when territorial, build the cell→(row,
+        # col) remap so the heatmap/iso/raw-frame paths can place & fetch cells.
+        gm = self._build_sub_territory_remap()
         # 1×1 grid dims for click clamping; fall back to binned · bin_size.
-        self._n_rows_1x1 = self._n_cols_1x1 = None
-        try:
-            with open(_DM.grid_mapping(bin_size=1)) as f:
-                gm = json.load(f)
-            self._n_rows_1x1 = gm.get("n_bin_rows")
-            self._n_cols_1x1 = gm.get("n_bin_cols")
-        except Exception:
-            pass
+        self._n_rows_1x1 = gm.get("n_bin_rows") if gm else None
+        self._n_cols_1x1 = gm.get("n_bin_cols") if gm else None
         if not self._n_rows_1x1:
             self._n_rows_1x1 = self._n_rows * self._bin_size
             self._n_cols_1x1 = self._n_cols * self._bin_size
         return feats
+
+    def _resolve_sub_grid(self):
+        """(grid_mapping_path, variant) for the selected 1×1 sub-catalog.
+
+        Picks whichever 1×1 grid mapping actually contains the catalog's bin keys
+        — the plain ``grid_mapping_1x1.json`` (``row_col`` cells) or the
+        territorial ``grid_mapping_1x1_territory.json`` (``"<tid>_0"`` cells,
+        raw frames in ``xrd_1x1_bins_territory.h5``). Mirrors the binned view's
+        :meth:`_resolve_grid_mapping`. Returns ``(None, None)`` if neither fits."""
+        if RESULTS_DIR is None or not self._sel_sub_catalog:
+            return None, None
+        cat = Path(RESULTS_DIR) / self._sel_sub_catalog
+        try:
+            mdir = _DM.metadata_scan_dir(self._scan)
+        except Exception:
+            return None, None
+        plain = mdir / "grid_mapping_1x1.json"
+        terr = mdir / "grid_mapping_1x1_territory.json"
+        cands = [p for p in (plain, terr) if Path(p).exists()]
+        if not cands:
+            return None, None
+        try:
+            best = catalogs.best_grid_mapping(cands, cat, default=cands[0])
+        except Exception:
+            best = cands[0]
+        variant = "territory" if str(best).endswith("_territory.json") else None
+        return best, variant
+
+    def _build_sub_territory_remap(self):
+        """Set ``_sub_variant`` / ``_sub_terr_rc`` / ``_sub_rc_terr`` for the
+        selected 1×1 catalog; returns the loaded grid mapping dict (or None).
+
+        Territory cells key every frame ``"<tid>_0"`` (column literal 0), so their
+        true 2-D position lives in ``territories[key].centroid_rc`` — snap it to
+        the nearest (row, col), exactly as :meth:`_build_territory_remap` does for
+        the binned grid. Plain grids parse ``"row_col"`` directly (no remap)."""
+        self._sub_variant = None
+        self._sub_terr_rc = None
+        self._sub_rc_terr = None
+        gm_path, variant = self._resolve_sub_grid()
+        if not gm_path:
+            return None
+        try:
+            with open(gm_path) as f:
+                gm = json.load(f)
+        except Exception:
+            return None
+        self._sub_variant = variant
+        if variant != "territory":
+            return gm
+        remap, inv = {}, {}
+        for key, t in (gm.get("territories") or {}).items():
+            rc = t.get("centroid_rc")
+            if not rc or len(rc) != 2:
+                continue
+            try:
+                cell = (int(round(float(rc[0]))), int(round(float(rc[1]))))
+            except (TypeError, ValueError):
+                continue
+            remap[key] = cell
+            inv[cell] = key          # last territory wins a shared (row, col)
+        self._sub_terr_rc = remap or None
+        self._sub_rc_terr = inv or None
+        return gm
 
     def _reset_sub_state(self):
         """Drop cached 1×1 catalog / source / images (on scan or bin change)."""
@@ -1044,6 +1190,10 @@ class FeatureViewer(QMainWindow):
         self._sub_features = None
         self._sub_bin_to_features = {}
         self._sub_raw_intensity = None
+        self._sub_variant = None
+        self._sub_terr_rc = None
+        self._sub_rc_terr = None
+        self._sub_region_keys = None
         self._n_rows_1x1 = self._n_cols_1x1 = None
 
     def _populate_sub_catalog_combo(self):
@@ -1068,6 +1218,16 @@ class FeatureViewer(QMainWindow):
         self._sel_sub_catalog = self.sub_catalog_combo.currentData()
         self._sub_features = None          # force reload + re-index
         self._sub_raw_intensity = None     # catalog changed → drop sampled layer
+        # A different catalog may live in a different coordinate space (plain vs
+        # territory) with a different raw-frame source — drop the cached one.
+        with self.h5_lock:
+            if self._sub_source is not None:
+                try:
+                    self._sub_source.close()
+                except Exception:
+                    pass
+                self._sub_source = None
+        self._sub_raw_cache.clear()
         self._load_sub_catalog()
         if self._view_1x1:
             self._on_feature_changed()
@@ -1267,6 +1427,7 @@ class FeatureViewer(QMainWindow):
 
         self._build_navigation(right_layout)
         self._build_info_panel(right_layout)
+        self._build_xrf_panel(right_layout)
         self._build_pending_panel(right_layout)
         self._build_visualization_controls(right_layout)
         self._build_noise_reduction(right_layout)
@@ -1529,6 +1690,7 @@ class FeatureViewer(QMainWindow):
                 gm = json.load(f)
             self._n_rows = gm["n_bin_rows"]
             self._n_cols = gm["n_bin_cols"]
+            self._build_territory_remap(gm)
         except Exception:
             pass
         with self.h5_lock:
@@ -1779,6 +1941,239 @@ class FeatureViewer(QMainWindow):
         info_scroll.setMaximumHeight(240)
         lay.addWidget(info_scroll)
         parent_layout.addWidget(grp)
+
+    def _build_xrf_panel(self, parent_layout):
+        """XRF spectrum for the *currently displayed detector frame* (1:1).
+
+        Sums the ME7 fluorescence of the same scan points behind the shown
+        detector image (one point at 1×1, N² at N×N), read live from raw ME7 via
+        ``core.xrf.point_spectrum`` and cached per bin. Element ROI bands
+        (from the scan's ``xrf_elements.json``) are shaded for quick reading.
+        """
+        grp = QGroupBox("XRF spectrum (this frame)")
+        lay = QVBoxLayout(grp)
+        lay.setContentsMargins(4, 4, 4, 4)
+        lay.setSpacing(2)
+        self.xrf_btn = QPushButton("Show XRF spectrum…")
+        self.xrf_btn.setToolTip(
+            "Open the ME7 fluorescence spectrum for the currently displayed "
+            "detector frame in a resizable window. It updates live as you "
+            "navigate features / click bins.")
+        self.xrf_btn.clicked.connect(self._open_xrf_popup)
+        lay.addWidget(self.xrf_btn)
+        self.xrf_status = QLabel("")
+        self.xrf_status.setWordWrap(True)
+        self.xrf_status.setStyleSheet(
+            "font-family: monospace; font-size: 0.75em; color: #888;")
+        lay.addWidget(self.xrf_status)
+        # popup + plot are created lazily; _xrf_last holds the current render data
+        self.xrf_plot = None
+        self._xrf_popup = None
+        self._xrf_last = None
+        # per-scan resolved config/me7/store/grid-mapping, and per-bin spectra
+        self._xrf_cfg_cache = {}     # scan -> config dict (or None)
+        self._xrf_me7_cache = {}     # scan -> me7 Path (or None)
+        self._xrf_store_cache = {}   # scan -> per-frame store frames (or None)
+        self._xrf_gm_cache = {}      # (scan, grid) -> grid_mapping dict (or None)
+        self._xrf_point_cache = {}   # (scan, grid, bin_key) -> spectrum (or None)
+        parent_layout.addWidget(grp)
+
+    def _open_xrf_popup(self):
+        """Open (or re-show) the resizable XRF spectrum window for this frame."""
+        from PyQt5.QtWidgets import QDialog, QVBoxLayout as _VBox
+        if self._xrf_popup is None:
+            dlg = QDialog(self)
+            dlg.setWindowTitle("XRF spectrum — this frame")
+            dlg.resize(760, 480)
+            v = _VBox(dlg)
+            self.xrf_plot = pg.PlotWidget()
+            self.xrf_plot.setLabel("bottom", "Energy", units="keV")
+            self.xrf_plot.setLabel("left", "counts")
+            self.xrf_plot.setLogMode(x=False, y=True)   # lines span orders of magnitude
+            self.xrf_plot.showGrid(x=True, y=True, alpha=0.2)
+            self.xrf_plot.setMouseEnabled(x=True, y=True)
+            v.addWidget(self.xrf_plot)
+            self._xrf_popup = dlg
+        self._xrf_popup.show()
+        self._xrf_popup.raise_()
+        self._xrf_popup.activateWindow()
+        self._draw_xrf()
+
+    def _draw_xrf(self):
+        """Render the current frame's spectrum into the popup (if it is open)."""
+        if (self.xrf_plot is None or self._xrf_popup is None
+                or not self._xrf_popup.isVisible()):
+            return
+        import numpy as np
+        self.xrf_plot.clear()
+        d = self._xrf_last
+        if not d:
+            return
+        self.xrf_plot.plot(d["e_kev"], d["disp"], pen=pg.mkPen("#e0e0e0", width=1))
+        for lo, hi, cen, label_y, col, name in d["bands"]:
+            region = pg.LinearRegionItem(
+                values=(lo, hi), movable=False,
+                brush=pg.mkBrush(_hex_to_rgba(col, 60)), pen=pg.mkPen(None))
+            region.setZValue(-10)
+            self.xrf_plot.addItem(region)
+            txt = pg.TextItem(name, color=col, anchor=(0.5, 1.0))
+            txt.setPos(cen, label_y)
+            self.xrf_plot.addItem(txt)
+        self.xrf_plot.setXRange(0.0, d["hi_kev"], padding=0.02)
+        self.xrf_plot.setTitle(d["title"])
+
+    def _xrf_point_store(self, scan):
+        """Per-frame spectrum store for a scan (cached); None if not built."""
+        if scan in self._xrf_store_cache:
+            return self._xrf_store_cache[scan]
+        frames = None
+        try:
+            from ..core import xrf as xrf_core
+            p = _DM.xrf_points_product(scan=scan)
+            if p.exists():
+                frames = xrf_core.load_point_store(p)["frames"]
+        except Exception:
+            frames = None
+        self._xrf_store_cache[scan] = frames
+        return frames
+
+    def _xrf_config(self, scan):
+        """Resolve the XRF elements/calibration config for a scan (cached)."""
+        if scan in self._xrf_cfg_cache:
+            return self._xrf_cfg_cache[scan]
+        cfg = None
+        try:
+            from ..core import xrf as xrf_core
+            per_scan = _DM.metadata_scan_dir(scan) / "xrf_elements.json"
+            proj = _DM.metadata_dir / "xrf_elements.json"
+            path = per_scan if per_scan.exists() else (proj if proj.exists() else None)
+            cfg = xrf_core.read_config(path) if path else xrf_core.default_config()
+        except Exception:
+            cfg = None
+        self._xrf_cfg_cache[scan] = cfg
+        return cfg
+
+    def _xrf_me7_dir(self, scan):
+        """ME7 directory for a scan (cached); None if absent."""
+        if scan in self._xrf_me7_cache:
+            return self._xrf_me7_cache[scan]
+        try:
+            me7 = _DM.me7_dir(scan=scan)
+        except Exception:
+            me7 = None
+        self._xrf_me7_cache[scan] = me7
+        return me7
+
+    def _xrf_grid_mapping(self, scan, grid, variant=None):
+        """Grid mapping for (scan, bin grid, variant) (cached); None if absent.
+
+        ``variant="territory"`` selects ``grid_mapping_1x1_territory.json`` so a
+        per-frame XRF spectrum resolves a territorial ``"<tid>_0"`` cell key."""
+        key = (scan, grid, variant)
+        if key in self._xrf_gm_cache:
+            return self._xrf_gm_cache[key]
+        gm = None
+        try:
+            import json
+            p = _DM.grid_mapping(bin_size=grid, scan=scan, variant=variant)
+            if p and Path(p).exists():
+                with open(p) as f:
+                    gm = json.load(f)
+        except Exception:
+            gm = None
+        self._xrf_gm_cache[key] = gm
+        return gm
+
+    def _render_xrf(self, bin_key=None, grid=None):
+        """Compute the XRF spectrum for the displayed frame; update status + popup.
+
+        Cheap (cached store lookup), so it runs on every frame change to keep the
+        side-panel status current and refresh the popup live if it's open.
+        """
+        if not hasattr(self, "xrf_status"):
+            return
+
+        def _fail(msg):
+            self.xrf_status.setText(msg)
+            self._xrf_last = None
+            self._draw_xrf()
+
+        scan = self._scan
+        if not scan:
+            return _fail("No scan.")
+        if bin_key is None:
+            bin_key = self._selected_bin
+        if grid is None:
+            grid = 1 if (self._view_1x1 and self._bin_size != 1) else self._bin_size
+        if not bin_key:
+            return _fail("Select a feature to see its XRF.")
+
+        cfg = self._xrf_config(scan)
+        store = self._xrf_point_store(scan)        # compact store (preferred)
+        me7 = None if store is not None else self._xrf_me7_dir(scan)
+        if cfg is None or (store is None and me7 is None):
+            return _fail("No XRF for this scan. Run:  xrd-app xrf --scans "
+                         f"{scan} --save-points")
+        # A territorial 1×1 cell key ("<tid>_0") resolves against the territory
+        # grid mapping, not the plain one.
+        gm_variant = self._sub_variant if grid == 1 else None
+        gm = self._xrf_grid_mapping(scan, grid, variant=gm_variant)
+        if gm is None:
+            return _fail(f"No {grid}×{grid} grid mapping for XRF.")
+
+        import numpy as np
+        channels = list(cfg.get("channels", []))
+        deadtime = bool(cfg.get("deadtime_correction", True))
+        key = (scan, grid, str(bin_key))
+        if key in self._xrf_point_cache:
+            spec = self._xrf_point_cache[key]
+        else:
+            try:
+                from ..core import xrf as xrf_core
+                if store is not None:
+                    spec = xrf_core.point_spectrum_from_store(store, gm, str(bin_key))
+                else:
+                    spec = xrf_core.point_spectrum(me7, gm, str(bin_key),
+                                                   channels, deadtime)
+            except Exception as e:
+                self._xrf_point_cache[key] = None
+                return _fail(f"XRF read error: {e}")
+            self._xrf_point_cache[key] = spec
+        if spec is None:
+            return _fail(f"No XRF frame for bin {bin_key}.")
+
+        from ..core import xrf as xrf_core
+        cal = cfg.get("calibration", {})
+        ev_per_bin = float(cal.get("ev_per_bin", 10.0))
+        offset_ev = float(cal.get("offset_ev", 0.0))
+        spec = np.asarray(spec, dtype=float)
+        e_kev = (np.arange(spec.shape[0]) * ev_per_bin + offset_ev) / 1000.0
+        disp = np.clip(spec, 1.0, None)   # log-y floor for display only
+
+        elements = cfg.get("elements", [])
+        colors = _xrf_element_colors([el["name"] for el in elements])
+        bands = []
+        max_hi = 0.0
+        for el in elements:
+            name = el["name"]
+            center = float(el.get("observed_ev", el.get("line_ev", 0.0)))
+            _, _, lo_ev, hi_ev = xrf_core.roi_bins(center, el, ev_per_bin, offset_ev)
+            lo, hi = lo_ev / 1000.0, hi_ev / 1000.0
+            max_hi = max(max_hi, hi)
+            cen = 0.5 * (lo + hi)
+            ci = int(np.clip(np.searchsorted(e_kev, cen), 0, len(disp) - 1))
+            label_y = float(np.log10(max(disp[ci], 1.0)))
+            bands.append((lo, hi, cen, label_y, colors.get(name, "#888888"), name))
+
+        span = "1 pt" if grid == 1 else f"{grid}×{grid} pts"
+        title = f"bin {bin_key} • {span} • {int(spec.sum()):,} counts"
+        self._xrf_last = {
+            "e_kev": e_kev, "disp": disp, "bands": bands,
+            "hi_kev": (min(20.0, max(16.0, max_hi + 2)) if max_hi else 16.0),
+            "title": title,
+        }
+        self.xrf_status.setText(title)
+        self._draw_xrf()
 
     def _build_pending_panel(self, parent_layout):
         grp = QGroupBox("Pending Features")
@@ -2175,8 +2570,7 @@ class FeatureViewer(QMainWindow):
         self.region_btn.setText("Show region features")
         if self._view_1x1 and self._bin_size != 1:
             # Land on the central 1×1 scan of the feature's footprint.
-            sub = self._center_subbin(feat)
-            center_key = f"{sub[0]}_{sub[1]}" if sub else feat.get("center_bin")
+            center_key = self._center_sub_key(feat) or feat.get("center_bin")
             self._selected_bin = center_key
             self._load_detector_image_1x1(center_key, feat)
         else:
@@ -2293,10 +2687,10 @@ class FeatureViewer(QMainWindow):
         extent = feat.get("spatial_extent", [])
         rows, cols = [], []
         for bk in extent:
-            parts = bk.split("_")
-            if len(parts) == 2:
-                rows.append(int(parts[0]))
-                cols.append(int(parts[1]))
+            rc = self._key_rc(bk)
+            if rc is not None:
+                rows.append(rc[0])
+                cols.append(rc[1])
         if not rows:
             return None
         r_min, r_max = min(rows), max(rows)
@@ -2331,13 +2725,14 @@ class FeatureViewer(QMainWindow):
 
         Z_raw = np.zeros((nr, nc))
         for bk, entry in profile.items():
-            parts = bk.split("_")
-            if len(parts) == 2:
-                r, c = int(parts[0]), int(parts[1])
+            rc = self._key_rc(bk)
+            if rc is not None:
+                r, c = rc
                 ri = r - r_lo
                 ci = c - c_lo
                 if 0 <= ri < nr and 0 <= ci < nc:
-                    Z_raw[ri, ci] = self._get_profile_value(entry)
+                    # Territories can round to a shared cell; keep the brightest.
+                    Z_raw[ri, ci] = max(Z_raw[ri, ci], self._get_profile_value(entry))
 
         expanded = np.zeros_like(Z_raw)
         for ri in range(nr):
@@ -2418,14 +2813,68 @@ class FeatureViewer(QMainWindow):
             return self._build_feature_grid_1x1(feat)
         return self._build_feature_grid(feat)
 
-    def _center_subbin(self, feat):
-        """The binned feature's centre bin mapped to its central 1×1 bin."""
+    # ── View 1×1 coordinate resolution (plain "row_col" or territory) ──
+
+    def _sub_key_rc(self, key):
+        """(row, col) for a 1×1 bin key, or None. Territory catalogs remap
+        ``"<tid>_0"`` through ``_sub_terr_rc``; plain grids parse ``"row_col"``."""
+        if not key:
+            return None
+        remap = self._sub_terr_rc
+        if remap is not None:
+            return remap.get(key)
+        parts = key.split("_")
+        if len(parts) != 2:
+            return None
+        try:
+            return int(parts[0]), int(parts[1])
+        except ValueError:
+            return None
+
+    def _sub_click_to_key(self, row, col):
+        """Heatmap (row, col) → the 1×1 bin key whose raw frame to load, or None.
+        Territory catalogs resolve the frame occupying that cell (``"<tid>_0"``)."""
+        inv = self._sub_rc_terr
+        if inv is not None:
+            return inv.get((row, col))
+        return f"{row}_{col}"
+
+    def _display_key_rc(self, key):
+        """(row, col) for a bin key in the coordinate space of the CURRENTLY
+        displayed heatmap — the 1×1 sub-view when active, else the binned view."""
+        if self._grid_is_1x1 and self._view_1x1:
+            return self._sub_key_rc(key)
+        return self._key_rc(key)
+
+    def _feature_frames(self, feat):
+        """Global frame indices under a binned feature's footprint (via the
+        binned grid's bin→frames map). These index territorial 1×1 cells
+        ``"<frame>_0"`` one-to-one, bridging a plain feature to territory space."""
+        bb = self._binned_bins or {}
+        frames = []
+        for bk in feat.get("spatial_extent", []):
+            frames.extend(bb.get(bk, []))
+        return frames
+
+    def _center_sub_key(self, feat):
+        """The 1×1 bin key at the centre of a binned feature's footprint —
+        territory-aware (returns a ``"<tid>_0"`` cell for territorial catalogs)."""
+        if self._sub_terr_rc is not None:
+            bb = self._binned_bins or {}
+            cframes = bb.get(feat.get("center_bin")) or self._feature_frames(feat)
+            valid = [f"{i}_0" for i in cframes if f"{i}_0" in self._sub_terr_rc]
+            return valid[len(valid) // 2] if valid else None
         cb = self._parse_bin(feat.get("center_bin", ""))
         if cb is None:
-            return None
+            return feat.get("center_bin")
         r, c = cb
         bs = self._bin_size
-        return (r * bs + bs // 2, c * bs + bs // 2)
+        return f"{r * bs + bs // 2}_{c * bs + bs // 2}"
+
+    def _center_subbin(self, feat):
+        """The binned feature's centre bin mapped to its central 1×1 cell
+        (row, col), for the heatmap/iso marker. Territory-aware."""
+        return self._sub_key_rc(self._center_sub_key(feat))
 
     def _build_feature_grid_1x1(self, feat):
         """Intensity grid over the feature's footprint at 1×1 resolution.
@@ -2439,6 +2888,9 @@ class FeatureViewer(QMainWindow):
         if not extent:
             return None, None, None
         self._load_sub_catalog()
+        self._sub_region_keys = None
+        if self._sub_terr_rc is not None:
+            return self._build_feature_grid_1x1_territory(feat)
         bs = self._bin_size
         ref = feat.get("reflection")
         sub_cells = []
@@ -2479,11 +2931,64 @@ class FeatureViewer(QMainWindow):
         z_max = float(Z.max()) if Z.max() > 0 else 1.0
         return Z, z_max, (r_lo, r_hi, c_lo, c_hi)
 
+    def _build_feature_grid_1x1_territory(self, feat):
+        """1×1 intensity grid for a territorial catalog (cells ``"<tid>_0"``).
+
+        The binned feature's footprint is bridged to territory space via its
+        member frame indices (:meth:`_feature_frames`); each such cell is placed
+        at its ``centroid_rc`` (row, col) and filled from same-reflection 1×1
+        detections there (empty ⇒ measured but nothing detected). Returns
+        (Z, z_max, bounds) in territory grid coords, or (None,)*3."""
+        ref = feat.get("reflection")
+        remap = self._sub_terr_rc
+        region = {}                                   # "<tid>_0" → (row, col)
+        for i in self._feature_frames(feat):
+            key = f"{i}_0"
+            rc = remap.get(key)
+            if rc is not None:
+                region[key] = rc
+        if not region:
+            return None, None, None
+        self._sub_region_keys = set(region)
+        rows = [rc[0] for rc in region.values()]
+        cols = [rc[1] for rc in region.values()]
+        pad = 1
+        r_lo, r_hi = min(rows) - pad, max(rows) + pad
+        c_lo, c_hi = min(cols) - pad, max(cols) + pad
+        nr, nc = r_hi - r_lo + 1, c_hi - c_lo + 1
+        Z = np.zeros((nr, nc))
+        for key, (r, c) in region.items():
+            ri, ci = r - r_lo, c - c_lo
+            if not (0 <= ri < nr and 0 <= ci < nc):
+                continue
+            best = 0.0
+            for f in self._sub_bin_to_features.get(key, []):
+                if ref is not None and f.get("reflection") != ref:
+                    continue
+                entry = f.get("intensity_profile", {}).get(key)
+                if entry is not None:
+                    best = max(best, self._get_profile_value(entry))
+            if best > 0:
+                Z[ri, ci] = max(Z[ri, ci], best)
+        z_max = float(Z.max()) if Z.max() > 0 else 1.0
+        return Z, z_max, (r_lo, r_hi, c_lo, c_hi)
+
     def _region_sub_feats(self, feat, bounds):
         """Distinct same-reflection 1×1 features with a cell inside ``bounds``."""
-        r_lo, r_hi, c_lo, c_hi = bounds
         ref = feat.get("reflection")
         seen, out = set(), []
+        if self._sub_terr_rc is not None:
+            # Territory: features detected at any cell under the feature footprint.
+            for key in (self._sub_region_keys or ()):
+                for f in self._sub_bin_to_features.get(key, []):
+                    if ref is not None and f.get("reflection") != ref:
+                        continue
+                    fid = f.get("feature_id", id(f))
+                    if fid not in seen:
+                        seen.add(fid)
+                        out.append(f)
+            return out
+        r_lo, r_hi, c_lo, c_hi = bounds
         for f in self._sub_features or []:
             if ref is not None and f.get("reflection") != ref:
                 continue
@@ -2521,10 +3026,10 @@ class FeatureViewer(QMainWindow):
             if len(self._heat_outline_items) >= self._MAX_OUTLINE_RECTS:
                 break  # too many cells to outline cleanly; skip the rest
             for bk in f.get("spatial_extent", []):
-                pr = bk.split("_")
-                if len(pr) != 2:
+                rc = self._sub_key_rc(bk)
+                if rc is None:
                     continue
-                r, c = int(pr[0]), int(pr[1])
+                r, c = rc
                 if not (r_lo <= r <= r_hi and c_lo <= c <= c_hi):
                     continue
                 rect = QGraphicsRectItem(c - 0.5, r - 0.5, 1, 1)
@@ -2567,7 +3072,7 @@ class FeatureViewer(QMainWindow):
 
         self._draw_1x1_outlines(feat, bounds)
         center = self._center_subbin(feat)
-        highlight = self._parse_bin(self._highlight_bin)
+        highlight = self._sub_key_rc(self._highlight_bin)
         hv.set_markers(center, highlight)
 
         mode_str = "peak pixel" if self._display_metric == "intensity" else "area under curve"
@@ -2581,18 +3086,9 @@ class FeatureViewer(QMainWindow):
             color="w", size="9pt")
         self._update_raw_btn_visibility()
 
-    @staticmethod
-    def _parse_bin(bin_key):
-        """'row_col' → (row, col) ints, or None."""
-        if not bin_key:
-            return None
-        parts = bin_key.split("_")
-        if len(parts) != 2:
-            return None
-        try:
-            return int(parts[0]), int(parts[1])
-        except ValueError:
-            return None
+    def _parse_bin(self, bin_key):
+        """'row_col' → (row, col) ints, or None (territory-aware, see _key_rc)."""
+        return self._key_rc(bin_key)
 
     def _heat_levels(self, grid, z_max):
         """vmin/vmax for the heatmap from the Contrast % spinboxes (percentiles
@@ -2656,9 +3152,9 @@ class FeatureViewer(QMainWindow):
         sel_ri, sel_ci = None, None
         has_selection = False
         if self._highlight_bin is not None:
-            parts = self._highlight_bin.split("_")
-            if len(parts) == 2:
-                sr, sc = int(parts[0]), int(parts[1])
+            rc = self._display_key_rc(self._highlight_bin)
+            if rc is not None:
+                sr, sc = rc
                 sel_ri = sr - r_lo
                 sel_ci = sc - c_lo
                 if 0 <= sel_ri < nr and 0 <= sel_ci < nc:
@@ -2803,6 +3299,7 @@ class FeatureViewer(QMainWindow):
 
         self._selected_bin = bin_key
         dv.set_title(f"Detector image — bin {bin_key}, peak at ({det_x}, {det_y})")
+        self._render_xrf(bin_key, grid=self._bin_size)   # XRF 1:1 with this frame
 
     def _percentiles(self, display):
         finite = display[np.isfinite(display)]
@@ -2842,7 +3339,7 @@ class FeatureViewer(QMainWindow):
             center = self._center_subbin(feat)
         else:
             center = self._parse_bin(feat.get("center_bin", "")) if feat else None
-        highlight = self._parse_bin(self._highlight_bin)
+        highlight = self._display_key_rc(self._highlight_bin)
         self.heatmap_canvas.set_markers(center, highlight)
 
     def _update_iso_alpha(self):
@@ -2863,9 +3360,9 @@ class FeatureViewer(QMainWindow):
         sel_ri, sel_ci = None, None
         has_selection = False
         if self._highlight_bin is not None:
-            parts = self._highlight_bin.split("_")
-            if len(parts) == 2:
-                sr, sc = int(parts[0]), int(parts[1])
+            rc = self._display_key_rc(self._highlight_bin)
+            if rc is not None:
+                sr, sc = rc
                 sel_ri = sr - r_lo
                 sel_ci = sc - c_lo
                 if 0 <= sel_ri < nr and 0 <= sel_ci < nc:
@@ -2913,7 +3410,9 @@ class FeatureViewer(QMainWindow):
             self._on_heatmap_click_1x1(row, col, feat)
             return
         if 0 <= row < self._n_rows and 0 <= col < self._n_cols:
-            bin_key = f"{row}_{col}"
+            bin_key = self._click_to_bin_key(row, col)
+            if bin_key is None:
+                return   # empty cell (no territory here)
             # Toggle: clicking same bin deselects (no highlight, all solid)
             if bin_key == self._highlight_bin:
                 self._highlight_bin = None
@@ -2935,7 +3434,11 @@ class FeatureViewer(QMainWindow):
         nc = self._n_cols_1x1 or 10 ** 9
         if not (0 <= row < nr and 0 <= col < nc):
             return
-        bin_key = f"{row}_{col}"
+        # Resolve the clicked cell to the bin key holding its raw frame — a
+        # territory cell "<tid>_0" for territorial catalogs, else "row_col".
+        bin_key = self._sub_click_to_key(row, col)
+        if bin_key is None:
+            return   # no frame/territory at this cell
         if bin_key == self._highlight_bin:          # toggle off
             self._highlight_bin = None
             self._update_heatmap_marker()
@@ -2985,18 +3488,31 @@ class FeatureViewer(QMainWindow):
             self._add_tth_overlay()
         self._selected_bin = bin_key
         dv.set_title(f"1×1 raw frame — bin {bin_key} (single scan)")
+        self._render_xrf(bin_key, grid=1)   # XRF for this single scan point
 
     def _update_info_1x1(self, bin_key):
         """Right-panel metadata for a clicked 1×1 scan."""
-        parts = bin_key.split("_")
-        r, c = (parts + ["?", "?"])[:2]
         feats = self._sub_bin_to_features.get(bin_key, [])
-        lines = [
-            "1×1 view (unbinned)",
-            f"Scan bin:   {bin_key}",
-            f"Location:   row {r}, col {c}",
-            "",
-        ]
+        if self._sub_terr_rc is not None:
+            # Territory cell "<frame>_0": show the frame index and its (row, col).
+            frame = bin_key.split("_")[0]
+            rc = self._sub_key_rc(bin_key)
+            loc = f"row {rc[0]}, col {rc[1]}" if rc else "?"
+            lines = [
+                "1×1 view (territory)",
+                f"Frame:      {frame}",
+                f"Location:   {loc}",
+                "",
+            ]
+        else:
+            parts = bin_key.split("_")
+            r, c = (parts + ["?", "?"])[:2]
+            lines = [
+                "1×1 view (unbinned)",
+                f"Scan bin:   {bin_key}",
+                f"Location:   row {r}, col {c}",
+                "",
+            ]
         if feats:
             lines.append(f"1×1 feature(s) here: {len(feats)}")
             for f in feats:
@@ -3455,7 +3971,10 @@ class FeatureViewer(QMainWindow):
         p.setTitle("Click to navigate", color="#f0a030", size="7pt")
 
     def _on_explore_navigate(self, row, col):
-        bin_key = f"{row}_{col}"
+        bin_key = self._click_to_bin_key(row, col)
+        if bin_key is None:
+            self.info_label.setText("No territory at this cell")
+            return
         with self.h5_lock:
             h5 = self._get_source()
             has_bin = bin_key in h5

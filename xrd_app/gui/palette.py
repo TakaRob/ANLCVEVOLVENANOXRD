@@ -35,3 +35,25 @@ def _get_cmap(name):
 def _hex_rgb(hex_color):
     c = QColor(hex_color)
     return c.red(), c.green(), c.blue()
+
+
+# XRF element colours — a distinct palette (warm/element-y hues) so the XRF
+# fluorescence layers read separately from the reflection outline palette. Shared
+# by the Shape/Verify spectrum panel and the Device View XRF underlay so an
+# element is the same colour everywhere.
+ELEMENT_PALETTE = [
+    "#ff5555", "#ffb000", "#ffee33", "#33dd55", "#33dddd",
+    "#5599ff", "#b060ff", "#ff66cc", "#cc8844", "#88cc44",
+]
+
+
+def element_colors(elements):
+    """Deterministic ``{element_name: hex}`` map over the element palette."""
+    return {el: ELEMENT_PALETTE[i % len(ELEMENT_PALETTE)]
+            for i, el in enumerate(elements)}
+
+
+def hex_to_rgba(hex_color, alpha=255):
+    """``(r, g, b, alpha)`` tuple from a hex colour string."""
+    r, g, b = _hex_rgb(hex_color)
+    return (r, g, b, int(alpha))

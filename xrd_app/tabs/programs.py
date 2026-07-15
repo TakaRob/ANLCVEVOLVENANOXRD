@@ -4,9 +4,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import (
-    QComboBox, QGroupBox, QHBoxLayout, QLabel, QPushButton, QSpinBox,
-    QVBoxLayout, QWidget, QSizePolicy,
+    QAbstractItemView, QComboBox, QGroupBox, QHBoxLayout, QLabel, QListWidget,
+    QListWidgetItem, QPushButton, QSpinBox, QVBoxLayout, QWidget, QSizePolicy,
 )
 
 from ..config import DataManager, format_detector_label
@@ -18,13 +19,16 @@ TAB_META = {
     "takes_bin_size": True,
     "scan_dependent": False,
     "general": (
-        "Run the two-stage pipeline. Data Prep builds the binned HDF5 from raw "
-        "frames (grid mapping → bins). Peak Finding runs a detector over every "
-        "bin (Phase 1). Shape Finding links peaks across bins and keeps "
-        "gaussian-like features (Phase 2); pick “run peak algorithm above first” "
-        "to chain peaks→shapes in one process. Combined runs a per-frame (1×1) "
-        "algorithm that does peak+shape in one pass. Each Run shells out to the "
-        "CLI; output streams below."
+        "Run the two-stage pipeline over one or more scans at once. Pick the "
+        "target scans in the Scans box (Ctrl/Shift-click for several) and one or "
+        "more algorithms in each box (also Ctrl/Shift-click). Data Prep builds "
+        "the binned HDF5 from raw frames (grid mapping → bins). Peak Finding runs "
+        "a detector over every bin (Phase 1). Shape Finding links peaks across "
+        "bins and keeps gaussian-like features (Phase 2); pick “run peak "
+        "algorithm above first” to chain peaks→shapes in one process. Combined "
+        "runs a per-frame (1×1) algorithm that does peak+shape in one pass. Each "
+        "Run fans out over the selected scans × algorithms as a queue of CLI "
+        "jobs; output streams below."
     ),
 }
 
@@ -40,6 +44,34 @@ class ProgramsTab(QWidget):
         self.bin_size = bin_size
 
         lay = QVBoxLayout(self)
+
+        # ---- target scans (multi-select; drives every Run below) --------
+        # Ctrl/Shift-click to run over several scans at once. Every Run fans
+        # out over (selected scans × selected algorithms) as a queue of CLI
+        # jobs. Defaults to the active scan chosen in the header.
+        scans_box = QGroupBox("Scans  (Ctrl/Shift-click to run over several)")
+        scl = QVBoxLayout(scans_box)
+        self.scans_list = QListWidget()
+        self.scans_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.scans_list.setMaximumHeight(110)
+        self.scans_list.setToolTip(
+            "Scans this run applies to. Ctrl/Shift-click for several; with none "
+            "selected the active header scan is used. The list honors the "
+            "Setup → “Choose scans to show…” filter.")
+        scl.addWidget(self.scans_list)
+        srow = QHBoxLayout()
+        self.scans_summary = QLabel("")
+        self.scans_summary.setStyleSheet("color:#888; font-size:0.9em;")
+        srow.addWidget(self.scans_summary, 1)
+        b_sall = QPushButton("Select all")
+        b_snone = QPushButton("Select none")
+        b_sall.clicked.connect(self.scans_list.selectAll)
+        b_snone.clicked.connect(self.scans_list.clearSelection)
+        srow.addWidget(b_sall)
+        srow.addWidget(b_snone)
+        scl.addLayout(srow)
+        self.scans_list.itemSelectionChanged.connect(self._refresh_scans_summary)
+        lay.addWidget(scans_box)
 
         # ---- existing bins (drives every step below) --------------------
         # The top dropdown lists only the bins that already exist for this scan;
@@ -84,8 +116,8 @@ class ProgramsTab(QWidget):
         # ---- Peak Finding ------------------------------------------------
         peak_box = QGroupBox("Peak Finding  (Phase 1: per-bin detection)")
         pl = QHBoxLayout(peak_box)
-        pl.addWidget(QLabel("Algorithm:"))
-        self.peak_algo = QComboBox()
+        self.peak_algo = self._make_algo_list(
+            "Peak detectors. Ctrl/Shift-click to run several over each scan.")
         pl.addWidget(self.peak_algo, 1)
         run_peaks = QPushButton("Run")
         run_peaks.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.MinimumExpanding)
@@ -97,12 +129,19 @@ class ProgramsTab(QWidget):
         # ---- Shape Finding ----------------------------------------------
         shape_box = QGroupBox("Shape Finding  (Phase 2: link + gaussian filter)")
         sl = QHBoxLayout(shape_box)
-        sl.addWidget(QLabel("Algorithm:"))
-        self.shape_algo = QComboBox()
+        self.shape_algo = self._make_algo_list(
+            "Shape algorithms. Ctrl/Shift-click to run several over each scan.")
         sl.addWidget(self.shape_algo, 1)
-        sl.addWidget(QLabel("Peaks:"))
+        speaks = QVBoxLayout()
+        speaks.addWidget(QLabel("Peaks:"))
         self.shape_src = QComboBox()
-        sl.addWidget(self.shape_src, 1)
+        self.shape_src.setToolTip(
+            "Input peak set for shape finding. “run peak algorithm above first” "
+            "chains peaks→shapes per scan (required when several scans/algorithms "
+            "are selected, since saved peak sets are per-scan).")
+        speaks.addWidget(self.shape_src)
+        speaks.addStretch()
+        sl.addLayout(speaks, 1)
         run_shapes = QPushButton("Run")
         run_shapes.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.MinimumExpanding)
         run_shapes.setMinimumHeight(40)
@@ -113,8 +152,8 @@ class ProgramsTab(QWidget):
         # ---- Combined (peak + shape in one pass) ------------------------
         comb_box = QGroupBox("Combined  (peak + shape in one per-frame pass · 1×1)")
         cb = QHBoxLayout(comb_box)
-        cb.addWidget(QLabel("Algorithm:"))
-        self.combined_algo = QComboBox()
+        self.combined_algo = self._make_algo_list(
+            "Combined per-frame algorithms. Ctrl/Shift-click to run several.")
         cb.addWidget(self.combined_algo, 1)
         run_combined = QPushButton("Run")
         run_combined.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.MinimumExpanding)
@@ -122,6 +161,33 @@ class ProgramsTab(QWidget):
         run_combined.clicked.connect(self._run_combined)
         cb.addWidget(run_combined)
         lay.addWidget(comb_box)
+
+        # ---- Territorial reference (skew-free source of truth) -----------
+        # One button for the whole territory-grid → bin → peaks → shapes
+        # (--variant territory, 1×1) chain, so the Territory Map / Device-View
+        # territorial reference is buildable from the GUI (not CLI-only).
+        terr_box = QGroupBox(
+            "Territorial reference  (skew-free source of truth · 1×1)")
+        tb = QHBoxLayout(terr_box)
+        tb.addWidget(QLabel("Target frames/territory:"))
+        self.terr_target = QSpinBox()
+        self.terr_target.setRange(1, 999)
+        self.terr_target.setValue(9)
+        self.terr_target.setToolTip(
+            "Frames grouped per territory before it stops growing (small ≈ 1×1 "
+            "resolution, large = higher per-cell SNR). 9 is the default reference.")
+        tb.addWidget(self.terr_target)
+        build_terr = QPushButton("Build territorial reference")
+        build_terr.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.MinimumExpanding)
+        build_terr.setMinimumHeight(40)
+        build_terr.setToolTip(
+            "Run territory-grid → bin → peaks → shapes (--variant territory) for "
+            "the selected scans. Builds the skew-free cell-model map the Territory "
+            "Map tab and the Device-View “Territorial reference available →” button "
+            "read. Heavy: reads raw frames (needs the raw scan dir mounted).")
+        build_terr.clicked.connect(self._build_territory)
+        tb.addWidget(build_terr)
+        lay.addWidget(terr_box)
 
         # ---- CVEvolve + lineage -----------------------------------------
         cve_row = QHBoxLayout()
@@ -146,14 +212,63 @@ class ProgramsTab(QWidget):
 
         self.update_context(scan, bin_size)
 
+    # ----- widgets ----------------------------------------------------
+    @staticmethod
+    def _make_algo_list(tooltip):
+        """A compact multi-select algorithm list (Ctrl/Shift-click)."""
+        lst = QListWidget()
+        lst.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        lst.setMaximumHeight(96)
+        lst.setToolTip(tooltip)
+        return lst
+
     # ----- context ----------------------------------------------------
     def update_context(self, scan, bin_size):
         self.scan = scan
         self.bin_size = bin_size
+        self._populate_scans_list()
         self._populate_bins(select=bin_size)
         self._refresh_algos()
         self._refresh_peak_sources()
         self._refresh_bins_status()
+
+    def _populate_scans_list(self):
+        """Fill the target-scans list (honors Setup's visible-scan filter).
+
+        Preserves an existing multi-selection across refreshes; if nothing is
+        selected yet, defaults to the active header scan.
+        """
+        dm = DataManager(self.project_root, scan=self.scan)
+        scans = dm.discover_scans(selected_only=True)
+        prev = set(self._selected_scans(fallback=False))
+        self.scans_list.blockSignals(True)
+        self.scans_list.clear()
+        for name in scans:
+            it = QListWidgetItem(name)
+            it.setData(Qt.UserRole, name)
+            self.scans_list.addItem(it)
+            if (name in prev) or (not prev and name == self.scan):
+                it.setSelected(True)
+        self.scans_list.blockSignals(False)
+        self._refresh_scans_summary()
+
+    def _refresh_scans_summary(self):
+        names = self._selected_scans(fallback=False)
+        if not names:
+            self.scans_summary.setText(
+                f"→ active scan only ({self.scan or '—'})")
+        else:
+            shown = ", ".join(names[:6]) + (" …" if len(names) > 6 else "")
+            self.scans_summary.setText(f"{len(names)} selected: {shown}")
+
+    def _selected_scans(self, fallback=True):
+        """Selected target scans; falls back to the active scan when none."""
+        names = [self.scans_list.item(i).data(Qt.UserRole)
+                 for i in range(self.scans_list.count())
+                 if self.scans_list.item(i).isSelected()]
+        if names or not fallback:
+            return names
+        return [self.scan] if self.scan else []
 
     def _populate_bins(self, select=None):
         """Fill the Existing-bins dropdown from the bins built for this scan.
@@ -201,40 +316,67 @@ class ProgramsTab(QWidget):
     def _refresh_algos(self):
         dm = DataManager(self.project_root, scan=self.scan)
         bs = self._cur_bin()
+        # Peak (Phase 1): data = (bare name, is_perframe).
         dets = dm.list_detectors(bs) or dm.list_detectors()
-        self.peak_algo.clear()
-        if not dets:
-            self.peak_algo.addItem("(none found)")
-            return
-        for d in dets:
-            # Show "name (F1 0.79)"; keep the bare name + perframe flag as data.
-            self.peak_algo.addItem(format_detector_label(d),
-                                   (d["name"], d.get("pipeline") == "perframe"))
+        self._fill_algo_list(
+            self.peak_algo,
+            [(format_detector_label(d), (d["name"], d.get("pipeline") == "perframe"))
+             for d in dets])
         # Shape (Phase 2) library — names carry scores, data = bare name.
-        self.shape_algo.clear()
-        shapes = dm.list_shapes()
-        if shapes:
-            for d in shapes:
-                self.shape_algo.addItem(format_detector_label(d), d["name"])
-        else:
-            self.shape_algo.addItem("(none found)")
-
+        self._fill_algo_list(
+            self.shape_algo,
+            [(format_detector_label(d), d["name"]) for d in dm.list_shapes()])
         # Combined (peak+shape) library — names carry scores, data = bare name.
-        self.combined_algo.clear()
-        combined = dm.list_combined()
-        if combined:
-            for d in combined:
-                self.combined_algo.addItem(format_detector_label(d), d["name"])
-        else:
-            self.combined_algo.addItem("(none found)")
+        self._fill_algo_list(
+            self.combined_algo,
+            [(format_detector_label(d), d["name"]) for d in dm.list_combined()])
 
-    def _selected_peak_algo(self):
-        """(name, is_unbinned) for the selected peak detector, or (None, False)."""
-        data = self.peak_algo.currentData()
-        if isinstance(data, tuple):
-            return data
-        text = self.peak_algo.currentText()
-        return (None if text.startswith("(") else text, False)
+    @staticmethod
+    def _fill_algo_list(lst, entries):
+        """Populate a multi-select algorithm list, preserving prior selection.
+
+        ``entries`` is a list of ``(label, data)``. When nothing was selected
+        before, the first (highest-scoring) entry is pre-selected so a plain Run
+        works without a manual pick.
+        """
+        prev = {lst.item(i).data(Qt.UserRole)
+                for i in range(lst.count()) if lst.item(i).isSelected()}
+        lst.blockSignals(True)
+        lst.clear()
+        if not entries:
+            it = QListWidgetItem("(none found)")
+            it.setFlags(Qt.NoItemFlags)
+            lst.addItem(it)
+            lst.blockSignals(False)
+            return
+        for label, data in entries:
+            it = QListWidgetItem(label)
+            it.setData(Qt.UserRole, data)
+            lst.addItem(it)
+        restored = False
+        for i in range(lst.count()):
+            if lst.item(i).data(Qt.UserRole) in prev:
+                lst.item(i).setSelected(True)
+                restored = True
+        if not restored and lst.count():
+            lst.item(0).setSelected(True)
+        lst.blockSignals(False)
+
+    def _selected_peak_algos(self):
+        """List of (name, is_unbinned) for the selected peak detectors."""
+        out = []
+        for i in range(self.peak_algo.count()):
+            it = self.peak_algo.item(i)
+            data = it.data(Qt.UserRole)
+            if it.isSelected() and isinstance(data, tuple):
+                out.append(data)
+        return out
+
+    @staticmethod
+    def _selected_names(lst):
+        """Selected bare algorithm names from a shape/combined list."""
+        return [lst.item(i).data(Qt.UserRole) for i in range(lst.count())
+                if lst.item(i).isSelected() and lst.item(i).data(Qt.UserRole)]
 
     def _refresh_peak_sources(self):
         """List saved *_peaks.json in Labels/<scan>/ as shape-finding inputs.
@@ -254,33 +396,48 @@ class ProgramsTab(QWidget):
 
     # ----- actions ----------------------------------------------------
     def _run_peaks(self):
-        if not self.scan:
-            self.console._append("[no active scan — load data in Setup first]\n")
+        scans = self._selected_scans()
+        if not scans:
+            self.console._append("[no scan selected — load data in Setup first]\n")
             return
         if self._cur_bin() is None:
             self.console._append("[no bins — create one in Data Prep first]\n")
             return
-        algo, unbinned = self._selected_peak_algo()
-        if unbinned:
-            self.console._append(
-                f"[{algo} is a per-frame (unbinned) detector — it can't run in "
-                "the binned peak pipeline yet. Pick a binned detector.]\n")
+        algos = self._selected_peak_algos()
+        if not algos:
+            self.console._append("[no peak algorithm selected]\n")
             return
-        args = ["peaks", "--root", self.project_root, "--scan", str(self.scan),
-                "--bin-size", str(self._cur_bin())]
-        if algo:
-            args += ["--algorithm", algo]
-        self.console.run(args)
+        bs = self._cur_bin()
+        jobs, skipped = [], []
+        for name in scans:
+            for algo, unbinned in algos:
+                if unbinned:
+                    if algo not in skipped:
+                        skipped.append(algo)
+                    continue
+                jobs.append(["peaks", "--root", self.project_root,
+                             "--scan", str(name), "--bin-size", str(bs),
+                             "--algorithm", algo])
+        notes = []
+        if skipped:
+            notes.append(
+                f"[skipping per-frame (unbinned) detector(s): {', '.join(skipped)} "
+                "— they can't run in the binned peak pipeline]")
+        if not jobs:
+            if notes:
+                self.console._append(notes[0] + "\n")
+            return
+        self._run_jobs(jobs, scans, len(algos), notes=notes)
 
     def _make_bins(self):
-        if not self.scan:
-            self.console._append("[no active scan — load data in Setup first]\n")
+        scans = self._selected_scans()
+        if not scans:
+            self.console._append("[no scan selected — load data in Setup first]\n")
             return
         bs = self.make_bin_spin.value()  # Create bins depends only on this spin box.
-        self.console.run(["make-bins", "--root", self.project_root,
-                          "--scan", str(self.scan),
-                          "--bin-size", str(bs)],
-                         on_finished=lambda code: self._on_bins_built(bs))
+        jobs = [["make-bins", "--root", self.project_root, "--scan", str(n),
+                 "--bin-size", str(bs)] for n in scans]
+        self.console.run_many(jobs, on_all_finished=lambda _n: self._on_bins_built(bs))
 
     def _on_bins_built(self, bs):
         """After a build, surface the new size in the Existing-bins dropdown."""
@@ -290,22 +447,37 @@ class ProgramsTab(QWidget):
         self._refresh_bins_status()
 
     def _run_combined(self):
-        if not self.scan:
-            self.console._append("[no active scan — load data in Setup first]\n")
+        scans = self._selected_scans()
+        if not scans:
+            self.console._append("[no scan selected — load data in Setup first]\n")
             return
-        algo = self.combined_algo.currentData() or self.combined_algo.currentText()
-        if not algo or algo.startswith("("):
-            self.console._append("[no combined algorithm available]\n")
+        algos = self._selected_names(self.combined_algo)
+        if not algos:
+            self.console._append("[no combined algorithm selected]\n")
             return
-        self.console.run(["run-combined", "--root", self.project_root,
-                          "--scan", str(self.scan), "--algorithm", algo])
+        jobs = [["run-combined", "--root", self.project_root, "--scan", str(n),
+                 "--algorithm", a] for n in scans for a in algos]
+        self._run_jobs(jobs, scans, len(algos))
+
+    def _build_territory(self):
+        scans = self._selected_scans()
+        if not scans:
+            self.console._append("[no scan selected — load data in Setup first]\n")
+            return
+        target = self.terr_target.value()
+        jobs = [["territory-build", "--root", self.project_root, "--scan", str(n),
+                 "--target-size", str(target)] for n in scans]
+        self.console.run_many(
+            jobs, on_all_finished=lambda _n: self._refresh_algos())
 
     def _show_lineage(self):
-        if not self.scan:
-            self.console._append("[no active scan — load data in Setup first]\n")
+        scans = self._selected_scans()
+        if not scans:
+            self.console._append("[no scan selected — load data in Setup first]\n")
             return
-        self.console.run(["lineage", "--root", self.project_root,
-                          "--scan", str(self.scan)])
+        jobs = [["lineage", "--root", self.project_root, "--scan", str(n)]
+                for n in scans]
+        self.console.run_many(jobs)
 
     def _open_cvevolve(self):
         bs = self._cur_bin()
@@ -317,41 +489,78 @@ class ProgramsTab(QWidget):
                        bin_size=bs, parent=self).exec_()
 
     def _run_shapes(self):
-        if not self.scan:
-            self.console._append("[no active scan — load data in Setup first]\n")
+        scans = self._selected_scans()
+        if not scans:
+            self.console._append("[no scan selected — load data in Setup first]\n")
             return
         if self._cur_bin() is None:
             self.console._append("[no bins — create one in Data Prep first]\n")
             return
-        shape_algo = self.shape_algo.currentData() or self.shape_algo.currentText()
-        if not shape_algo or shape_algo.startswith("("):
-            shape_algo = None  # let the CLI fall back to its default shape algo
+        bs = self._cur_bin()
+        # None in the list = let the CLI fall back to its default shape algo.
+        shape_algos = self._selected_names(self.shape_algo) or [None]
         src = self.shape_src.currentText()
-        # Chain option: run the peak algorithm above, then shapes, in one process.
+        jobs, notes = [], []
+        # Chain: run the selected peak algorithm(s), then shapes, per scan.
         if src == _CHAIN_OPTION:
-            peak_algo, unbinned = self._selected_peak_algo()
-            if unbinned:
-                self.console._append(
-                    f"[{peak_algo} is a per-frame (unbinned) detector — it can't "
-                    "run in the binned pipeline yet. Pick a binned detector.]\n")
+            peak_algos = self._selected_peak_algos() or [(None, False)]
+            skipped = []
+            for name in scans:
+                for peak_algo, unbinned in peak_algos:
+                    if unbinned:
+                        if peak_algo not in skipped:
+                            skipped.append(peak_algo)
+                        continue
+                    for sa in shape_algos:
+                        args = ["run-pipeline", "--root", self.project_root,
+                                "--scan", str(name), "--bin-size", str(bs)]
+                        if peak_algo:
+                            args += ["--algorithm", peak_algo]
+                        if sa:
+                            args += ["--shape-algo", sa]
+                        jobs.append(args)
+            if skipped:
+                notes.append(
+                    f"[skipping per-frame (unbinned) detector(s): "
+                    f"{', '.join(skipped)}]")
+        else:
+            if not src or src.startswith("("):
+                self.console._append("[no peak set — run Peak Finding first]\n")
                 return
-            args = ["run-pipeline", "--root", self.project_root,
-                    "--scan", str(self.scan),
-                    "--bin-size", str(self._cur_bin())]
-            if peak_algo:
-                args += ["--algorithm", peak_algo]
-            if shape_algo:
-                args += ["--shape-algo", shape_algo]
-            self.console.run(args)
+            # An explicit (per-scan-named) peak set only makes sense for one scan.
+            if len(scans) > 1:
+                self.console._append(
+                    "[multiple scans selected — switch Peaks to “run peak "
+                    "algorithm above first” to chain per scan, since saved peak "
+                    "sets are per-scan]\n")
+                return
+            for name in scans:
+                for sa in shape_algos:
+                    args = ["shapes", "--root", self.project_root,
+                            "--scan", str(name), "--bin-size", str(bs),
+                            "--peak-algo", src]
+                    if sa:
+                        args += ["--algorithm", sa]
+                    jobs.append(args)
+        if not jobs:
             return
-        if not src or src.startswith("("):
-            self.console._append("[no peak set — run Peak Finding first]\n")
-            return
-        args = ["shapes", "--root", self.project_root, "--scan", str(self.scan),
-                "--bin-size", str(self._cur_bin()), "--peak-algo", src]
-        if shape_algo:
-            args += ["--algorithm", shape_algo]
-        self.console.run(args)
+        self._run_jobs(jobs, scans, max(1, len(jobs) // max(1, len(scans))),
+                       notes=notes)
+
+    def _run_jobs(self, jobs, scans, n_algos, notes=None):
+        """Run a fan-out queue, announcing the scan × algorithm spread.
+
+        ``notes`` are extra lines printed above the run (e.g. skipped detectors);
+        they are passed as the console header so they survive the log clear.
+        """
+        header = "\n".join(notes) if notes else None
+        if len(jobs) > 1:
+            spread = (f"[queuing {len(jobs)} jobs: {len(scans)} scan(s) × "
+                      f"{n_algos} algorithm(s)]")
+            header = f"{header}\n{spread}" if header else spread
+            self.console.run_many(jobs, header=header)
+        else:
+            self.console.run(jobs[0], header=header)
 
 
 def make_tab(project_root=".", scan=None, bin_size=3):

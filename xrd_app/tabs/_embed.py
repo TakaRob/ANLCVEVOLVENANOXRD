@@ -63,6 +63,16 @@ def bins_status_text(dm, bin_size, scan=None) -> str:
     return f"{bin_size}×{bin_size}: not built — run Programs → Create bins"
 
 
+def is_territory_catalog(path) -> bool:
+    """True for a territorial-variant feature catalog (tag contains ``territory``).
+
+    These are keyed by ``"<tid>_0"`` on irregular cells, so the fixed ``row_col``
+    grid views (Device View / Orientation) can't render them — they belong in the
+    dedicated territorial map (``gui/territory_map.py``)."""
+    info = catalogs.parse_name(Path(path).name) or {}
+    return "territory" in (info.get("tag") or "")
+
+
 def has_territory_reference(dm, scan=None) -> bool:
     """True if the scan has a built territorial (cell-model) grid mapping.
 
@@ -240,7 +250,9 @@ class LineageCatalogTab(QWidget):
             self._terr_btn = QPushButton("Territorial reference available  →")
             self._terr_btn.setToolTip(
                 "Open the skew-free territorial (cell-model) device map for this "
-                "scan in a separate window.")
+                "scan in a separate window. Territorial catalogs aren't listed in "
+                "the dropdown above — their irregular cells can't render on this "
+                "fixed grid, so view them here.")
             self._terr_btn.setStyleSheet(
                 "QPushButton { color:#00b3c7; border:1px solid #00b3c7; "
                 "border-radius:4px; padding:2px 8px; }")
@@ -285,6 +297,11 @@ class LineageCatalogTab(QWidget):
     def _populate_features(self):
         rd = self._results_dir()
         feats = catalogs.feature_sources(rd, self._bin_size) if rd else []
+        # Territorial catalogs can't render on this fixed row_col grid (they'd
+        # collapse to a line); when the territorial-map popup is available, route
+        # them there instead of listing them here. See is_territory_catalog.
+        if self._territory_popup_enabled:
+            feats = [p for p in feats if not is_territory_catalog(p)]
         self._feat_combo.blockSignals(True)
         self._feat_combo.clear()
         if not feats:
