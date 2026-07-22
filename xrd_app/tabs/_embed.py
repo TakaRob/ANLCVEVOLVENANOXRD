@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime
+import inspect
 import os
 import re
 from pathlib import Path
@@ -71,18 +72,6 @@ def is_territory_catalog(path) -> bool:
     dedicated territorial map (``gui/territory_map.py``)."""
     info = catalogs.parse_name(Path(path).name) or {}
     return "territory" in (info.get("tag") or "")
-
-
-def has_territory_reference(dm, scan=None) -> bool:
-    """True if the scan has a built territorial (cell-model) grid mapping.
-
-    Presence of ``grid_mapping_1x1_territory.json`` means the skew-free reference
-    device map can be opened (see ``gui/territory_map.py``).
-    """
-    try:
-        return Path(dm.grid_mapping(bin_size=1, scan=scan, variant="territory")).exists()
-    except Exception:
-        return False
 
 
 def embed_window(win) -> QWidget:
@@ -180,9 +169,16 @@ class BinnedTab(QWidget):
             self._win.setParent(None)
             self._win.deleteLater()
             self._win = None
+        # A build_window that offers an in-app "build it" step (e.g. the HD
+        # Device View) accepts on_built — a callback to rebuild once the artifact
+        # exists, so the placeholder swaps itself out for the real view.
+        kwargs = {}
+        if "on_built" in inspect.signature(self._build_window).parameters:
+            kwargs["on_built"] = self._rebuild
         try:
             self._win = self._build_window(
-                self._project_root, scan=self._scan, bin_size=self._bin_size)
+                self._project_root, scan=self._scan, bin_size=self._bin_size,
+                **kwargs)
         except Exception as e:
             self._win = placeholder("Could not load this view.",
                                     f"{type(e).__name__}: {e}")
@@ -212,7 +208,7 @@ class LineageCatalogTab(QWidget):
     _BROWSE = "__browse__"
 
     def __init__(self, build_window, project_root, scan=None, bin_size=3,
-                 territory_popup=False):
+                 hide_territory_catalogs=False):
         super().__init__()
         self._build_window = build_window
         self._project_root = project_root
@@ -221,8 +217,9 @@ class LineageCatalogTab(QWidget):
         self._feature = None    # selected feature-catalog path str
         self._win = None
         self._view_state = None  # carried layers/metric across catalog switches
-        self._territory_popup_enabled = territory_popup
-        self._territory_window = None   # keeps the popup alive
+        # Territorial catalogs can't render on this fixed row_col grid; when set,
+        # they're filtered out of the dropdown and viewed in the Territory Map tab.
+        self._hide_territory = hide_territory_catalogs
 
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
@@ -245,26 +242,11 @@ class LineageCatalogTab(QWidget):
         self._status.setStyleSheet("color:#888; font-size:0.9em; padding-left:8px;")
         bar.addWidget(self._status)
         bar.addStretch()
-        self._terr_btn = None
-        if self._territory_popup_enabled:
-            self._terr_btn = QPushButton("Territorial reference available  →")
-            self._terr_btn.setToolTip(
-                "Open the skew-free territorial (cell-model) device map for this "
-                "scan in a separate window. Territorial catalogs aren't listed in "
-                "the dropdown above — their irregular cells can't render on this "
-                "fixed grid, so view them here.")
-            self._terr_btn.setStyleSheet(
-                "QPushButton { color:#00b3c7; border:1px solid #00b3c7; "
-                "border-radius:4px; padding:2px 8px; }")
-            self._terr_btn.clicked.connect(self._open_territory)
-            self._terr_btn.setVisible(False)
-            bar.addWidget(self._terr_btn)
         lay.addLayout(bar)
 
         self._populate_bins()
         self._populate_features()
         self._rebuild()
-        self._update_territory_button()
 
     def current_bin_size(self):
         return self._bin_size
@@ -298,9 +280,9 @@ class LineageCatalogTab(QWidget):
         rd = self._results_dir()
         feats = catalogs.feature_sources(rd, self._bin_size) if rd else []
         # Territorial catalogs can't render on this fixed row_col grid (they'd
-        # collapse to a line); when the territorial-map popup is available, route
-        # them there instead of listing them here. See is_territory_catalog.
-        if self._territory_popup_enabled:
+        # collapse to a line); hide them here and view them in the Territory Map
+        # tab instead. See is_territory_catalog.
+        if self._hide_territory:
             feats = [p for p in feats if not is_territory_catalog(p)]
         self._feat_combo.blockSignals(True)
         self._feat_combo.clear()
@@ -413,32 +395,6 @@ class LineageCatalogTab(QWidget):
             prov = "⚠ no lineage (manual)"
         self._status.setText(
             f"bin {b}×{b} · {Path(self._feature).name} · {prov}")
-
-    def _update_territory_button(self):
-        """Show the popup button only when this scan has territorial artifacts."""
-        if not self._terr_btn:
-            return
-        try:
-            dm = DataManager(self._project_root, scan=self._scan)
-            self._terr_btn.setVisible(has_territory_reference(dm, self._scan))
-        except Exception:
-            self._terr_btn.setVisible(False)
-
-    def _open_territory(self):
-        """Open the territorial (cell-model) device map in a new top-level window."""
-        from ..gui import territory_map
-        try:
-            win = territory_map.build_window(
-                self._project_root, scan=self._scan, bin_size=1)
-        except Exception as e:
-            win = placeholder("Could not open the territorial map.",
-                              f"{type(e).__name__}: {e}")
-        win.setWindowTitle(f"Territory Map — {self._scan or ''}")
-        win.resize(1000, 760)
-        win.show()
-        win.raise_()
-        win.activateWindow()
-        self._territory_window = win   # keep a reference so it isn't GC'd
 
 
 def placeholder(message: str, detail: str = "") -> QWidget:

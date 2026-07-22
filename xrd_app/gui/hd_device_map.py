@@ -19,6 +19,7 @@ reused from :mod:`gui.device_map` so the two views stay visually consistent.
 """
 
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -28,10 +29,10 @@ import pyqtgraph as pg
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QCheckBox, QPushButton, QGroupBox, QComboBox, QSplitter,
-    QSpinBox, QScrollArea,
+    QSpinBox, QScrollArea, QProgressBar, QPlainTextEdit,
 )
-from PyQt5.QtCore import Qt, QTimer
-from PyQt5.QtGui import QColor
+from PyQt5.QtCore import Qt, QTimer, QProcess
+from PyQt5.QtGui import QColor, QFont
 
 from ..config import DataManager
 from ..core import hd_map as hd_core
@@ -958,21 +959,148 @@ class HDDeviceMapWindow(QMainWindow):
             self.xrf_on_cb.blockSignals(False)
 
 
-def _message_window(message, detail=""):
-    win = QMainWindow()
-    win.setWindowTitle("HD Device View")
-    w = QWidget(); lay = QVBoxLayout(w)
-    lay.addStretch()
-    lbl = QLabel(message); lbl.setAlignment(Qt.AlignCenter); lbl.setWordWrap(True)
-    lbl.setStyleSheet("font-size: 1.15em;")
-    lay.addWidget(lbl)
-    if detail:
-        d = QLabel(detail); d.setAlignment(Qt.AlignCenter); d.setWordWrap(True)
-        d.setStyleSheet("color:#999; font-size:0.9em;")
-        lay.addWidget(d)
-    lay.addStretch()
-    win.setCentralWidget(w)
-    return win
+_PROGRESS_RE = re.compile(r"PROGRESS\s+(\d+)\s*/\s*(\d+)")
+
+
+class HDMapBuilder(QMainWindow):
+    """Shown in place of the view when no HD map exists yet: a Run button that
+    builds it in-app.
+
+    Runs ``xrd-app hd-device-map`` in a subprocess (same CLI-is-the-engine path
+    the Programs tab uses), shows an ``(i/n)`` status parsed from the CLI's
+    ``PROGRESS`` markers, and calls ``on_built`` on success so the embedding tab
+    swaps in the real HD view — no manual CLI step or tab reload needed.
+    """
+
+    def __init__(self, project_root, scan, bin_size, on_built=None):
+        super().__init__()
+        self.setWindowTitle("HD Device View")
+        self._project_root = project_root
+        self._scan = scan
+        self._bin_size = bin_size
+        self._on_built = on_built
+        self._proc = None
+        self._cancelled = False
+
+        w = QWidget()
+        lay = QVBoxLayout(w)
+        lay.addStretch()
+
+        msg = QLabel(f"No HD map for {bin_size}×{bin_size} yet.")
+        msg.setAlignment(Qt.AlignCenter); msg.setWordWrap(True)
+        msg.setStyleSheet("font-size: 1.15em;")
+        lay.addWidget(msg)
+        detail = QLabel(
+            f"Sample 1×1 intensity beneath the {bin_size}×{bin_size} feature map "
+            "at each feature's detector peak. Reads raw frames (heavy) — runs "
+            "once, then the JSON is cached.")
+        detail.setAlignment(Qt.AlignCenter); detail.setWordWrap(True)
+        detail.setStyleSheet("color:#999; font-size:0.9em;")
+        lay.addWidget(detail)
+
+        # Run button + (i/n) status.
+        row = QHBoxLayout()
+        row.addStretch()
+        self._run_btn = QPushButton("Build HD device map")
+        self._run_btn.setMinimumHeight(40)
+        self._run_btn.setToolTip(
+            f"Run  xrd-app hd-device-map --scan {scan or ''} --bin-size {bin_size}\n"
+            "using this bin's newest shapes/combined catalog.")
+        self._run_btn.clicked.connect(self._run)
+        row.addWidget(self._run_btn)
+        self._cancel_btn = QPushButton("Cancel")
+        self._cancel_btn.setEnabled(False)
+        self._cancel_btn.clicked.connect(self._cancel)
+        row.addWidget(self._cancel_btn)
+        self._status = QLabel("")
+        self._status.setStyleSheet(
+            "font-family: monospace; color:#555; padding-left:10px;")
+        row.addWidget(self._status)
+        row.addStretch()
+        lay.addLayout(row)
+
+        prow = QHBoxLayout()
+        prow.addStretch()
+        self._progress = QProgressBar()
+        self._progress.setRange(0, 100); self._progress.setValue(0)
+        self._progress.setMaximumWidth(420)
+        self._progress.setVisible(False)
+        prow.addWidget(self._progress)
+        prow.addStretch()
+        lay.addLayout(prow)
+
+        # Compact output log so failures (e.g. no catalog) are visible.
+        self._log = QPlainTextEdit()
+        self._log.setReadOnly(True)
+        self._log.setMaximumBlockCount(2000)
+        self._log.setMaximumHeight(150)
+        self._log.setFont(QFont("monospace", 8))
+        self._log.setVisible(False)
+        lay.addWidget(self._log)
+
+        lay.addStretch()
+        self.setCentralWidget(w)
+
+    # ----- run the CLI -----------------------------------------------
+    def _run(self):
+        if self._proc is not None and self._proc.state() != QProcess.NotRunning:
+            return
+        self._cancelled = False
+        args = ["hd-device-map", "--root", str(self._project_root),
+                "--bin-size", str(self._bin_size)]
+        if self._scan:
+            args += ["--scan", str(self._scan)]
+        cmd = [sys.executable, "-m", "xrd_app.cli", *args]
+        self._run_btn.setEnabled(False)
+        self._cancel_btn.setEnabled(True)
+        self._status.setText("starting…")
+        self._progress.setVisible(True); self._progress.setValue(0)
+        self._log.setVisible(True); self._log.clear()
+        self._log.appendPlainText("$ " + " ".join(cmd))
+        self._proc = QProcess(self)
+        self._proc.setProcessChannelMode(QProcess.MergedChannels)
+        self._proc.readyReadStandardOutput.connect(self._on_output)
+        self._proc.finished.connect(self._on_finished)
+        self._proc.start(cmd[0], cmd[1:])
+
+    def _cancel(self):
+        if self._proc is not None and self._proc.state() != QProcess.NotRunning:
+            self._cancelled = True
+            self._proc.kill()   # _on_finished re-enables the controls
+
+    def _on_output(self):
+        data = bytes(self._proc.readAllStandardOutput()).decode("utf-8", "replace")
+        for line in data.splitlines():
+            m = _PROGRESS_RE.search(line)
+            if m:
+                i, n = int(m.group(1)), int(m.group(2))
+                if n:
+                    self._progress.setValue(int(100 * i / n))
+                self._status.setText(f"({i}/{n})")
+                continue  # don't echo the raw PROGRESS marker
+            self._log.appendPlainText(line)
+
+    def _on_finished(self, code, _status):
+        self._cancel_btn.setEnabled(False)
+        self._run_btn.setEnabled(True)
+        if self._cancelled:
+            self._status.setText("cancelled")
+            self._log.appendPlainText("\n[cancelled]")
+            return
+        if code == 0:
+            self._status.setText("done ✓")
+            self._progress.setValue(100)
+            # Defer the swap-in so we don't rebuild the parent (which deletes
+            # this widget) while still inside the QProcess.finished handler.
+            if self._on_built is not None:
+                QTimer.singleShot(0, self._on_built)
+            return
+        self._status.setText(f"failed (exit {code})")
+
+    def closeEvent(self, event):  # noqa: N802 (Qt signature)
+        if self._proc is not None and self._proc.state() != QProcess.NotRunning:
+            self._proc.kill()
+        super().closeEvent(event)
 
 
 def _load_trajectory(dm, scan):
@@ -995,17 +1123,20 @@ def _load_trajectory(dm, scan):
         return {"grid": [], "xy": None}
 
 
-def build_window(project_root=".", scan=None, bin_size=3, catalog=None):
-    """Construct the HD device view (no event loop; embeddable as a tab)."""
+def build_window(project_root=".", scan=None, bin_size=3, catalog=None,
+                 on_built=None):
+    """Construct the HD device view (no event loop; embeddable as a tab).
+
+    When no HD map exists for the bin yet, returns an :class:`HDMapBuilder` with
+    a Run button that builds it in-app; ``on_built`` (called on a successful
+    build) lets the embedding tab swap in the real view.
+    """
     dm = DataManager(project_root, scan=scan)
     results_dir = dm.results_dir(scan)
     cats = list_hd_catalogs(results_dir, bin_size)
     path = _resolve_catalog(results_dir, bin_size, catalog)
     if not path or not Path(path).exists():
-        return _message_window(
-            f"No HD map for {bin_size}×{bin_size} yet.",
-            f"Run:  xrd-app hd-device-map --scan {scan or ''} "
-            f"--bin-size {bin_size}\nto sample 1×1 intensity beneath the feature map.")
+        return HDMapBuilder(project_root, scan, bin_size, on_built=on_built)
     if not cats:
         cats = [Path(path)]
     trajectory = _load_trajectory(dm, scan)

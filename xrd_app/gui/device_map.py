@@ -105,6 +105,19 @@ METRIC_ZLABELS = {
 
 METRIC_CMAPS = {"chi": "twilight"}
 
+# Colormap choices for the device heatmap. "auto" defers to METRIC_CMAPS (so χ
+# stays on the cyclic twilight map); the rest force a specific map.
+CMAP_CHOICES = [
+    ("auto",     "Auto (per metric)"),
+    ("viridis",  "Viridis"),
+    ("inferno",  "Inferno"),
+    ("magma",    "Magma"),
+    ("plasma",   "Plasma"),
+    ("cividis",  "Cividis"),
+    ("turbo",    "Turbo"),
+    ("twilight", "Twilight (cyclic)"),
+]
+
 METRIC_DESCRIPTIONS = {
     "none":       "Feature outlines colored by reflection",
     "intensity":  "Integrated peak area (summed counts) per bin",
@@ -425,6 +438,7 @@ class DeviceMapWindow(QMainWindow):
         self.xrf_normalize = True     # per-element normalize before argmax
         self.xrf_opacity = 0.75
         self.metric = "none"
+        self.cmap_name = "auto"    # colormap override; "auto" → METRIC_CMAPS
         self.current_grids = grids
         self.visible_refs = list(REFLECTIONS)
         self.show_labels = False
@@ -563,6 +577,19 @@ class DeviceMapWindow(QMainWindow):
         self.metric_desc_label.setStyleSheet(
             "color: #666; font-size: 0.9em; font-style: italic; padding: 2px;")
         sl.addWidget(self.metric_desc_label)
+        # Colormap picker
+        cm = QHBoxLayout()
+        cm.addWidget(QLabel("Colormap:"))
+        self.cmap_combo = QComboBox()
+        for key, label in CMAP_CHOICES:
+            self.cmap_combo.addItem(label, key)
+        self.cmap_combo.setToolTip(
+            "Colormap for the heatmap. 'Auto' uses the per-metric default "
+            "(cyclic twilight for χ, viridis otherwise).")
+        self.cmap_combo.currentIndexChanged.connect(self._on_cmap_changed)
+        cm.addWidget(self.cmap_combo)
+        cm.addStretch()
+        sl.addLayout(cm)
         # Contrast: the colormap spans [min%, max%] percentiles of the metric
         # values (the colorbar on the right is a legend for that range).
         ch = QHBoxLayout()
@@ -756,6 +783,18 @@ class DeviceMapWindow(QMainWindow):
             vmax = vmin + 1
         return grid, vmin, vmax
 
+    def _current_cmap(self):
+        """Resolved colormap for the current metric, honoring the picker
+        ("auto" → the per-metric default in METRIC_CMAPS)."""
+        name = self.cmap_name
+        if name == "auto":
+            name = METRIC_CMAPS.get(self.metric, "viridis")
+        return _get_cmap(name)
+
+    def _on_cmap_changed(self):
+        self.cmap_name = self.cmap_combo.currentData()
+        self._redraw()
+
     def _on_isolate_toggle(self, checked):
         self._isolate = bool(checked)
         self._redraw()
@@ -807,7 +846,7 @@ class DeviceMapWindow(QMainWindow):
         elif isolate:
             # Hide the full map (ghost alpha 0), then paint the selected
             # feature (its own value range) at full strength on top.
-            cmap = _get_cmap(METRIC_CMAPS.get(self.metric, "viridis"))
+            cmap = self._current_cmap()
             full, fvmin, fvmax = self._compute_combined(
                 self.metric, self.visible_refs, chi_range)
             rgba = _scalar_to_rgba(full, fvmin, fvmax, cmap)
@@ -825,7 +864,7 @@ class DeviceMapWindow(QMainWindow):
         else:
             combined, vmin, vmax = self._compute_combined(
                 self.metric, self.visible_refs, chi_range)
-            cmap = _get_cmap(METRIC_CMAPS.get(self.metric, "viridis"))
+            cmap = self._current_cmap()
             rgba = _scalar_to_rgba(combined, vmin, vmax, cmap)
             self.img_item.setImage(rgba, autoLevels=False)
             if np.isfinite(combined).any():
@@ -1107,6 +1146,7 @@ class DeviceMapWindow(QMainWindow):
         """Selected layers + outline metric, so a catalog switch keeps them."""
         return {
             "metric": self.metric,
+            "cmap": self.cmap_name,
             "hidden_layers": [r for r, cb in self.layer_cbs.items()
                               if not cb.isChecked()],
             "points": self.labels_cb.isChecked(),
@@ -1140,6 +1180,12 @@ class DeviceMapWindow(QMainWindow):
             self.isolate_cb.blockSignals(True)
             self.isolate_cb.setChecked(self._isolate)
             self.isolate_cb.blockSignals(False)
+        cmap = state.get("cmap")
+        if cmap and self.cmap_combo.findData(cmap) >= 0:
+            self.cmap_name = cmap
+            self.cmap_combo.blockSignals(True)
+            self.cmap_combo.setCurrentIndex(self.cmap_combo.findData(cmap))
+            self.cmap_combo.blockSignals(False)
         m = state.get("metric")
         if m and self.metric_combo.findData(m) >= 0:
             self.metric_combo.blockSignals(True)

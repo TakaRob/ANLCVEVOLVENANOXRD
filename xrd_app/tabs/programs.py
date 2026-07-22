@@ -11,7 +11,7 @@ from PyQt5.QtWidgets import (
 )
 
 from ..config import DataManager, format_detector_label
-from ._console import JobConsole
+from ._console import ConsolePanel
 
 TAB_META = {
     "title": "Programs",
@@ -28,7 +28,9 @@ TAB_META = {
         "algorithm above first” to chain peaks→shapes in one process. Combined "
         "runs a per-frame (1×1) algorithm that does peak+shape in one pass. Each "
         "Run fans out over the selected scans × algorithms as a queue of CLI "
-        "jobs; output streams below."
+        "jobs; output streams to a console tab below. A Run reuses the active "
+        "console if it's idle, or opens a new console tab if it's busy — so you "
+        "can start a second run without waiting (no need for a second GUI)."
     ),
 }
 
@@ -207,7 +209,10 @@ class ProgramsTab(QWidget):
         lay.addLayout(cve_row)
 
         # ---- Console -----------------------------------------------------
-        self.console = JobConsole()
+        # A tabbed panel of consoles: each Run reuses the active console if it's
+        # idle, else opens a new console tab, so several jobs run at once in one
+        # window (no more opening a second GUI to run a second thing).
+        self.console = ConsolePanel()
         lay.addWidget(self.console, 1)
 
         self.update_context(scan, bin_size)

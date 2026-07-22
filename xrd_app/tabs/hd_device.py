@@ -15,8 +15,9 @@ TAB_META = {
         "at each feature's detector peak, sampled per unbinned pixel — the real "
         "scan with all its holes and 9× finer detail, so nearly-overlapping "
         "reflections separate. Switch to a real (x, y) stage-position scatter to "
-        "see the actual scan geometry. Build the data first with "
-        "'xrd-app hd-device-map'."
+        "see the actual scan geometry. If the HD map hasn't been built for this "
+        "bin yet, the tab shows a “Build HD device map” button that runs it "
+        "in-app (with an (i/n) progress status) and swaps in the view when done."
     ),
 }
 

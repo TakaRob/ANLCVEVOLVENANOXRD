@@ -356,6 +356,33 @@ def build_holdout(source, algorithm, bin_size, scan, holdout_pct, seed, dest, ro
 
 
 # ─────────────────────────────────────────────────────────────────────
+# cvevolve-init — scaffold a CVEvolve project from bundled defaults
+# ─────────────────────────────────────────────────────────────────────
+@main.command(name='cvevolve-init')
+@click.option('--name', default=None, help='Session name (default: project CVEvolve dir name)')
+@click.option('--force', is_flag=True, help='Overwrite existing config/prompt files')
+@click.option('--root', default='.', help='Project root directory')
+def cvevolve_init(name, force, root):
+    """Create default config.yaml + prompt.md + holdout_test_prompt.md.
+
+    Beamline users won't arrive with these files; this seeds the project's
+    ``CVEvolve/`` dir with sane defaults (paths filled in) that they can then
+    tweak — the metric description in config.yaml and the prompt .md are the two
+    places to change "what the model is looking for".
+    """
+    from .core import cvevolve_setup as CV
+    dm = DataManager(root)
+    dest = dm.cvevolve_dir
+    session_name = name or dest.name or "cvevolve"
+    res = CV.scaffold_project(dest, session_name, force=force)
+    for p in res["written"]:
+        click.echo(f"[cvevolve-init] wrote {p}")
+    for p in res["skipped"]:
+        click.echo(f"[cvevolve-init] skipped (exists) {p}  — use --force to overwrite")
+    click.echo(f"[cvevolve-init] project ready at {dest}  (name={session_name})")
+
+
+# ─────────────────────────────────────────────────────────────────────
 # run-cvevolve — wrapper around the CVEvolve algorithm search
 # ─────────────────────────────────────────────────────────────────────
 @main.command(name='run-cvevolve')
@@ -367,13 +394,21 @@ def build_holdout(source, algorithm, bin_size, scan, holdout_pct, seed, dest, ro
 @click.option('--build', is_flag=True, help='Build the image from --cvevolve-dir first')
 @click.option('--mount', 'mounts', multiple=True, help='Host dir to mount at the same path (repeatable)')
 @click.option('--env', 'envs', multiple=True, default=('ARGO_API_KEY',), help='Env var to pass through')
+@click.option('--hutch/--no-hutch', default=False,
+              help='Enable Hutch (SQLite) tracking before launching; prints HUTCH_DB <path>')
 @click.option('--root', default='.', help='Project root directory')
-def run_cvevolve(config_path, prompt_path, engine, cvevolve_dir, image, build, mounts, envs, root):
+def run_cvevolve(config_path, prompt_path, engine, cvevolve_dir, image, build, mounts, envs, hutch, root):
     """Run CVEvolve with the given config (Podman by default — LLM-generated code)."""
     import subprocess
     import sys
     config_path = Path(config_path).resolve()
     _require(config_path, "CVEvolve config")
+    if hutch:
+        from .core import cvevolve_setup as CV
+        db_path = CV.set_hutch(config_path, True)
+        # Emit a machine-readable marker so the GUI can point its live SQL view
+        # at the same DB without re-parsing the config.
+        click.echo(f"HUTCH_DB {db_path}")
     inner = ["cvevolve", "run", "--config", str(config_path)]
     if prompt_path:
         prompt_path = Path(prompt_path).resolve()
@@ -1324,6 +1359,62 @@ def aggregate(scans, bin_size, out_dir, root):
     db = agg.write_sqlite(out / "study.db", features, device_map)
     click.echo(f"\nWrote {len(features)} features, {len(device_map)} device-map rows:")
     click.echo(f"  {fcsv}\n  {dcsv}\n  {db}")
+
+
+# ─────────────────────────────────────────────────────────────────────
+# scan-table — one summary row per scan (cross-scan comparison)
+# ─────────────────────────────────────────────────────────────────────
+@main.command(name='scan-table')
+@click.option('--bin-size', type=int, default=3, help='Bin size (default: 3)')
+@click.option('--type', 'type_match', default=None,
+              help='Catalog type to compare (substring of the lineage label, '
+                   'e.g. "gaussian" or "territory"); default: first available')
+@click.option('--refl', default=None,
+              help='Comma-separated reflections to filter to (e.g. "(001),(111)")')
+@click.option('--bandwidth', type=float, default=5.0, help='χ KDE bandwidth (°)')
+@click.option('--out', 'out_dir', default='Study', help='Output directory (Study/)')
+@click.option('--root', default='.', help='Project root directory')
+def scan_table(bin_size, type_match, refl, bandwidth, out_dir, root):
+    """One summary row per scan → prints a table + writes Study/scan_summary.csv.
+
+    For a bin size and catalog TYPE (the JSON lineage shared across scans — e.g.
+    the gaussian shapes at 3×3, or a territorial mapping) reports per scan:
+    feature count, footprint area (sum + union), coverage %, the preferred χ
+    (dominant azimuthal cluster) ± range, and shape fill % (solidity). A
+    territorial type reports areas in coordinate-CSV units.
+    """
+    from .core import scan_table as st, aggregate as agg
+    dm = DataManager(root)
+    types = st.catalog_types(dm, bin_size)
+    if not types:
+        click.echo(f"No catalogs at {bin_size}x{bin_size} — run peaks/shapes first.")
+        raise SystemExit(1)
+    if type_match:
+        matches = [t for t in types if type_match.lower() in t["label"].lower()]
+        if not matches:
+            click.echo(f"No catalog type matches {type_match!r}. Available:")
+            for t in types:
+                click.echo(f"  {t['label']}  ({t['scans']} scan(s))")
+            raise SystemExit(1)
+        chosen = matches[0]
+    else:
+        chosen = types[0]
+    click.echo(f"Catalog type: {chosen['label']}  ({chosen['scans']} scan(s))")
+
+    refs = [r.strip() for r in refl.split(',') if r.strip()] if refl else None
+    rows, meta = st.scan_table_rows(dm, bin_size, chosen["key"], refs=refs,
+                                    bandwidth=bandwidth)
+    if not rows:
+        click.echo("No matching scans found for this type.")
+        raise SystemExit(1)
+    click.echo("")
+    click.echo(st.format_table(rows, meta))
+
+    out = Path(out_dir)
+    if not out.is_absolute():
+        out = Path(root) / out
+    csv = agg.write_csv(rows, st.COLUMNS, out / "scan_summary.csv")
+    click.echo(f"\nWrote {len(rows)} scan rows:\n  {csv}")
 
 
 # ─────────────────────────────────────────────────────────────────────

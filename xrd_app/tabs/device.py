@@ -21,7 +21,7 @@ TAB_META = {
 
 def make_tab(project_root=".", scan=None, bin_size=3):
     return LineageCatalogTab(device_map.build_window, project_root, scan=scan,
-                             bin_size=bin_size, territory_popup=True)
+                             bin_size=bin_size, hide_territory_catalogs=True)
 
 
 if __name__ == "__main__":

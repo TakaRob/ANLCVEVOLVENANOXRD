@@ -10,11 +10,11 @@ from __future__ import annotations
 import re
 import sys
 
-from PyQt5.QtCore import QProcess
+from PyQt5.QtCore import QProcess, pyqtSignal
 from PyQt5.QtGui import QFont
 from PyQt5.QtWidgets import (
-    QHBoxLayout, QLabel, QPlainTextEdit, QProgressBar, QPushButton, QVBoxLayout,
-    QWidget,
+    QHBoxLayout, QLabel, QPlainTextEdit, QProgressBar, QPushButton, QTabWidget,
+    QVBoxLayout, QWidget,
 )
 
 _PROGRESS_RE = re.compile(r"PROGRESS\s+(\d+)\s*/\s*(\d+)")
@@ -22,6 +22,10 @@ _PROGRESS_RE = re.compile(r"PROGRESS\s+(\d+)\s*/\s*(\d+)")
 
 class JobConsole(QWidget):
     """A read-only console + progress bar + cancel button driving one QProcess."""
+
+    # Emitted whenever this console transitions between running and idle, so a
+    # container (see ConsolePanel) can reflect busy/idle in a tab title.
+    state_changed = pyqtSignal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -107,6 +111,7 @@ class JobConsole(QWidget):
             self.cancel_btn.setEnabled(False)
             self._append(f"\n[batch complete: {total - n_failed}/{total} "
                          f"succeeded{f', {n_failed} failed' if n_failed else ''}]\n")
+            self.state_changed.emit()
             cb = getattr(self, "_on_all_finished_cb", None)
             self._on_all_finished_cb = None
             if cb is not None:
@@ -135,12 +140,14 @@ class JobConsole(QWidget):
         if self._queue is None:
             self.status.setText("running")
         self.cancel_btn.setEnabled(True)
+        self.state_changed.emit()
 
     def cancel(self):
         if self.is_running():
             self._queue = None  # drop any remaining queued jobs
             self._proc.kill()
             self._append("\n[cancelled]\n")
+            self.state_changed.emit()
 
     def closeEvent(self, event):  # noqa: N802 (Qt signature)
         self.cancel()
@@ -170,6 +177,7 @@ class JobConsole(QWidget):
             return
         self.status.setText("done" if code == 0 else f"failed (exit {code})")
         self.cancel_btn.setEnabled(False)
+        self.state_changed.emit()
         cb = getattr(self, "_on_finished_cb", None)
         self._on_finished_cb = None
         if cb is not None:
@@ -182,3 +190,83 @@ class JobConsole(QWidget):
         self.log.moveCursor(self.log.textCursor().End)
         self.log.insertPlainText(text)
         self.log.moveCursor(self.log.textCursor().End)
+
+
+class ConsolePanel(QWidget):
+    """A tabbed set of :class:`JobConsole`\\ s so several jobs run concurrently.
+
+    One Programs tab used to hold a single console, so a second job had to wait
+    (or the user opened a whole second GUI). This panel instead *acquires* a
+    console per Run: it reuses the active tab when that console is idle, and
+    spawns a fresh console tab only when the active one is busy — so independent
+    runs stream side by side in one window. Tabs are closable (closing a running
+    one cancels its job); the last tab is kept so there is always a console.
+
+    It mirrors :meth:`JobConsole.run` / :meth:`run_many` / :meth:`_append`, so a
+    caller that held a ``JobConsole`` can swap in a ``ConsolePanel`` unchanged:
+    ``run``/``run_many`` acquire a console first, ``_append`` writes to the
+    active one.
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        self._tabs = QTabWidget()
+        self._tabs.setTabsClosable(True)
+        self._tabs.setMovable(True)
+        self._tabs.tabCloseRequested.connect(self._close_tab)
+        lay.addWidget(self._tabs)
+        self._counter = 0
+        self._new_console()
+
+    # ----- tab management ---------------------------------------------
+    def _new_console(self) -> JobConsole:
+        self._counter += 1
+        con = JobConsole()
+        con._panel_label = f"Console {self._counter}"
+        con.state_changed.connect(lambda c=con: self._sync_title(c))
+        idx = self._tabs.addTab(con, con._panel_label)
+        self._tabs.setCurrentIndex(idx)
+        return con
+
+    def _sync_title(self, con):
+        """Prefix a running console's tab with ``●`` so busy tabs stand out."""
+        idx = self._tabs.indexOf(con)
+        if idx < 0:
+            return
+        label = getattr(con, "_panel_label", "Console")
+        self._tabs.setTabText(idx, f"● {label}" if con.is_running() else label)
+
+    def _close_tab(self, idx):
+        con = self._tabs.widget(idx)
+        if con is None:
+            return
+        con.cancel()          # no-op if idle; kills the job otherwise
+        self._tabs.removeTab(idx)
+        con.deleteLater()
+        if self._tabs.count() == 0:
+            self._new_console()
+
+    # ----- console selection ------------------------------------------
+    def current(self) -> JobConsole:
+        """The active console tab (creating one if the panel is somehow empty)."""
+        con = self._tabs.currentWidget()
+        return con if con is not None else self._new_console()
+
+    def acquire(self) -> JobConsole:
+        """A free console to run in: the active tab if idle, else a new tab."""
+        con = self.current()
+        if con.is_running():
+            con = self._new_console()
+        return con
+
+    # ----- JobConsole-compatible surface ------------------------------
+    def run(self, *args, **kwargs):
+        self.acquire().run(*args, **kwargs)
+
+    def run_many(self, *args, **kwargs):
+        self.acquire().run_many(*args, **kwargs)
+
+    def _append(self, text):
+        self.current()._append(text)
