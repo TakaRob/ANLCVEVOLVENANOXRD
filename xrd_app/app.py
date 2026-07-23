@@ -581,10 +581,52 @@ def _pid_alive(pid):
     return True
 
 
+def _remote_x_display():
+    """True on a forwarded/remote X display (e.g. ``ssh -X``).
+
+    ``SSH_CONNECTION``/``SSH_CLIENT`` mark an SSH session; ``DISPLAY`` that isn't
+    a local socket (``:0`` / ``unix:0``) is networked — ssh forwarding sets
+    ``DISPLAY=localhost:NN``, which counts as remote. Overridable with
+    ``XRD_FORCE_LOCAL_X=1`` (treat as local) — mirrors rsm_view's GL guard.
+    """
+    import os
+    if os.environ.get("XRD_FORCE_LOCAL_X") == "1":
+        return False
+    if os.environ.get("SSH_CONNECTION") or os.environ.get("SSH_CLIENT"):
+        return True
+    disp = os.environ.get("DISPLAY", "")
+    if disp and not (disp.startswith(":") or disp.startswith("unix:")):
+        return True
+    return False
+
+
+def _harden_env_for_remote_x():
+    """Make Qt survive a forwarded X connection. Must run before QApplication.
+
+    Over ``ssh -X`` two Qt defaults break the app:
+      * MIT-SHM pixmaps don't exist across the network — blitting a large raw
+        frame triggers ``XIO: fatal IO error`` and kills the app. Disable SHM.
+      * The xcb GL integration spawns a separate native GL window (a second
+        taskbar icon) that crashes the X server / compositor on interaction.
+        Turn it off (the 3D view already degrades to a hint in this case).
+    Both are set with ``setdefault`` so an explicit override still wins; GL is
+    left alone when the user forces it on with ``XRD_FORCE_GL=1``.
+    """
+    import os
+    if not _remote_x_display():
+        return
+    os.environ.setdefault("QT_X11_NO_MITSHM", "1")
+    if os.environ.get("XRD_FORCE_GL") != "1":
+        os.environ.setdefault("QT_XCB_GL_INTEGRATION", "none")
+
+
 def launch_app(project_root=None, scan=None, bin_size=3, fresh=False):
     """Create the QApplication and run the single-window app."""
     import signal
     import sys
+    # Harden the environment for forwarded/remote X *before* QApplication reads
+    # it (see _harden_env_for_remote_x). No-op on a local display.
+    _harden_env_for_remote_x()
     from PyQt5.QtCore import Qt, QTimer
     from PyQt5.QtWidgets import QApplication
     QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)

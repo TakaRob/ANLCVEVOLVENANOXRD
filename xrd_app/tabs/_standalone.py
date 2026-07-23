@@ -33,6 +33,8 @@ def run_standalone(make_tab, title):
     name = mod_name.rsplit(".", 1)[-1]
     tabs = ["setup"] if name == "setup" else ["setup", name]
 
+    from ..app import _harden_env_for_remote_x  # before QApplication reads env
+    _harden_env_for_remote_x()
     from PyQt5.QtCore import Qt
     QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)
     QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
@@ -61,6 +63,8 @@ def run_dialog_standalone(open_dialog, title):
     parser.add_argument("--bin-size", type=int, default=3, help="Bin size")
     args = parser.parse_args()
 
+    from ..app import _harden_env_for_remote_x  # before QApplication reads env
+    _harden_env_for_remote_x()
     from PyQt5.QtCore import Qt
     from PyQt5.QtWidgets import QMessageBox
     QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)
