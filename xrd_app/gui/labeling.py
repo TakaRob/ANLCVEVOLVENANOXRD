@@ -205,17 +205,22 @@ def load_xrd_metadata(xrd_dir, scan_number=203):
     return xrd_files, xrd_file_map, len(xrd_file_map)
 
 
-def load_positions(csv_path, n_total):
-    x, y = [], []
-    with open(csv_path) as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            x.append(float(row["X_Position"]))
-            y.append(float(row["Y_Position"]))
-    frame_x = np.full(n_total, np.nan)
-    n = min(len(x), n_total)
-    frame_x[:n] = x[:n]
-    return frame_x
+def load_positions(pos_path, n_total):
+    """X positions for the raw-grid fallback, or all-NaN when unavailable.
+
+    Positions are *optional* here: this only feeds :func:`build_scan_grid`, which
+    synthesises a serpentine lattice from all-NaN. So a missing file (no positions
+    for this scan) returns all-NaN rather than raising — the view/label tool must
+    open without a positions file. Delegates to :func:`core.io.load_positions`,
+    which reads either the CSV or a Lozano position ``.h5`` (by suffix).
+    """
+    if not pos_path or not Path(pos_path).exists():
+        return np.full(n_total, np.nan)
+    from ..core import io as _io
+    try:
+        return _io.load_positions(pos_path, n_total)
+    except (OSError, KeyError, ValueError):
+        return np.full(n_total, np.nan)
 
 
 def build_scan_grid(frame_x, n_total, kernel=20, order=50):

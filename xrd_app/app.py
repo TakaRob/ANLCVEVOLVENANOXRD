@@ -16,8 +16,8 @@ from pathlib import Path
 
 from PyQt5.QtCore import QTimer
 from PyQt5.QtWidgets import (
-    QCheckBox, QComboBox, QFileDialog, QHBoxLayout, QLabel, QMainWindow,
-    QTabWidget, QVBoxLayout, QWidget,
+    QAction, QApplication, QCheckBox, QComboBox, QFileDialog, QHBoxLayout,
+    QLabel, QMainWindow, QTabWidget, QVBoxLayout, QWidget,
 )
 
 from . import workspace
@@ -83,9 +83,10 @@ class MainWindow(QMainWindow):
         # Resolve the project: explicit root, else the last-opened one, else
         # none (the Setup tab will prompt to create/open one).
         self._load_project(project_root, scan=scan, bin_size=bin_size)
-        self.resize(1500, 950)
         self.base_width = 1500.0
         self.base_font_size = 10.0
+        self._resize_to_screen()
+        self._build_window_menu()
 
         central = QWidget()
         root = QVBoxLayout(central)
@@ -124,6 +125,41 @@ class MainWindow(QMainWindow):
         # Fresh only governs the initial load; later project switches restore
         # their own saved state normally.
         self._fresh = False
+
+    def _resize_to_screen(self):
+        """Start large, but never larger than the usable desktop area."""
+        screen_at = getattr(QApplication, "screenAt", None)
+        screen = (screen_at(self.pos()) if screen_at else None) or QApplication.primaryScreen()
+        if screen is None:
+            self.resize(1500, 950)
+            return
+        rect = screen.availableGeometry()
+        width = min(1500, max(480, int(rect.width() * 0.92)), rect.width())
+        height = min(950, max(360, int(rect.height() * 0.90)), rect.height())
+        self.resize(width, height)
+        self.move(
+            rect.x() + max(0, (rect.width() - width) // 2),
+            rect.y() + max(0, (rect.height() - height) // 2),
+        )
+
+    def _build_window_menu(self):
+        view = self.menuBar().addMenu("View")
+
+        maximize = QAction("Maximize", self)
+        maximize.setShortcut("Ctrl+M")
+        maximize.triggered.connect(self.showMaximized)
+        view.addAction(maximize)
+
+        full_screen = QAction("Full Screen", self)
+        full_screen.setShortcut("F11")
+        full_screen.triggered.connect(self._toggle_full_screen)
+        view.addAction(full_screen)
+
+    def _toggle_full_screen(self):
+        if self.isFullScreen():
+            self.showNormal()
+        else:
+            self.showFullScreen()
 
     # ----- project loading / switching --------------------------------
     def _load_project(self, project_root, scan=None, bin_size=None):
@@ -427,7 +463,6 @@ class MainWindow(QMainWindow):
         scale_factor = self.width() / self.base_width
         new_size = int(self.base_font_size * scale_factor)
         new_size = max(9, min(new_size, 26))
-        from PyQt5.QtWidgets import QApplication
         app = QApplication.instance()
         if app:
             font = app.font()
