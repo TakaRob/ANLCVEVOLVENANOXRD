@@ -16,7 +16,7 @@ from collections import defaultdict
 
 import numpy as np
 import tifffile
-import matplotlib.cm as mcm
+import matplotlib
 import pyqtgraph as pg
 from scipy.ndimage import gaussian_filter1d
 from scipy.optimize import minimize
@@ -294,7 +294,7 @@ def build_density_overlay(tth_map, chi_map, features_by_ref, active_refs,
     h, w = tth_map.shape
     overlay = np.zeros((h, w, 4), dtype=np.float32)
     chi_idx = np.clip(((chi_map + 180)).astype(int), 0, 359)
-    cmap = mcm.get_cmap(cmap_name)
+    cmap = _mpl_cmap(cmap_name)
 
     global_max = 0
     densities = {}
@@ -343,6 +343,25 @@ def build_density_overlay(tth_map, chi_map, features_by_ref, active_refs,
         overlay[paint, :3] = rgba[:, :3]
         overlay[paint, 3] = np.clip(pixel_a[paint] * 1.2, 0.05, 0.85)
     return overlay, global_max, vmin, vmax
+
+
+def _mpl_cmap(name):
+    """Matplotlib Colormap by name, version-safe.
+
+    `matplotlib.cm.get_cmap` was deprecated in 3.7 and removed in 3.9; the
+    supported access is `matplotlib.colormaps[name]`. Fall back to the old API
+    for matplotlib < 3.5, and to viridis on an unknown name.
+    """
+    try:
+        return matplotlib.colormaps[name]
+    except KeyError:
+        return matplotlib.colormaps["viridis"]
+    except AttributeError:  # matplotlib < 3.5
+        import matplotlib.cm as _cm
+        try:
+            return _cm.get_cmap(name)
+        except Exception:
+            return _cm.get_cmap("viridis")
 
 
 def _get_cmap(name):
@@ -905,7 +924,7 @@ class OrientationMapWindow(QMainWindow):
         hist, _ = np.histogram(d_arr, bins=edges, weights=np.array(d_weights))
         bw = (edges[1] - edges[0]) * 0.85
         if hist.max() > 0:
-            cmap = mcm.get_cmap(self._cmap_name)
+            cmap = _mpl_cmap(self._cmap_name)
             normed = hist / hist.max()
             brushes = [pg.mkBrush(*[int(ch * 255) for ch in cmap(v)[:3]]) for v in normed]
         else:

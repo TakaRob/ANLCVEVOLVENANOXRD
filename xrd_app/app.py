@@ -17,7 +17,7 @@ from pathlib import Path
 from PyQt5.QtCore import QTimer
 from PyQt5.QtWidgets import (
     QAction, QApplication, QCheckBox, QComboBox, QFileDialog, QHBoxLayout,
-    QLabel, QMainWindow, QTabWidget, QVBoxLayout, QWidget,
+    QLabel, QMainWindow, QScrollArea, QTabWidget, QVBoxLayout, QWidget,
 )
 
 from . import workspace
@@ -128,6 +128,11 @@ class MainWindow(QMainWindow):
 
     def _resize_to_screen(self):
         """Start large, but never larger than the usable desktop area."""
+        # A small hard minimum so the window is always shrinkable regardless of
+        # any tab's size hint (tab content lives in scroll areas — see
+        # _ensure_built), which is what makes it resizable below the screen on
+        # GNOME Wayland.
+        self.setMinimumSize(640, 480)
         screen_at = getattr(QApplication, "screenAt", None)
         screen = (screen_at(self.pos()) if screen_at else None) or QApplication.primaryScreen()
         if screen is None:
@@ -141,6 +146,23 @@ class MainWindow(QMainWindow):
             rect.x() + max(0, (rect.width() - width) // 2),
             rect.y() + max(0, (rect.height() - height) // 2),
         )
+        # Wayland may honor the initial geometry only after the surface is
+        # mapped; re-apply the clamp once the event loop is running. move() is a
+        # no-op under Wayland (clients can't position themselves) but resize is
+        # respected, so this still pulls an over-tall window back onto the screen.
+        QTimer.singleShot(0, self._clamp_to_screen)
+
+    def _clamp_to_screen(self):
+        """Shrink the window back within the usable desktop if it overflows."""
+        screen_at = getattr(QApplication, "screenAt", None)
+        screen = (screen_at(self.pos()) if screen_at else None) or QApplication.primaryScreen()
+        if screen is None:
+            return
+        rect = screen.availableGeometry()
+        w = min(self.width(), rect.width())
+        h = min(self.height(), rect.height())
+        if w != self.width() or h != self.height():
+            self.resize(w, h)
 
     def _build_window_menu(self):
         view = self.menuBar().addMenu("View")
@@ -360,7 +382,19 @@ class MainWindow(QMainWindow):
         # Persistent tabs (e.g. Setup) can drive project switching.
         if hasattr(content, "set_host"):
             content.set_host(self)
-        lay.addWidget(content)
+        # Host the tab in a resizable scroll area so a tall tab (e.g. Setup with
+        # many stacked controls) can never force the whole window taller than the
+        # display. With setWidgetResizable(True) the content still fills the
+        # viewport when the window is large; scrollbars only appear when it isn't
+        # — this is what keeps the window shrinkable below the screen on Wayland,
+        # where the minimum size hint would otherwise pin it larger than 1080.
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.NoFrame)
+        scroll.setWidget(content)
+        lay.addWidget(scroll)
+        # Keep _content[idx] pointing at the real tab widget (header-extra /
+        # get-bar lookups depend on it), not the scroll wrapper.
         self._content[idx] = content
         self._built[idx] = True
 
@@ -470,10 +504,88 @@ class MainWindow(QMainWindow):
             app.setFont(font)
 
 
+def _descendant_pids(root_pid):
+    """Return all descendant PIDs of ``root_pid`` (Linux/WSL, via ``/proc``).
+
+    Used to sweep up jobs the GUI spawned — the ``xrd-app`` CLI subprocesses
+    behind the Programs console, hd-device-map, and territory-map QProcesses —
+    plus anything they in turn spawned. Returns ``[]`` where ``/proc`` is
+    unavailable (non-Linux), so callers degrade gracefully.
+    """
+    import os
+    ppid_of = {}
+    try:
+        entries = os.listdir("/proc")
+    except OSError:
+        return []
+    for entry in entries:
+        if not entry.isdigit():
+            continue
+        try:
+            with open(f"/proc/{entry}/status") as fh:
+                for line in fh:
+                    if line.startswith("PPid:"):
+                        ppid_of[int(entry)] = int(line.split()[1])
+                        break
+        except (OSError, ValueError):
+            continue
+    kids_of = {}
+    for pid, ppid in ppid_of.items():
+        kids_of.setdefault(ppid, []).append(pid)
+    out, stack = [], list(kids_of.get(root_pid, []))
+    while stack:
+        pid = stack.pop()
+        out.append(pid)
+        stack.extend(kids_of.get(pid, []))
+    return out
+
+
+def _terminate_child_jobs():
+    """Kill every subprocess the GUI spawned so nothing lingers after exit.
+
+    SIGTERM first (lets the CLI jobs unwind), then SIGKILL any that ignore it.
+    Only touches our own descendants — never the launching shell.
+    """
+    import os
+    import signal
+    import time
+    pids = _descendant_pids(os.getpid())
+    if not pids:
+        return
+    for pid in pids:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except OSError:
+            pass
+    # Brief grace period, then hard-kill stragglers.
+    for _ in range(20):
+        pids = [p for p in pids if _pid_alive(p)]
+        if not pids:
+            return
+        time.sleep(0.05)
+    for pid in pids:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except OSError:
+            pass
+
+
+def _pid_alive(pid):
+    import os
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True  # e.g. EPERM — it exists but we can't signal it
+    return True
+
+
 def launch_app(project_root=None, scan=None, bin_size=3, fresh=False):
     """Create the QApplication and run the single-window app."""
+    import signal
     import sys
-    from PyQt5.QtCore import Qt
+    from PyQt5.QtCore import Qt, QTimer
     from PyQt5.QtWidgets import QApplication
     QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)
     QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
@@ -481,4 +593,30 @@ def launch_app(project_root=None, scan=None, bin_size=3, fresh=False):
     app.setStyle("Fusion")
     win = MainWindow(project_root, scan=scan, bin_size=bin_size, fresh=fresh)
     win.show()
-    return app.exec_()
+
+    # Ctrl-C support. Qt's C++ event loop otherwise swallows SIGINT, so Ctrl-C
+    # in the launching terminal does nothing. Install a handler that closes the
+    # window (saving gui_state via closeEvent) and stops the loop; a periodic
+    # no-op timer wakes the Python interpreter often enough to actually run it.
+    def _handle_sigint(*_a):
+        print("\n[xrd-app] Ctrl-C — closing GUI and stopping all jobs…",
+              file=sys.stderr)
+        app.closeAllWindows()
+        app.quit()
+
+    try:
+        signal.signal(signal.SIGINT, _handle_sigint)
+    except (ValueError, OSError):
+        pass  # not on the main thread / unsupported — skip gracefully
+    _sigint_wakeup = QTimer()
+    _sigint_wakeup.timeout.connect(lambda: None)
+    _sigint_wakeup.start(200)
+
+    try:
+        rc = app.exec_()
+    finally:
+        # Sweep up any jobs the GUI spawned (Programs console, hd/territory
+        # maps) so closing the window — by Ctrl-C or the X button — never
+        # leaves heavy CLI subprocesses running in the background.
+        _terminate_child_jobs()
+    return rc
