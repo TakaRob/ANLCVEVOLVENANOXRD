@@ -58,6 +58,33 @@ except Exception:  # pragma: no cover - depends on the GL stack being installed
     gl = None
     _HAVE_GL = False
 
+
+def _gl_unsafe_display():
+    """True on a forwarded/remote X display, where creating a GL widget is unsafe.
+
+    Over ``ssh -X`` the GLViewWidget (a QOpenGLWidget) can't be composited into
+    its parent, so Qt spawns a *separate native top-level X window* for it — a
+    second taskbar icon. That window uses indirect GLX over the network, which is
+    fragile: creating/focusing it, or clicking its stale taskbar entry after the
+    app exits, routinely crashes the X server / Wayland compositor and logs the
+    user out. So we refuse GL there and show a hint instead.
+
+    Overrides: ``XRD_FORCE_GL=1`` forces GL on regardless; ``XRD_DISABLE_GL=1``
+    forces it off. Otherwise a session is "remote" if it came in over SSH or its
+    ``DISPLAY`` is not a local socket (``:0`` / ``unix:0``) — ssh forwarding sets
+    ``DISPLAY=localhost:NN``, which counts as remote.
+    """
+    if os.environ.get("XRD_FORCE_GL") == "1":
+        return False
+    if os.environ.get("XRD_DISABLE_GL") == "1":
+        return True
+    if os.environ.get("SSH_CONNECTION") or os.environ.get("SSH_CLIENT"):
+        return True
+    disp = os.environ.get("DISPLAY", "")
+    if disp and not (disp.startswith(":") or disp.startswith("unix:")):
+        return True  # host:N or localhost:N — networked/forwarded X
+    return False
+
 # The three orthogonal planes: label -> (proj key, q-index for x, y).
 _PLANES = {
     "qx–qy (top)":  ("qx_qy", 0, 1),
@@ -237,6 +264,13 @@ class RSMView(QWidget):
 
     def _make_gl_widget(self):
         """A GLViewWidget when OpenGL is available, else an explanatory label."""
+        if _gl_unsafe_display():
+            return self._gl_hint(
+                "3D view is disabled on a remote / SSH-forwarded display.\n\n"
+                "Over ‘ssh -X’ the 3D view opens as a separate X window that can\n"
+                "crash the remote desktop session. Use a remote desktop\n"
+                "(x2go / VNC / NoMachine) or run locally for 3D.\n\n"
+                "To force it on anyway: set XRD_FORCE_GL=1")
         if _HAVE_GL:
             try:
                 view = gl.GLViewWidget()
