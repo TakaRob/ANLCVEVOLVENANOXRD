@@ -22,6 +22,7 @@ import importlib.util
 import json
 import os
 import time
+from collections import OrderedDict
 from pathlib import Path
 from typing import Callable, Optional, Union
 
@@ -994,7 +995,8 @@ def build_bins(
     # (discarded) .tmp file corrupt instead of the real output, so any previous
     # good bins file survives and the GUI never reads a half-written file.
     tmp = output.with_name(output.name + ".tmp")
-    h5_handles: dict = {}
+    max_open_files = 32
+    h5_handles: OrderedDict[int, h5py.File] = OrderedDict()
     out = h5py.File(str(tmp), "w")
     out.attrs["bin_size"] = bin_size
     out.attrs["n_bin_rows"] = gm["n_bin_rows"]
@@ -1013,7 +1015,12 @@ def build_bins(
             summed = None
             for fi, frame_list in by_file.items():
                 if fi not in h5_handles:
+                    if len(h5_handles) >= max_open_files:
+                        _, old_fh = h5_handles.popitem(last=False)
+                        old_fh.close()
                     h5_handles[fi] = h5py.File(xrd_files[fi], "r")
+                else:
+                    h5_handles.move_to_end(fi)
                 ds = h5_handles[fi][h5_dataset]
                 for fj in frame_list:
                     frame = ds[fj].astype(np.float64)
