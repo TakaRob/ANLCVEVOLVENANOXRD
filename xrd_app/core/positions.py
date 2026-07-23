@@ -168,3 +168,84 @@ def build_positions_csv(
     log(f"Wrote {len(triggers)} positions -> {output}")
     return {"path": output, "n_positions": int(len(triggers)),
             "x_span_um": x_span, "y_span_um": y_span}
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Lozano position HDF5 — already-reduced (X, Y) per frame, no interferometry
+# reduction needed. Discovered by scan number (``Scan_NNNN.h5``) or given
+# explicitly. See :data:`io.H5_POSITION_GROUP` for the layout.
+# ─────────────────────────────────────────────────────────────────────
+def _scan_h5_name_variants(scan_number: int):
+    """Filename spellings for a scan's Lozano position h5 (padding + case)."""
+    for stem in (f"Scan_{scan_number:04d}", f"scan_{scan_number:04d}",
+                 f"Scan_{scan_number}", f"scan_{scan_number}"):
+        for ext in (".h5", ".hdf5"):
+            yield stem + ext
+
+
+def find_position_h5(search_dirs, scan_number: int) -> Optional[Path]:
+    """Locate a scan's Lozano position h5 across candidate dirs, or ``None``.
+
+    Tries ``Scan_NNNN.h5`` (padding/case variants) in each dir and verifies the
+    file actually carries the ``entry/data/Position`` group before accepting it —
+    so a same-named *raw XRD* h5 (``entry/data/data``) is not mistaken for a
+    position file. ``search_dirs`` is tried in order; first valid match wins.
+    """
+    import h5py
+    for d in search_dirs:
+        if d is None:
+            continue
+        d = Path(d)
+        if not d.is_dir():
+            continue
+        for nm in _scan_h5_name_variants(scan_number):
+            cand = d / nm
+            if not cand.is_file():
+                continue
+            try:
+                with h5py.File(cand, "r") as f:
+                    if io.H5_POSITION_GROUP in f:
+                        return cand
+            except OSError:
+                continue
+    return None
+
+
+def build_positions_csv_from_h5(
+    h5_path: Union[str, Path],
+    output: Union[str, Path],
+    log: Callable[[str], None] = print,
+) -> dict:
+    """Read a Lozano position h5 and write the standard positions CSV.
+
+    Companion to :func:`build_positions_csv` (SOCKETSERVER stream) for scans that
+    ship already-reduced ``entry/data/Position/{X_Position,Y_Position}`` (µm). The
+    output is a marker-free ``Trigger,X_Position,Y_Position`` CSV (treated as
+    *real* positions downstream). Returns ``{path, n_positions, x_span_um,
+    y_span_um}``.
+    """
+    h5_path = Path(h5_path)
+    log(f"Reading Lozano position h5 {h5_path.name} ...")
+    x_um, y_um = io._read_positions_h5(h5_path)
+    if len(x_um) != len(y_um):
+        raise ValueError(
+            f"{h5_path.name}: X_Position ({len(x_um)}) and Y_Position "
+            f"({len(y_um)}) lengths differ — cannot build positions CSV.")
+    if len(x_um) == 0:
+        raise ValueError(f"{h5_path.name}: empty {io.H5_POSITION_GROUP} group.")
+    x_span = float(np.ptp(x_um))
+    y_span = float(np.ptp(y_um))
+    log(f"  {len(x_um)} positions, span {x_span:.2f} x {y_span:.2f} um (lozano-h5)")
+
+    output = Path(output)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    tmp = output.with_suffix(output.suffix + ".tmp")
+    with open(tmp, "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["Trigger", "X_Position", "Y_Position"])
+        for t, (x, y) in enumerate(zip(x_um, y_um)):
+            w.writerow([t, f"{x:.6f}", f"{y:.6f}"])
+    os.replace(tmp, output)
+    log(f"Wrote {len(x_um)} positions -> {output}")
+    return {"path": output, "n_positions": int(len(x_um)),
+            "x_span_um": x_span, "y_span_um": y_span}

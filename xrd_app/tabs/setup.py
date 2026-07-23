@@ -180,13 +180,24 @@ class SetupTab(QWidget):
         b_pos = QPushButton("Load positions…")
         b_pos.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.MinimumExpanding)
         b_pos.setMinimumHeight(40)
-        b_pos.setToolTip("Load a single position CSV for the active scan, or a "
-                         "folder of per-scan scan_NNNN_position.csv files.")
+        b_pos.setToolTip("Load a single position file (CSV or Lozano .h5) for the "
+                         "active scan, or a folder of per-scan "
+                         "scan_NNNN_position.csv files.")
         b_pos.clicked.connect(self._load_positions)
+        b_genpos = QPushButton("Generate positions…")
+        b_genpos.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.MinimumExpanding)
+        b_genpos.setMinimumHeight(40)
+        b_genpos.setToolTip(
+            "Build a REAL positions.csv for the active scan (runs "
+            "'create-positions'): from its SOCKETSERVER interferometry stream, "
+            "or auto-found Lozano Scan_NNNN.h5 (entry/data/Position) if there's "
+            "no stream. Needs one of those sources present.")
+        b_genpos.clicked.connect(self._generate_positions)
         ll.addWidget(b_file)
         ll.addWidget(b_dir)
         ll.addWidget(b_show)
         ll.addWidget(b_pos)
+        ll.addWidget(b_genpos)
         ll.addStretch()
         lay.addWidget(self.load_box)
 
@@ -554,9 +565,9 @@ class SetupTab(QWidget):
         box = QMessageBox(self)
         box.setWindowTitle("Load positions")
         box.setText(
-            "Load a single position CSV for the active scan, or a folder "
-            "of per-scan scan_NNNN_position.csv files?")
-        b_file = box.addButton("Single CSV…", QMessageBox.AcceptRole)
+            "Load a single position file (CSV or Lozano .h5) for the active "
+            "scan, or a folder of per-scan scan_NNNN_position.csv files?")
+        b_file = box.addButton("Single file…", QMessageBox.AcceptRole)
         b_dir = box.addButton("Folder of CSVs…", QMessageBox.AcceptRole)
         box.addButton(QMessageBox.Cancel)
         box.exec_()
@@ -572,14 +583,44 @@ class SetupTab(QWidget):
                                      "--position-root", path])
         elif clicked is b_file:
             path = _pick_file(
-                self, "Select a scan position CSV", self.project_root or "",
-                "CSV (*.csv)")
+                self, "Select a scan position file", self.project_root or "",
+                "Positions (*.csv *.h5 *.hdf5);;CSV (*.csv);;HDF5 (*.h5 *.hdf5)")
             if not path:
                 return
             args = ["link", "--root", self.project_root, "--position-csv", path]
             if self.scan:
                 args += ["--scan", str(self.scan)]
             self._run_setup_job(args)
+
+    def _generate_positions(self):
+        """Build a real positions.csv for the active scan (``xrd-app
+        create-positions``) — from its SOCKETSERVER interferometry stream, or an
+        auto-found Lozano ``Scan_NNNN.h5`` (``entry/data/Position``) when the scan
+        has no stream."""
+        if not self.project_root:
+            return
+        dm = DataManager(self.project_root, scan=self.scan)
+        if not dm._scan():
+            QMessageBox.information(
+                self, "No active scan",
+                "Select a scan first (top-left), then generate its positions.")
+            return
+        args = ["create-positions", "--root", self.project_root,
+                "--scan", str(self.scan)]
+        # create-positions refuses to clobber an existing CSV without --force;
+        # confirm here so the button doesn't just fail in the console.
+        out = dm.metadata_scan_dir(self.scan) / "positions.csv"
+        if out.exists():
+            resp = QMessageBox.question(
+                self, "Overwrite positions?",
+                f"A positions.csv already exists for {dm._scan()}:\n{out}\n\n"
+                "Regenerate it from the SOCKETSERVER stream / Lozano h5 "
+                "(overwrite)?",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+            if resp != QMessageBox.Yes:
+                return
+            args.append("--force")
+        self._run_setup_job(args)
 
     def _load_tth(self):
         path = _pick_file(
