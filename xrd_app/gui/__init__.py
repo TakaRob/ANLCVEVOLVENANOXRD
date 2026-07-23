@@ -1,7 +1,7 @@
 """PyQt5 GUI launchers for labeling, feature viewing, and detector/orientation maps.
 
 Ported GUIs live in this package as modules exposing ``launch_gui(project_root)``
-and resolve every path through :class:`xrd_tools.config.DataManager`. For any GUI
+and resolve every path through :class:`xrd_app.config.DataManager`. For any GUI
 not yet ported, :func:`launch` falls back to running the original script from the
 project's ``analysis/`` directory in a subprocess.
 """
@@ -16,10 +16,10 @@ from typing import Iterable
 
 # tool name -> (in-package module, original script filename)
 _GUI_TOOLS = {
-    'label': ('xrd_tools.gui.labeling', 'labeling_tool.py'),
-    'view': ('xrd_tools.gui.viewer', 'feature_viewer.py'),
-    'device-map': ('xrd_tools.gui.device_map', 'device_map.py'),
-    'orientation': ('xrd_tools.gui.orientation', 'orientation_map.py'),
+    'label': ('xrd_app.gui.labeling', 'labeling_tool.py'),
+    'view': ('xrd_app.gui.viewer', 'feature_viewer.py'),
+    'device-map': ('xrd_app.gui.device_map', 'device_map.py'),
+    'orientation': ('xrd_app.gui.orientation', 'orientation_map.py'),
 }
 
 

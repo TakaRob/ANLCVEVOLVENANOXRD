@@ -165,6 +165,22 @@ def _place(source: Path, dest: Path, copy: bool) -> Path:
         return source
 
 
+def _require_scan_no(dm) -> int:
+    """Resolve the scan number to operate on, or hard-fail with a clear message.
+
+    Replaces the old ``dm.scan_number() or 203`` silent fallback: in a
+    multi-scan project ``scan.number`` is null, so an unresolved scan would
+    quietly glob ``scan_0203_*.h5`` in the wrong directory and find nothing.
+    Better to tell the user to pass ``--scan`` than to operate on the wrong one.
+    """
+    no = dm.scan_number()
+    if no is None:
+        raise click.ClickException(
+            "Could not determine which scan to use. Pass --scan <number/name> "
+            "(this project has no global scan.number set).")
+    return no
+
+
 # ─────────────────────────────────────────────────────────────────────
 # detectors — list the bundled / saved algorithm library
 # ─────────────────────────────────────────────────────────────────────
@@ -627,7 +643,7 @@ def grid(bin_size, scan, shape, xrd_dir, positions, rawgrid, deskew_method, vari
     """
     from .core import io
     dm = DataManager(root, scan=scan)
-    scan_no = dm.scan_number() or 203
+    scan_no = _require_scan_no(dm)
     xdir = Path(xrd_dir) if xrd_dir else dm.xrd_frames_dir()
     pos = Path(positions) if positions else dm.position_csv()
     out = Path(output) if output else dm.grid_mapping(bin_size=bin_size, variant=variant)
@@ -709,7 +725,7 @@ def territory_grid(target_size, scan, xrd_dir, positions, variant, output, root)
     """
     from .core import io, territory
     dm = DataManager(root, scan=scan)
-    scan_no = dm.scan_number() or 203
+    scan_no = _require_scan_no(dm)
     xdir = Path(xrd_dir) if xrd_dir else dm.xrd_frames_dir()
     pos = Path(positions) if positions else dm.position_csv()
     out = Path(output) if output else dm.grid_mapping(bin_size=1, variant=variant)
@@ -792,7 +808,7 @@ def create_positions(scan, socket_dir, method, theta, reduction, output, force, 
     """
     from .core import io, positions as P
     dm = DataManager(root, scan=scan)
-    scan_no = dm.scan_number() or 203
+    scan_no = _require_scan_no(dm)
     sdir = Path(socket_dir) if socket_dir else dm.socketserver_dir(scan=scan)
     out = Path(output) if output else (dm.metadata_scan_dir(scan) / "positions.csv")
 
@@ -1371,10 +1387,13 @@ def aggregate(scans, bin_size, out_dir, root):
                    'e.g. "gaussian" or "territory"); default: first available')
 @click.option('--refl', default=None,
               help='Comma-separated reflections to filter to (e.g. "(001),(111)")')
+@click.option('--all-reflections', 'all_refl', is_flag=True,
+              help='Break out every reflection: an "(all)" row per scan plus one '
+                   'row per reflection (adds a Reflection column). Ignores --refl.')
 @click.option('--bandwidth', type=float, default=5.0, help='χ KDE bandwidth (°)')
 @click.option('--out', 'out_dir', default='Study', help='Output directory (Study/)')
 @click.option('--root', default='.', help='Project root directory')
-def scan_table(bin_size, type_match, refl, bandwidth, out_dir, root):
+def scan_table(bin_size, type_match, refl, all_refl, bandwidth, out_dir, root):
     """One summary row per scan → prints a table + writes Study/scan_summary.csv.
 
     For a bin size and catalog TYPE (the JSON lineage shared across scans — e.g.
@@ -1403,7 +1422,7 @@ def scan_table(bin_size, type_match, refl, bandwidth, out_dir, root):
 
     refs = [r.strip() for r in refl.split(',') if r.strip()] if refl else None
     rows, meta = st.scan_table_rows(dm, bin_size, chosen["key"], refs=refs,
-                                    bandwidth=bandwidth)
+                                    bandwidth=bandwidth, breakdown=all_refl)
     if not rows:
         click.echo("No matching scans found for this type.")
         raise SystemExit(1)
@@ -1605,6 +1624,75 @@ def combined_device(device_map_path, tracks_path, intensity_key, out_path, root)
     click.echo(f"\nWrote combined device view:\n  {out}\n  {out.with_suffix('.summary.json')}")
 
 
+def _ensure_1x1_grid_mapping(dm, scan, source_bin_size, log=click.echo):
+    """Build the 1×1 grid mapping if absent, so HD real (x, y) can attach.
+
+    The HD real-position layer needs a 1×1 grid mapping (cell → raw frame →
+    stage (x, y)). It must share the source N×N catalog's lattice — same
+    ``deskew_method`` — so its cells are a clean N× refinement (else
+    :func:`hd_map.build_cell_xy`'s keys miss the sub-bin keys and no positions
+    attach). We mirror the N×N grid's ``coordinate_source`` rather than the
+    ``auto`` default (which would pick ``positions_xy`` at 1×1).
+
+    Graceful: returns True if a usable mapping now exists, False (with a warning)
+    when raw frames or real positions are unavailable — the HD build then
+    proceeds intensity-only, exactly as before. Never raises.
+    """
+    import json
+    from .core import io
+    from .core import positions as P
+
+    gm_path = dm.grid_mapping(bin_size=1, scan=scan)
+    if gm_path and Path(gm_path).exists():
+        return True  # respect an existing / regridded / variant mapping
+
+    try:
+        scan_no = _require_scan_no(dm)
+        xdir = dm.xrd_frames_dir(scan=scan)
+        if not io.has_raw_frames(xdir, scan_no):
+            log("[hd-device-map] no 1×1 grid mapping and no raw frames "
+                f"({xdir}) to build one — real-position scatter unavailable.")
+            return False
+
+        # Real positions are required for the (x, y) layer. Build them from the
+        # SOCKETSERVER interferometry stream when there's no real CSV (same
+        # source the 'grid' command uses); if neither exists, skip gracefully.
+        pos = dm.position_csv(scan=scan)
+        pos_real = Path(pos).exists() and not io.is_recreated_csv(pos)
+        if not pos_real:
+            sdir = dm.socketserver_dir(scan=scan)
+            if P.has_socketserver(sdir, scan_no):
+                dest = dm.metadata_scan_dir(scan) / "positions.csv"
+                log("[hd-device-map] building real positions from SOCKETSERVER "
+                    f"interferometry ({sdir}) …")
+                P.build_positions_csv(sdir, dest, scan_number=scan_no, log=log)
+                pos, pos_real = dest, True
+            else:
+                log("[hd-device-map] no 1×1 grid mapping and no real positions "
+                    "(CSV or SOCKETSERVER) — real-position scatter unavailable.")
+                return False
+
+        # Match the source N×N catalog's lattice so sub-bin keys align.
+        nxn_path = dm.grid_mapping(bin_size=source_bin_size, scan=scan)
+        coordinate_source = None
+        if nxn_path and Path(nxn_path).exists():
+            with open(nxn_path) as f:
+                coordinate_source = json.load(f).get("coordinate_source")
+        deskew = io.deskew_method_for_source(coordinate_source)
+
+        gm_path.parent.mkdir(parents=True, exist_ok=True)
+        log(f"[hd-device-map] no 1×1 grid mapping — building one ({deskew}, to "
+            f"match the {source_bin_size}×{source_bin_size} catalog) for real "
+            "positions …")
+        io.generate_grid_mapping(xdir, pos, 1, scan_number=scan_no,
+                                 output=gm_path, deskew_method=deskew, log=log)
+        return True
+    except Exception as e:  # never let grid-building abort the HD map
+        log(f"[hd-device-map] could not auto-build 1×1 grid mapping ({e}); "
+            "continuing without real positions.")
+        return False
+
+
 # ─────────────────────────────────────────────────────────────────────
 # hd-device-map — 1×1 intensity sampled beneath a binned feature map
 # ─────────────────────────────────────────────────────────────────────
@@ -1656,6 +1744,9 @@ def hd_device_map(bin_size, scan, catalog, win, max_cells, out_name, root):
     # 1×1 raw-frame source (h5 if built, else summed raw frames on demand).
     click.echo(f"[hd-device-map] catalog: {cat_path}\n[hd-device-map] "
                f"{len(features)} features, win={win}px")
+    # Ensure the 1×1 grid mapping exists (built to match this catalog's lattice)
+    # so the real (x, y) scatter layer can attach — auto-built once, then cached.
+    _ensure_1x1_grid_mapping(dm, scan, bin_size)
     source = io.open_bin_source(dm, 1, scan)
     try:
         # 1×1 grid dims + real per-cell (x, y) from the 1×1 grid mapping.

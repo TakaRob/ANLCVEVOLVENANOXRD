@@ -18,8 +18,8 @@ import math
 
 from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import (
-    QApplication, QComboBox, QDoubleSpinBox, QHBoxLayout, QLabel, QPushButton,
-    QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
+    QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QHBoxLayout, QLabel,
+    QPushButton, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
 from ..config import DataManager
@@ -93,6 +93,14 @@ class ScanSummaryTab(QWidget):
         self._refl_combo.setMinimumWidth(120)
         self._refl_combo.activated.connect(lambda _i: self._reload())
         bar.addWidget(self._refl_combo)
+
+        self._show_all = QCheckBox("Show all")
+        self._show_all.setToolTip(
+            "Lay out every reflection: an “(all reflections)” row per scan plus "
+            "one row per reflection, with a Reflection column. Disables the "
+            "reflection filter.")
+        self._show_all.toggled.connect(self._on_show_all)
+        bar.addWidget(self._show_all)
 
         bar.addWidget(QLabel("χ bw"))
         self._bw = QDoubleSpinBox()
@@ -190,6 +198,12 @@ class ScanSummaryTab(QWidget):
         self._populate_reflections()
         self._reload()
 
+    def _on_show_all(self, checked):
+        # With every reflection broken out into its own row, the single-reflection
+        # filter is meaningless — grey it out.
+        self._refl_combo.setEnabled(not checked)
+        self._reload()
+
     # ── build the table ───────────────────────────────────────────────
     def _reload(self):
         t = self._current_type()
@@ -201,22 +215,20 @@ class ScanSummaryTab(QWidget):
                 f"no catalogs at {self._bin_size}x{self._bin_size} "
                 "— run peaks/shapes first")
             return
+        breakdown = self._show_all.isChecked()
         want = self._refl_combo.currentText()
-        refs = None if want == _ALL_REFL else [want]
+        refs = None if (breakdown or want == _ALL_REFL) else [want]
         try:
             self._rows, self._meta = st.scan_table_rows(
                 self._dm, self._bin_size, t["key"], refs=refs,
-                bandwidth=float(self._bw.value()))
+                bandwidth=float(self._bw.value()), breakdown=breakdown)
         except Exception as e:
             self._rows, self._meta = [], {}
             self._status.setText(f"error: {type(e).__name__}: {e}")
         self._fill_table()
 
     def _headers(self):
-        units = self._meta.get("units", "bins")
-        return ["Scan", "Features", f"Area sum ({units})",
-                f"Area union ({units})", "Coverage %", "Preferred χ",
-                "χ ± range", "Fill %", "Total"]
+        return st.column_headers(self._meta)
 
     def _fill_table(self):
         headers = self._headers()

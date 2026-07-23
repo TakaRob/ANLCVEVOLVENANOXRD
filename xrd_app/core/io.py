@@ -570,10 +570,18 @@ def assign_grid_coordinate_faithful(frame_x, frame_y, frame_map,
 def build_scan_grid(frame_x, n_total, kernel=20, order=50):
     """Infer (row, col) for each frame from the serpentine position trace."""
     from scipy.signal import argrelextrema
+    if n_total == 0 or len(frame_x) == 0:
+        raise ValueError(
+            "No scan frames to build a grid from (0 frames). The raw XRD "
+            "frames could not be found — check that the raw data source is "
+            "mounted/reachable and the scan number is correct.")
     valid = ~np.isnan(frame_x)
     x = frame_x.copy()
-    if np.any(~valid):
+    if not np.any(valid):
+        x[:] = np.arange(n_total, dtype=float)
+    elif np.any(~valid):
         x[~valid] = np.interp(np.where(~valid)[0], np.where(valid)[0], frame_x[valid])
+    kernel = max(1, min(kernel, len(x)))
     x_smooth = np.convolve(x, np.ones(kernel) / kernel, mode="same")
     x_max = argrelextrema(x_smooth, np.greater, order=order)[0]
     x_min = argrelextrema(x_smooth, np.less, order=order)[0]
@@ -708,6 +716,31 @@ def subbin_keys(bin_key, bin_size):
     r, c = (int(p) for p in bin_key.split("_"))
     return [f"{bin_size * r + dr}_{bin_size * c + dc}"
             for dr in range(bin_size) for dc in range(bin_size)]
+
+
+# coordinate_source (as recorded in a grid mapping) → the deskew_method that
+# reproduces it. Used to build an aligned finer/coarser grid from the *same*
+# per-frame lattice: because build_bin_mapping coarsens by floor-division, a 1×1
+# grid is a clean N× refinement of an N×N grid only when both use the same
+# deskew. Mirror the source catalog's coordinate_source rather than the "auto"
+# default (which picks positions_xy at 1×1 — a different lattice than a
+# positions_faithful N×N — and would misalign the sub-bin keys).
+_SOURCE_TO_DESKEW = {
+    "positions_faithful": "faithful",
+    "positions_faithful_native": "faithful_native",
+    "positions_xy": "positions_xy",
+    "file_per_row": "commanded",
+}
+
+
+def deskew_method_for_source(coordinate_source: Optional[str]) -> str:
+    """deskew_method that rebuilds a grid matching ``coordinate_source``.
+
+    Defaults to ``"faithful"`` (the dominant real-position case) for unknown or
+    non-real sources (e.g. ``serpentine``/``synthetic`` — those carry no real
+    positions anyway, so the caller's real-position step is a no-op regardless).
+    """
+    return _SOURCE_TO_DESKEW.get(coordinate_source or "", "faithful")
 
 
 def generate_grid_mapping(
@@ -1135,9 +1168,20 @@ class _RawSource(BinImageSource):
                 raise FileNotFoundError(
                     f"No binned file and no raw frames directory ({xrd_dir}) to "
                     "fall back to. Link the raw scan in Setup or build bins.")
-            scan_no = dm.scan_number(scan) or 203
+            scan_no = dm.scan_number(scan)
+            if scan_no is None:
+                raise ValueError(
+                    "Cannot read raw frames: no scan selected and the project "
+                    "has no global scan.number. Pass an explicit scan.")
             self._xrd_files, self._frame_map, n_total = load_xrd_metadata(
                 xrd_dir, scan_number=scan_no)
+            if n_total == 0:
+                raise FileNotFoundError(
+                    f"No raw XRD frames found for scan {scan_no} in {xrd_dir}. "
+                    "There is no binned file for this size and the raw frames "
+                    "could not be read — the raw data source (network share) is "
+                    "likely not mounted/reachable, or the scan number is wrong. "
+                    "Connect the raw source or build the binned file.")
             pos = dm.position_csv(scan=scan)
             has_real_pos = pos and Path(pos).exists() and not is_recreated_csv(pos)
             if has_real_pos:

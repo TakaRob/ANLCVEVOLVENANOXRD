@@ -1,2 +1,24 @@
 -e .
+
+# Base xrd-app runtime dependencies, mirrored from pyproject.toml for visibility.
+numpy
+scipy
+matplotlib
+h5py
 hdf5plugin
+tifffile
+pandas
+Pillow
+PyQt5
+pyqtgraph
+click
+pyyaml
+
+# Test runner used by xrd_app/tests.
+pytest
+
+# Optional xrd-app extras used by guarded code paths:
+#   pip install "xrd-app[poni]"     # pyFAI, for .poni -> tth conversion
+#   pip install "xrd-app[qspace]"   # xrayutilities, for 3D q-vector mapping
+#   pip install "xrd-app[gl]"       # PyOpenGL, for the 3D RSM view
+#   pip install "xrd-app[notebook]" # ipykernel/jupyter

@@ -47,11 +47,38 @@ import numpy as np
 from . import catalogs
 from .territory import _polygon_area
 
-# One row per scan; the tab / CLI format these.
+# Internal row keys (stable — used for CSV columns and dict access). The
+# human-facing, units-aware header for each is built by :func:`column_headers`.
 COLUMNS = [
-    "Scan", "Features", "Area sum", "Area union", "Coverage %",
+    "Scan", "Reflection", "Features", "Area sum", "Area union", "Coverage %",
     "Preferred χ", "χ ± range", "Fill %", "Total",
 ]
+
+_ALL_REFL = "(all reflections)"
+
+
+def column_headers(meta) -> list:
+    """Descriptive, units-aware column titles aligned to :data:`COLUMNS`.
+
+    ``meta`` is the dict returned by :func:`scan_table_rows`; a territorial type
+    switches the area units to coordinate-CSV and the last column to the outline
+    hull area instead of a grid-cell count.
+    """
+    territory = bool(meta.get("territory"))
+    units = "CSV²" if territory else "bins"
+    total = "Outline area (CSV²)" if territory else "Grid cells (total)"
+    return [
+        "Scan",
+        "Reflection",
+        "Shapes (count)",
+        f"Footprint sum ({units})",
+        f"Footprint union ({units})",
+        "Coverage % (union/total)",
+        "Preferred χ (°)",
+        "χ spread (±°)",
+        "Shape fill % (solidity)",
+        total,
+    ]
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -383,14 +410,22 @@ def _territory_row(scan, feats, territories, bandwidth):
 # ─────────────────────────────────────────────────────────────────────
 # Public: build the whole table
 # ─────────────────────────────────────────────────────────────────────
-def scan_table_rows(dm, bin_size: int, lineage_key, refs=None, bandwidth: float = 5.0):
-    """One summary row per project scan for the given bin + catalog type.
+def scan_table_rows(dm, bin_size: int, lineage_key, refs=None, bandwidth: float = 5.0,
+                    breakdown: bool = False):
+    """Summary rows per project scan for the given bin + catalog type.
 
     ``lineage_key`` selects the catalog type ``(kind, algo, tag)`` matched in each
     scan; a territorial type (tag contains ``territory``) switches geometry to
-    coordinate-CSV units. ``refs`` optionally filters to a set of reflections
-    (e.g. ``{"(001)"}``); None keeps all. Returns ``(rows, meta)`` where meta
-    carries the resolved units / territory flag for the header.
+    coordinate-CSV units. Every row carries a ``Reflection`` label.
+
+    * ``breakdown=False`` (default): one row per scan. ``refs`` optionally filters
+      to a set of reflections (e.g. ``{"(001)"}``); None keeps all
+      (``Reflection`` = "(all reflections)").
+    * ``breakdown=True``: for each scan an "(all reflections)" row first, then one
+      row per reflection present — everything laid out. ``refs`` is ignored.
+
+    Returns ``(rows, meta)`` where meta carries the resolved units / territory
+    flag for the header.
     """
     is_territory = bool(lineage_key) and "territory" in (lineage_key[2] or "")
     refset = set(refs) if refs else None
@@ -401,30 +436,49 @@ def scan_table_rows(dm, bin_size: int, lineage_key, refs=None, bandwidth: float 
         if cat is None:
             continue
         kept, _ = catalogs.load_features_any(cat)
-        if refset is not None:
-            kept = [f for f in kept if f.get("reflection") in refset]
+
+        # Resolve the scan's geometry context once, reused for every row.
         if is_territory:
             terr = _territory_mapping(dm, scan)
             if terr is None:
                 continue
-            rows.append(_territory_row(scan, kept, terr["territories"], bandwidth))
+            territories = terr["territories"]
+
+            def build(feats):
+                return _territory_row(scan, feats, territories, bandwidth)
         else:
             total = _grid_total_bins(dm, scan, bin_size)
-            rows.append(_grid_row(scan, kept, total, bandwidth))
+
+            def build(feats, _total=total):
+                return _grid_row(scan, feats, _total, bandwidth)
+
+        if breakdown:
+            row = build(kept)
+            row["Reflection"] = _ALL_REFL
+            rows.append(row)
+            for ref in sorted({f.get("reflection") for f in kept if f.get("reflection")}):
+                row = build([f for f in kept if f.get("reflection") == ref])
+                row["Reflection"] = ref
+                rows.append(row)
+        else:
+            feats = ([f for f in kept if f.get("reflection") in refset]
+                     if refset is not None else kept)
+            row = build(feats)
+            row["Reflection"] = ("+".join(sorted(refset)) if refset else _ALL_REFL)
+            rows.append(row)
     meta = {
         "territory": is_territory,
         "units": "CSV²" if is_territory else "bins",
         "bin_size": bin_size,
         "lineage_key": lineage_key,
+        "breakdown": breakdown,
     }
     return rows, meta
 
 
 def format_table(rows, meta) -> str:
     """Render rows as a fixed-width text table (the CLI's stdout view)."""
-    units = meta.get("units", "bins")
-    headers = ["Scan", "Features", f"Area sum ({units})", f"Area union ({units})",
-               "Coverage %", "Preferred χ", "χ ± range", "Fill %", "Total"]
+    headers = column_headers(meta)
     keys = COLUMNS
 
     def cell(r, k):

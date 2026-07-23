@@ -74,8 +74,7 @@ Binned sizes (≥2×2) keep grid linking by default (backlash is averaged out
 there). Coordinate mode needs the real position CSV; without one it degrades to
 grid linking with a note. The grid-repair deskew options
 (`grid --deskew-method faithful/perrow_offset`, `shapes --algorithm
-gaussian_deskew`) remain in the CLI for comparison but are no longer the default
-— see `deprecated/README.md` for why.
+gaussian_deskew`) remain in the CLI for comparison but are no longer the default.
 
 ## Build the truth (per scan, once)
 

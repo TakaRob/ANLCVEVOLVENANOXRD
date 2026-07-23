@@ -219,10 +219,20 @@ def load_positions(csv_path, n_total):
 
 
 def build_scan_grid(frame_x, n_total, kernel=20, order=50):
+    if n_total == 0 or len(frame_x) == 0:
+        raise ValueError(
+            "No scan frames to build a grid from (0 frames). The raw XRD "
+            "frames could not be found — check that the raw data source is "
+            "mounted/reachable and the scan number is correct.")
     valid = ~np.isnan(frame_x)
     x = frame_x.copy()
-    if np.any(~valid):
+    if not np.any(valid):
+        # No usable stage positions: fall back to a single serpentine row so we
+        # can still index frames instead of crashing on np.interp/argrelextrema.
+        x[:] = np.arange(n_total, dtype=float)
+    elif np.any(~valid):
         x[~valid] = np.interp(np.where(~valid)[0], np.where(valid)[0], frame_x[valid])
+    kernel = max(1, min(kernel, len(x)))
     x_smooth = np.convolve(x, np.ones(kernel) / kernel, mode="same")
     x_max = argrelextrema(x_smooth, np.greater, order=order)[0]
     x_min = argrelextrema(x_smooth, np.less, order=order)[0]
@@ -803,7 +813,11 @@ class LabelingTool(QMainWindow):
 
         self.dm = data_manager or DataManager(project_root or ".", scan=scan)
         self.project_root = self.dm.root
-        self._scan_number = self.dm.config.get("scan", "number") or 203
+        # Derive the scan number from the *selected* scan, not the global
+        # config's scan.number (which is null in multi-scan projects). Using the
+        # global value made the raw-frame glob look for scan_0203_*.h5 in every
+        # scan's dir, finding nothing for any scan but 203 -> empty grid -> crash.
+        self._scan_number = self.dm.scan_number(scan) or 203
 
         # Open at the requested bin size when it is a valid choice; otherwise
         # fall back to 5. Starting at a size that has prebuilt bins avoids the
@@ -874,6 +888,21 @@ class LabelingTool(QMainWindow):
         pos_csv = self.dm.position_csv()
         self.xrd_files, self.xrd_file_map, self.n_total = load_xrd_metadata(
             xrd_dir, scan_number=self._scan_number)
+        if self.n_total == 0:
+            # No binned .h5 for this size AND no readable raw frames. This is
+            # the common "1×1 not built, raw frames live on the network share"
+            # case: the share isn't mounted so the glob comes back empty.
+            del self.xrd_files  # don't cache the empty result; allow a retry
+            raise RuntimeError(
+                f"No raw XRD frames found for scan {self._scan_number} in:\n"
+                f"{xrd_dir}\n\n"
+                "There is no binned data file for this bin size, so the tool "
+                "tried to read raw frames — but none were found. This usually "
+                "means the raw data source (network share) is not mounted or "
+                "reachable from this machine.\n\n"
+                "Either connect to the raw data source, or build the binned "
+                "file for this size (Programs tab, or "
+                f"`xrd-app bin --scan {self._scan_number} --bin-size {self.bin_size}`).")
         frame_x = load_positions(pos_csv, self.n_total)
         grid_row, grid_col, self._n_rows, self._n_cols = build_scan_grid(frame_x, self.n_total)
         self._grid_to_frames = {}
@@ -1420,7 +1449,19 @@ class LabelingTool(QMainWindow):
         self._save_annotations()
         self.canvas.clear_outlines()
 
-        self._load_bin_data_for_size(new_size)
+        prev_size = self.bin_size
+        try:
+            self._load_bin_data_for_size(new_size)
+        except (RuntimeError, ValueError, OSError) as e:
+            # Loading this bin size failed (e.g. 1×1 with no built .h5 and the
+            # raw frame share unreachable). Warn and revert to the previous
+            # working size so the view stays usable instead of going black.
+            QMessageBox.warning(self, "Bin size unavailable", str(e))
+            self.bin_size_combo.blockSignals(True)
+            self.bin_size_combo.setCurrentIndex(BIN_SIZES.index(prev_size))
+            self.bin_size_combo.blockSignals(False)
+            self.bin_size = prev_size
+            return
 
         target_idx = self._find_closest_bin_idx(gr, gc)
 

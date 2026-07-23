@@ -297,8 +297,24 @@ class HeatmapView(pg.GraphicsLayoutWidget):
         self._grid_r_lo = 0
         self._grid_c_lo = 0
         self._corner_widget = None
+        self._white_bg = False
         self.plot.scene().sigMouseMoved.connect(self._on_move)
         self.plot.scene().sigMouseClicked.connect(self._on_click)
+
+    def set_background_mode(self, white):
+        """Toggle the heatmap background between white and the dark default.
+
+        Empty cells render transparent (NaN → alpha 0), so the widget background
+        shows through them; the center marker flips black/white to stay visible."""
+        self._white_bg = bool(white)
+        bg = "w" if white else "#1a1a1a"
+        self.setBackground(bg)
+        self.plot.getViewBox().setBackgroundColor("w" if white else "k")
+        axis_pen = "#444" if white else "#888"
+        self.plot.getAxis("bottom").setPen(axis_pen)
+        self.plot.getAxis("left").setPen(axis_pen)
+        self.plot.getAxis("bottom").setTextPen(axis_pen)
+        self.plot.getAxis("left").setTextPen(axis_pen)
 
     def set_corner_widget(self, w):
         """Host a floating widget pinned to the top-right of the heatmap."""
@@ -343,7 +359,8 @@ class HeatmapView(pg.GraphicsLayoutWidget):
         for it in self._markers:
             self.plot.removeItem(it)
         self._markers = []
-        for bin_rc, pen_color, z in ((center, "w", 8), (highlight, "c", 9)):
+        center_color = "k" if self._white_bg else "w"
+        for bin_rc, pen_color, z in ((center, center_color, 8), (highlight, "c", 9)):
             if bin_rc is None:
                 continue
             r, c = bin_rc
@@ -764,6 +781,7 @@ class FeatureViewer(QMainWindow):
         self._focus_anchor = None
         self._expand_boundary = True
         self._fill_surface = False
+        self._heat_white_bg = False        # white spatial-heatmap background
         self._iso_bar_info = None
         self._h5f = None
         self._source = None          # io.BinImageSource (h5 or raw frames)
@@ -794,12 +812,14 @@ class FeatureViewer(QMainWindow):
         self._n_rows_1x1 = None
         self._n_cols_1x1 = None
         self._grid_is_1x1 = False          # heatmap currently drawn in 1×1 space
-        # Territory 1×1 catalogs key cells "<tid>_0" (one per frame) instead of
-        # "row_col" and store raw frames in xrd_1x1_bins_territory.h5. These
-        # bridge that space, mirroring the binned view's _terr_rc / _rc_terr.
+        # Territory 1×1 catalogs key cells "<tid>_0" (a territory = a cluster of
+        # ~N frames, NOT one per frame) instead of "row_col" and store raw frames
+        # in xrd_1x1_bins_territory.h5. These bridge that space, mirroring the
+        # binned view's _terr_rc / _rc_terr.
         self._sub_variant = None           # "territory" or None (plain grid)
         self._sub_terr_rc = None           # "<tid>_0" → (row, col) for placement
         self._sub_rc_terr = None           # (row, col) → "<tid>_0" (click resolve)
+        self._sub_frame_tid = None         # frame idx → "<tid>_0" (frame→territory)
         self._binned_bins = None           # binned grid: bin_key → [frame idx, …]
         self._sub_region_keys = None       # territory cells under the current feat
         self._heat_outline_items = []      # white per-feature outlines (1×1 view)
@@ -1074,7 +1094,18 @@ class FeatureViewer(QMainWindow):
         try:
             with self.h5_lock:
                 image = self._get_sub_source().image(bin_key)
-        except Exception:
+        except Exception as e:
+            # Opening/reading the 1×1 source failed — typically no built
+            # xrd_1x1_bins.h5 and the raw frame share is unreachable. Warn
+            # once so "View 1×1 doesn't update" isn't a silent no-op.
+            if not getattr(self, "_sub_source_warned", False):
+                self._sub_source_warned = True
+                QMessageBox.warning(
+                    self, "1×1 data unavailable",
+                    "Could not load 1×1 raw-frame data for this scan:\n\n"
+                    f"{e}\n\n"
+                    "Build the 1×1 binned file (xrd_1x1_bins.h5) or connect the "
+                    "raw data source, then reopen View 1×1.")
             return None
         if image is None:
             return None
@@ -1144,13 +1175,16 @@ class FeatureViewer(QMainWindow):
         """Set ``_sub_variant`` / ``_sub_terr_rc`` / ``_sub_rc_terr`` for the
         selected 1×1 catalog; returns the loaded grid mapping dict (or None).
 
-        Territory cells key every frame ``"<tid>_0"`` (column literal 0), so their
+        Territory cells key each cluster ``"<tid>_0"`` (column literal 0), so their
         true 2-D position lives in ``territories[key].centroid_rc`` — snap it to
         the nearest (row, col), exactly as :meth:`_build_territory_remap` does for
-        the binned grid. Plain grids parse ``"row_col"`` directly (no remap)."""
+        the binned grid. ``bins["<tid>_0"]`` lists the frames in each territory,
+        inverted here into the frame→territory bridge. Plain grids parse
+        ``"row_col"`` directly (no remap)."""
         self._sub_variant = None
         self._sub_terr_rc = None
         self._sub_rc_terr = None
+        self._sub_frame_tid = None
         gm_path, variant = self._resolve_sub_grid()
         if not gm_path:
             return None
@@ -1175,6 +1209,19 @@ class FeatureViewer(QMainWindow):
             inv[cell] = key          # last territory wins a shared (row, col)
         self._sub_terr_rc = remap or None
         self._sub_rc_terr = inv or None
+        # A territory aggregates many raw frames; ``bins["<tid>_0"]`` lists the
+        # frame indices belonging to that territory. Invert it so a binned
+        # feature's member frames can be mapped to the territory that contains
+        # them. (The old pipeline had one frame per territory, so frame index ==
+        # tid; the true-(X,Y) "_coord" pipeline clusters ~N frames per territory,
+        # breaking that identity — this map is the correct bridge either way.)
+        frame_tid = {}
+        for tkey, frames in (gm.get("bins") or {}).items():
+            if tkey not in remap:
+                continue
+            for fi in frames:
+                frame_tid[fi] = tkey
+        self._sub_frame_tid = frame_tid or None
         return gm
 
     def _reset_sub_state(self):
@@ -1187,12 +1234,14 @@ class FeatureViewer(QMainWindow):
                     pass
                 self._sub_source = None
         self._sub_raw_cache.clear()
+        self._sub_source_warned = False
         self._sub_features = None
         self._sub_bin_to_features = {}
         self._sub_raw_intensity = None
         self._sub_variant = None
         self._sub_terr_rc = None
         self._sub_rc_terr = None
+        self._sub_frame_tid = None
         self._sub_region_keys = None
         self._n_rows_1x1 = self._n_cols_1x1 = None
 
@@ -1340,6 +1389,10 @@ class FeatureViewer(QMainWindow):
         self.fill_cb.setToolTip("Interpolate between bins and render\nas a continuous surface")
         self.fill_cb.stateChanged.connect(self._on_fill_changed)
         cb_bar.addWidget(self.fill_cb)
+        self.heat_bg_cb = QCheckBox("White bg")
+        self.heat_bg_cb.setToolTip("White background for the spatial heatmap\n(empty cells show white instead of dark)")
+        self.heat_bg_cb.stateChanged.connect(self._on_heat_bg_toggled)
+        cb_bar.addWidget(self.heat_bg_cb)
         self.explore_cb = QCheckBox("Explore new points")
         self.explore_cb.setToolTip("Drag-select peaks on detector image\nthat algorithms missed")
         self.explore_cb.setStyleSheet("QCheckBox { color: #f0a030; }")
@@ -2115,9 +2168,22 @@ class FeatureViewer(QMainWindow):
             return _fail("No XRF for this scan. Run:  xrd-app xrf --scans "
                          f"{scan} --save-points")
         # A territorial 1×1 cell key ("<tid>_0") resolves against the territory
-        # grid mapping, not the plain one.
-        gm_variant = self._sub_variant if grid == 1 else None
-        gm = self._xrf_grid_mapping(scan, grid, variant=gm_variant)
+        # grid mapping, not the plain one. Prefer the active sub-view variant, but
+        # fall back to the other 1×1 variant so XRF still resolves when only the
+        # territory mapping exists (this scan has no plain grid_mapping_1x1.json).
+        gm = None
+        if grid == 1:
+            variants = [self._sub_variant, "territory", None]
+            seen = set()
+            for v in variants:
+                if v in seen:
+                    continue
+                seen.add(v)
+                gm = self._xrf_grid_mapping(scan, grid, variant=v)
+                if gm is not None:
+                    break
+        else:
+            gm = self._xrf_grid_mapping(scan, grid, variant=None)
         if gm is None:
             return _fail(f"No {grid}×{grid} grid mapping for XRF.")
 
@@ -2848,13 +2914,22 @@ class FeatureViewer(QMainWindow):
 
     def _feature_frames(self, feat):
         """Global frame indices under a binned feature's footprint (via the
-        binned grid's bin→frames map). These index territorial 1×1 cells
-        ``"<frame>_0"`` one-to-one, bridging a plain feature to territory space."""
+        binned grid's bin→frames map). Map each to its territory cell with
+        :meth:`_sub_frame_key` to bridge a plain feature into territory space."""
         bb = self._binned_bins or {}
         frames = []
         for bk in feat.get("spatial_extent", []):
             frames.extend(bb.get(bk, []))
         return frames
+
+    def _sub_frame_key(self, frame_idx):
+        """Territory cell ``"<tid>_0"`` containing a raw frame, or None.
+
+        Bridges a binned feature's member frame to the territory that aggregates
+        it (see :meth:`_build_sub_territory_remap`). Never assume frame index ==
+        tid — territories cluster many frames under the ``_coord`` pipeline."""
+        ft = self._sub_frame_tid
+        return ft.get(frame_idx) if ft is not None else None
 
     def _center_sub_key(self, feat):
         """The 1×1 bin key at the centre of a binned feature's footprint —
@@ -2862,7 +2937,11 @@ class FeatureViewer(QMainWindow):
         if self._sub_terr_rc is not None:
             bb = self._binned_bins or {}
             cframes = bb.get(feat.get("center_bin")) or self._feature_frames(feat)
-            valid = [f"{i}_0" for i in cframes if f"{i}_0" in self._sub_terr_rc]
+            valid = []
+            for i in cframes:
+                k = self._sub_frame_key(i)
+                if k is not None and k not in valid:
+                    valid.append(k)
             return valid[len(valid) // 2] if valid else None
         cb = self._parse_bin(feat.get("center_bin", ""))
         if cb is None:
@@ -2943,7 +3022,9 @@ class FeatureViewer(QMainWindow):
         remap = self._sub_terr_rc
         region = {}                                   # "<tid>_0" → (row, col)
         for i in self._feature_frames(feat):
-            key = f"{i}_0"
+            key = self._sub_frame_key(i)              # frame → its territory cell
+            if key is None:
+                continue
             rc = remap.get(key)
             if rc is not None:
                 region[key] = rc
@@ -3124,6 +3205,16 @@ class FeatureViewer(QMainWindow):
         label = "Integrated" if self._display_metric == "integrated" else "Intensity"
         hv.colorbar = pg.ColorBarItem(values=(vmin, vmax), colorMap=cmap,
                                       label=label, interactive=False)
+        if self._heat_white_bg:
+            # Default colorbar ticks/label are light — recolor for the white bg.
+            try:
+                for ax in ("left", "right", "top", "bottom"):
+                    a = hv.colorbar.getAxis(ax)
+                    if a is not None:
+                        a.setPen("#444")
+                        a.setTextPen("#444")
+            except Exception:
+                pass
         hv.addItem(hv.colorbar, row=0, col=1)
 
     # ── Isometric 3D ─────────────────────────────────────────────────
@@ -3494,13 +3585,13 @@ class FeatureViewer(QMainWindow):
         """Right-panel metadata for a clicked 1×1 scan."""
         feats = self._sub_bin_to_features.get(bin_key, [])
         if self._sub_terr_rc is not None:
-            # Territory cell "<frame>_0": show the frame index and its (row, col).
-            frame = bin_key.split("_")[0]
+            # Territory cell "<tid>_0": show the territory id and its (row, col).
+            tid = bin_key.split("_")[0]
             rc = self._sub_key_rc(bin_key)
             loc = f"row {rc[0]}, col {rc[1]}" if rc else "?"
             lines = [
                 "1×1 view (territory)",
-                f"Frame:      {frame}",
+                f"Territory:  {tid}",
                 f"Location:   {loc}",
                 "",
             ]
@@ -3556,6 +3647,14 @@ class FeatureViewer(QMainWindow):
         feat = self._current_feature()
         if feat:
             self._render_isometric(feat)
+
+    def _on_heat_bg_toggled(self, state):
+        self._heat_white_bg = bool(state)
+        self.heatmap_canvas.set_background_mode(self._heat_white_bg)
+        feat = self._current_feature()
+        if feat:
+            self._render_heatmap(feat)   # redraw so the center marker re-contrasts
+        self._save_state()
 
     def _on_view1x1_toggled(self, state):
         on = bool(state)
@@ -4352,6 +4451,7 @@ class FeatureViewer(QMainWindow):
             "peak_metric": self.peak_mode_cb.isChecked(),
             "expand_boundary": self.expand_cb.isChecked(),
             "fill_surface": self.fill_cb.isChecked(),
+            "heat_white_bg": self.heat_bg_cb.isChecked(),
             "tth_overlay": self.tth_cb.isChecked(),
             "vmin_pct": self._vmin_pct,
             "vmax_pct": self._vmax_pct,
@@ -4405,6 +4505,7 @@ class FeatureViewer(QMainWindow):
         self.peak_mode_cb.setChecked(st.get("peak_metric", False))
         self.expand_cb.setChecked(st.get("expand_boundary", True))
         self.fill_cb.setChecked(st.get("fill_surface", False))
+        self.heat_bg_cb.setChecked(st.get("heat_white_bg", False))
         self.tth_cb.setChecked(st.get("tth_overlay", False))
         self._sel_sub_catalog = st.get("sub_catalog")
         if st.get("view_1x1") and self._bin_size != 1:

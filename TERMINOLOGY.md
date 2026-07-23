@@ -325,13 +325,10 @@ device-map ↔ aggregate.
 
 ### 7.3 Outside `xrd_app/` (scripts + docs that also use the terms)
 
-`binning_benefits_report.py` (211) · `ANALYSIS_PLAYBOOK.md` (57) ·
-`docs/IMPLEMENTATION.md` (53) · `peak_intensity_snr_histograms.py` (52) ·
-`feature_candidates_compare.py` (42) · `docs/PLAN.md` (42) ·
-`feature_brightness_size_candidates.py` (41) · `cvevolve_*/prompt*.md` (15–36) ·
-`make_dummy_project.py` (29) · `scan_203_skew_map.py` (15) · plus
-`README.md`, `CLAUDE.md`, `xrd_app/CLAUDE.md`, `GRID_METHODS.md`,
-`TASK_deskew_coordinates.md`. These would all drift if the meanings swap.
+Legacy analysis scripts under `analysis/legacy/` · `ANALYSIS_PLAYBOOK.md` ·
+`docs/IMPLEMENTATION.md` · `docs/PLAN.md` · plus `README.md`, `CLAUDE.md`,
+`xrd_app/CLAUDE.md`, and `GRID_METHODS.md`. These would all drift if the
+meanings swap.
 
 ### 7.4 ⚠️ The shape ↔ feature swap is a *re-definition*, not a rename
 

@@ -319,6 +319,11 @@ class ReflectionDialog(QDialog):
         self.noise_algo_combo.setEnabled(self.noise_cb.isChecked())
         if self._image is None:
             return
+        # Noise reduction shifts the intensity range entirely (e.g. background
+        # subtraction), so any prior manual scale no longer matches — re-auto
+        # the levels the way toggling log scale does.
+        self._fresh_image = True
+        self._summed_levels = None
         self._recompute_histogram()
         self.status.setText(f"histogram recomputed (noise: {self._noise_label()})")
 
@@ -677,6 +682,23 @@ class ReflectionDialog(QDialog):
         self.status.setText(f"saved tth → {path}")
 
     # ----- drawing ----------------------------------------------------
+    def _auto_level(self, disp):
+        """Robust (percentile) intensity levels for the summed image.
+
+        Raw min/max spans XRD's full dynamic range, which is unusable as a
+        colormap window; the 1st–99.5th percentile gives a scale where features
+        are visible in both linear and log1p display. Returns ``(lo, hi)`` or
+        ``None`` if the image has no finite pixels.
+        """
+        finite = disp[np.isfinite(disp)]
+        if finite.size == 0:
+            return None
+        lo = float(np.percentile(finite, 1.0))
+        hi = float(np.percentile(finite, 99.5))
+        if hi <= lo:
+            hi = lo + 1.0
+        return lo, hi
+
     def _redraw_image(self):
         vb = self.img_view.getView()
         for item in self._overlay_items:
@@ -706,14 +728,24 @@ class ReflectionDialog(QDialog):
             disp = summed
             if self.log_cb.isChecked():
                 disp = np.log1p(np.clip(summed, 0, None))
-            self.img_view.setImage(disp, autoLevels=auto)
+            # Never use pyqtgraph's autoLevels (raw min/max): XRD's dynamic
+            # range is so wide that the region either spans everything ("too
+            # wide") or collapses out of view ("the scale disappears"). Compute
+            # robust percentile levels instead so log and linear both get a
+            # usable scale, and frame the histogram plot around them.
+            self.img_view.setImage(disp, autoLevels=False)
             if auto:
-                try:
-                    self._summed_levels = \
-                        self.img_view.getHistogramWidget().item.getLevels()
-                except Exception:
-                    self._summed_levels = None
-            else:
+                lv = self._auto_level(disp)
+                if lv is not None:
+                    self._summed_levels = lv
+                    lo, hi = lv
+                    try:
+                        pad = (hi - lo) * 0.1 or 1.0
+                        self.img_view.getHistogramWidget().item.setHistogramRange(
+                            lo - pad, hi + pad)
+                    except Exception:
+                        pass
+            if self._summed_levels is not None:
                 self.img_view.setLevels(*self._summed_levels)
             self._fresh_image = False
             self._showing_summed = True

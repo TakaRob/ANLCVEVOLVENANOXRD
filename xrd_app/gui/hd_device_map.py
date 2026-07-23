@@ -993,7 +993,8 @@ class HDMapBuilder(QMainWindow):
         detail = QLabel(
             f"Sample 1×1 intensity beneath the {bin_size}×{bin_size} feature map "
             "at each feature's detector peak. Reads raw frames (heavy) — runs "
-            "once, then the JSON is cached.")
+            "once, then the JSON is cached. Also builds the 1×1 grid mapping if "
+            "missing, so the real (x, y) stage-position scatter is available.")
         detail.setAlignment(Qt.AlignCenter); detail.setWordWrap(True)
         detail.setStyleSheet("color:#999; font-size:0.9em;")
         lay.addWidget(detail)

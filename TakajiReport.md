@@ -118,7 +118,7 @@ CVEvolve iteratively generates and tunes detector algorithms, scoring each again
 
 ### 2.4 F1 report — best detectors (5×5 holdout)
 
-From `cvevolve_5x5/test_data/top_algorithms.json` (ranked by holdout F1):
+From the archived 5x5 CVEvolve holdout report (ranked by holdout F1):
 
 | Rank | Detector | Holdout F1 |
 |---|---|---|
@@ -179,7 +179,7 @@ Each feature carries: `spatial_extent` / `n_bins` (footprint), `intensity_profil
 
 At 1×1, features over-segment into **horizontal slices**: 53% of multi-bin features span exactly one scan row (tol=5). Cause: serpentine raster row-registration offset + single-frame centroid jitter exceed the 5 px link tolerance across rows, so only *within-row* links survive. The error is correlated **within** a row (fast X pass) but flips sign **between** rows (direction reversal) → slicing is horizontal.
 
-> 🔴 **Figure 4.1:** skew map / before-after linking on a 1×1 feature (from `scan_203_skew_map.py`).
+> 🔴 **Figure 4.1:** skew map / before-after linking on a 1×1 feature (from `analysis/legacy/scan_203_skew_map.py`).
 
 ### 4.2 Remedies tried (Scan_0203)
 
@@ -217,4 +217,4 @@ Binning already averages out the serpentine backlash, so re-gridding an already-
 
 ---
 
-*Sources on disk: `binning_benefits_report.py`, `cvevolve_5x5/COST_SUMMARY.md`, `cvevolve_1x1/` configs, `deskew_peaks.py`, `scan_203_skew_map.py`, `TERMINOLOGY.md`.*
+*Sources on disk: legacy analysis scripts under `analysis/legacy/`, archived CVEvolve run notes, and `TERMINOLOGY.md`.*
