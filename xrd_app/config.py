@@ -479,7 +479,13 @@ class DataManager:
             if single:
                 return self._abs(single)
         if name:
-            local = self.metadata_scan_dir(scan) / "positions.csv"
+            mdir = self.metadata_scan_dir(scan)
+            # A placed Lozano position h5 wins over a CSV (loaders dispatch on
+            # suffix; see io.load_positions_xy).
+            local_h5 = mdir / "positions.h5"
+            if local_h5.exists():
+                return local_h5
+            local = mdir / "positions.csv"
             if local.exists():
                 return local
         return self.metadata_dir / "positions.csv"

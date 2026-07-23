@@ -116,7 +116,18 @@ def link(tth, reflections, detector, raw_root, position_root, position_csv,
             dm = DataManager(root, scan=scan)
             dest_dir = dm.metadata_scan_dir(scan) if scan else dm.metadata_dir
             dest_dir.mkdir(parents=True, exist_ok=True)
-            stored = _place(src, dest_dir / "positions.csv", copy)
+            # Preserve the source kind: a Lozano position h5 must land as
+            # positions.h5 (loaders dispatch on suffix); everything else → .csv.
+            dest_name = ("positions.h5"
+                         if src.suffix.lower() in (".h5", ".hdf5")
+                         else "positions.csv")
+            # Drop a stale sibling of the other kind so the resolver isn't torn
+            # between positions.h5 and positions.csv.
+            other = dest_dir / ("positions.csv" if dest_name == "positions.h5"
+                                else "positions.h5")
+            if other.exists() or other.is_symlink():
+                other.unlink()
+            stored = _place(src, dest_dir / dest_name, copy)
             click.echo(f"  positions: {stored}")
 
     provided = {'tth': tth, 'reflections': reflections, 'detector': detector}
@@ -793,18 +804,23 @@ def territory_build(ctx, target_size, scan, algorithm, snr, compression, root):
               help='Sample theta in degrees — only used by --method basic')
 @click.option('--reduction', type=int, default=1,
               help='Use every Nth interferometer sample (speed; 1 = all)')
+@click.option('--from-h5', 'from_h5', default=None,
+              help='Build from a Lozano position h5 (entry/data/Position) instead '
+                   'of SOCKETSERVER. Pass a path, or omit for auto-discovery.')
 @click.option('--output', help='Output CSV (default: Metadata/<scan>/positions.csv)')
 @click.option('--force', is_flag=True, help='Overwrite an existing CSV')
 @click.option('--root', default='.', help='Project root directory')
-def create_positions(scan, socket_dir, method, theta, reduction, output, force, root):
-    """Build a REAL per-frame position CSV from the SOCKETSERVER interferometry stream.
+def create_positions(scan, socket_dir, method, theta, reduction, from_h5, output,
+                     force, root):
+    """Build a REAL per-frame position CSV from the beamline's stage positions.
 
-    Reduces the interferometer encoder samples to one true (X, Y) stage position
-    per trigger and writes ``Metadata/<scan>/positions.csv`` — the *real*
-    measured positions. 'xrd-app grid' calls this automatically when no position
-    CSV is found; run it directly to (re)generate one. When a scan has no
-    SOCKETSERVER stream, the grid is reconstructed from the one-file-per-row
-    layout instead (no positions file needed).
+    Two sources, tried in order (or forced): the **SOCKETSERVER interferometry
+    stream** (reduced to one true (X, Y) per trigger), or a **Lozano position h5**
+    (``Scan_NNNN.h5`` with an already-reduced ``entry/data/Position`` group). Both
+    write ``Metadata/<scan>/positions.csv`` — the *real* measured positions.
+    'xrd-app grid' calls this automatically when no position file is found; run it
+    directly to (re)generate one. When neither source exists, the grid is
+    reconstructed from the one-file-per-row layout instead (no file needed).
     """
     from .core import io, positions as P
     dm = DataManager(root, scan=scan)
@@ -818,17 +834,36 @@ def create_positions(scan, socket_dir, method, theta, reduction, output, force, 
         click.echo("  Pass --force to overwrite, or --output to write elsewhere.")
         raise SystemExit(1)
 
-    if not P.has_socketserver(sdir, scan_no):
-        click.echo(f"Error: no SOCKETSERVER files (scan_{scan_no:04d}_*.h5) in {sdir}.")
-        click.echo("  This scan has no interferometry stream — 'xrd-app grid' will "
-                   "reconstruct the grid from the one-file-per-row layout instead.")
-        raise SystemExit(1)
+    # ---- source selection --------------------------------------------------
+    # Explicit --from-h5 (path or auto), else SOCKETSERVER if present, else a
+    # Lozano position h5 discovered by scan number.
+    lozano_h5 = None
+    if from_h5:
+        lozano_h5 = Path(from_h5)
+        if not lozano_h5.is_file():
+            click.echo(f"Error: --from-h5 file not found: {lozano_h5}")
+            raise SystemExit(1)
+    elif not P.has_socketserver(sdir, scan_no):
+        raw = dm.raw_scan_dir(scan=scan)
+        search_dirs = [raw, raw / "data", raw.parent, raw.parent / "data",
+                       dm.xrd_frames_dir(scan=scan), dm.root, dm.root / "data"]
+        lozano_h5 = P.find_position_h5(search_dirs, scan_no)
+        if lozano_h5 is None:
+            click.echo(f"Error: no SOCKETSERVER files (scan_{scan_no:04d}_*.h5) in "
+                       f"{sdir}, and no Lozano position h5 (Scan_{scan_no:04d}.h5 "
+                       f"with {io.H5_POSITION_GROUP}) found nearby.")
+            click.echo("  Pass --from-h5 <path>, or let 'xrd-app grid' reconstruct "
+                       "the grid from the one-file-per-row layout instead.")
+            raise SystemExit(1)
 
     try:
-        info = P.build_positions_csv(
-            sdir, out, scan_number=scan_no, method=method, theta_deg=theta,
-            reduction=reduction, log=click.echo)
-    except (FileNotFoundError, ValueError) as e:
+        if lozano_h5 is not None:
+            info = P.build_positions_csv_from_h5(lozano_h5, out, log=click.echo)
+        else:
+            info = P.build_positions_csv(
+                sdir, out, scan_number=scan_no, method=method, theta_deg=theta,
+                reduction=reduction, log=click.echo)
+    except (FileNotFoundError, ValueError, KeyError) as e:
         click.echo(f"Error: {e}")
         raise SystemExit(1)
     click.echo(f"Wrote {info['n_positions']} real positions "

@@ -29,6 +29,12 @@ import h5py
 import numpy as np
 
 H5_DATASET = "entry/data/data"
+# Lozano-style per-frame stage positions: a small HDF5 (``Scan_NNNN.h5``) with an
+# ``entry/data/Position`` group holding already-reduced ``X_Position``/``Y_Position``
+# (µm) arrays — one value per frame. Distinct from the raw SOCKETSERVER stream
+# (``H5_DATASET``, 24 encoder cols), which ``core.positions`` reduces separately.
+H5_POSITION_GROUP = "entry/data/Position"
+_H5_SUFFIXES = (".h5", ".hdf5")
 DETECTOR_SHAPE = (1062, 1028)
 
 
@@ -347,7 +353,13 @@ def _uncommented(fh):
 
 
 def is_recreated_csv(csv_path: Union[str, Path]) -> bool:
-    """True if ``csv_path`` is a synthetic file-per-row CSV we wrote (has the marker)."""
+    """True if ``csv_path`` is a synthetic file-per-row CSV we wrote (has the marker).
+
+    An HDF5 position file is never a recreated CSV (and reading it as text would
+    raise), so short-circuit to ``False`` for ``.h5``/``.hdf5``.
+    """
+    if Path(csv_path).suffix.lower() in _H5_SUFFIXES:
+        return False
     try:
         with open(csv_path) as f:
             return f.readline().lstrip().startswith(RECREATED_CSV_MARKER)
@@ -355,35 +367,62 @@ def is_recreated_csv(csv_path: Union[str, Path]) -> bool:
         return False
 
 
-def load_positions(csv_path: Union[str, Path], n_total: int) -> np.ndarray:
-    """Read X positions from the scan position CSV, padded/truncated to n_total."""
-    x = []
-    with open(csv_path) as f:
-        reader = csv.DictReader(_uncommented(f))
-        for row in reader:
-            x.append(float(row["X_Position"]))
+def _read_positions_h5(h5_path: Union[str, Path]):
+    """Read ``(x, y)`` µm arrays from a Lozano-style position HDF5.
+
+    Layout: ``entry/data/Position/{X_Position,Y_Position}`` — one already-reduced
+    value per frame (contrast the raw SOCKETSERVER stream, which
+    :mod:`core.positions` reduces). Returns two 1-D float arrays.
+    """
+    with h5py.File(h5_path, "r") as f:
+        grp = f[H5_POSITION_GROUP]
+        x = np.asarray(grp["X_Position"][()], dtype=float).ravel()
+        y = np.asarray(grp["Y_Position"][()], dtype=float).ravel()
+    return x, y
+
+
+def load_positions(path: Union[str, Path], n_total: int) -> np.ndarray:
+    """Read X positions from the scan position file, padded/truncated to n_total.
+
+    Accepts either the ``Trigger,X_Position,Y_Position`` CSV or a Lozano-style
+    position HDF5 (``.h5``/``.hdf5``, see :func:`_read_positions_h5`).
+    """
+    if Path(path).suffix.lower() in _H5_SUFFIXES:
+        x, _ = _read_positions_h5(path)
+    else:
+        x = []
+        with open(path) as f:
+            reader = csv.DictReader(_uncommented(f))
+            for row in reader:
+                x.append(float(row["X_Position"]))
     frame_x = np.full(n_total, np.nan)
     n = min(len(x), n_total)
     frame_x[:n] = x[:n]
     return frame_x
 
 
-def load_positions_xy(csv_path: Union[str, Path], n_total: int):
-    """Read X *and* Y positions from the scan position CSV → (frame_x, frame_y).
+def load_positions_xy(path: Union[str, Path], n_total: int):
+    """Read X *and* Y positions from the scan position file → (frame_x, frame_y).
 
-    Companion to :func:`load_positions` (X-only, kept for back-compat). Both
-    arrays are padded/truncated to ``n_total``. A ``frame_y`` that is all-NaN
-    means the CSV has no ``Y_Position`` column — callers should then fall back to
-    the serpentine (X-only) grid.
+    Accepts either the ``Trigger,X_Position,Y_Position`` CSV or a Lozano-style
+    position HDF5 (``.h5``/``.hdf5``, ``entry/data/Position`` group). Companion to
+    :func:`load_positions` (X-only, kept for back-compat). Both arrays are
+    padded/truncated to ``n_total``. A ``frame_y`` that is all-NaN means the
+    source has no Y column — callers should then fall back to the serpentine
+    (X-only) grid.
     """
-    x, y = [], []
-    with open(csv_path) as f:
-        reader = csv.DictReader(_uncommented(f))
-        has_y = bool(reader.fieldnames) and "Y_Position" in reader.fieldnames
-        for row in reader:
-            x.append(float(row["X_Position"]))
-            if has_y:
-                y.append(float(row["Y_Position"]))
+    if Path(path).suffix.lower() in _H5_SUFFIXES:
+        x, y = _read_positions_h5(path)
+        has_y = True
+    else:
+        x, y = [], []
+        with open(path) as f:
+            reader = csv.DictReader(_uncommented(f))
+            has_y = bool(reader.fieldnames) and "Y_Position" in reader.fieldnames
+            for row in reader:
+                x.append(float(row["X_Position"]))
+                if has_y:
+                    y.append(float(row["Y_Position"]))
     frame_x = np.full(n_total, np.nan)
     frame_y = np.full(n_total, np.nan)
     nx = min(len(x), n_total)
