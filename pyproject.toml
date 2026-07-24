@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "xrd-app"
-version = "0.1.0"
+version = "0.2.0"
 description = "Single-GUI XRD analysis workflow (peak/shape finding, labeling, CVEvolve) over a scriptable CLI"
 requires-python = ">=3.9"
 dependencies = [

@@ -20,7 +20,7 @@ from PyQt5.QtWidgets import (
     QLabel, QMainWindow, QScrollArea, QTabWidget, QVBoxLayout, QWidget,
 )
 
-from . import workspace
+from . import __version__, workspace
 from .config import DataManager
 from .tabs._embed import placeholder
 
@@ -212,7 +212,7 @@ class MainWindow(QMainWindow):
             self.bin_size = bin_size or 3
             title = "no project — create or open one in Setup"
 
-        self.setWindowTitle(f"xrd-app — {title}")
+        self.setWindowTitle(f"xrd-app v{__version__} — {title}")
 
     def switch_project(self, project_root):
         """Open a different project at runtime and rebuild every tab.

@@ -251,8 +251,16 @@ class ReflectionDialog(QDialog):
         # ---- actions ---------------------------------------------------
         brow = QHBoxLayout()
         brow.addStretch()
+        self.default_cb = QCheckBox("Set as project default")
+        self.default_cb.setToolTip(
+            "Also write this set to the project Metadata/ so every scan that has "
+            "no reflections of its own uses it as the running default")
+        self.default_cb.setChecked(True)
+        brow.addWidget(self.default_cb)
         save_refl_btn = QPushButton("Save reflections")
-        save_refl_btn.setToolTip("Write reflections.json + reflections.py")
+        save_refl_btn.setToolTip(
+            "Write reflections.json + reflections.py (per scan, and — when "
+            "'Set as project default' is on — the project default too)")
         save_refl_btn.clicked.connect(self._save_reflections)
         brow.addWidget(save_refl_btn)
         save_png_btn = QPushButton("Save PNG")
@@ -937,7 +945,15 @@ class ReflectionDialog(QDialog):
 
     # ----- save -------------------------------------------------------
     def _save_reflections(self):
-        """Write reflections.json + reflections.py (does not close the dialog)."""
+        """Write reflections.json + reflections.py (does not close the dialog).
+
+        Always writes the per-scan set. When "Set as project default" is checked,
+        the same set is also written to the project ``Metadata/`` so every scan
+        without its own reflections picks it up as the running default (per the
+        per-scan → project → bundled fallback chain in ``config``). Editing at
+        the project level (no scan) writes the default directly, so the extra
+        copy is skipped.
+        """
         self._reflections_from_table()
         if not self.reflections:
             self.status.setText("no reflections to save")
@@ -945,15 +961,29 @@ class ReflectionDialog(QDialog):
         mdir = self.dm.metadata_scan_dir(self.scan) if self.scan else self.dm.metadata_dir
         json_path = mdir / "reflections.json"
         py_path = mdir / "reflections.py"
+        written = [json_path, py_path]
+        made_default = False
         try:
             refl_io.save(self.reflections, json_path, py_path)
+            proj_dir = self.dm.metadata_dir
+            if self.default_cb.isChecked() and proj_dir.resolve() != mdir.resolve():
+                pj = refl_io.save(self.reflections,
+                                  proj_dir / "reflections.json",
+                                  proj_dir / "reflections.py")
+                written.append(pj)
+                made_default = True
         except Exception as e:
             QMessageBox.warning(self, "Save failed", f"Could not write reflections:\n{e}")
             return
-        self.status.setText(f"saved {len(self.reflections)} reflections → {json_path}")
+        note = " · set as project default" if made_default else ""
+        self.status.setText(
+            f"saved {len(self.reflections)} reflections → {json_path}{note}")
+        paths_txt = "\n".join(str(p) for p in written)
+        default_note = ("\n\nSet as the project default — scans without their own "
+                        "reflections will now use this set.") if made_default else ""
         QMessageBox.information(
             self, "Saved reflections",
-            f"Wrote {len(self.reflections)} reflections:\n{json_path}\n{py_path}")
+            f"Wrote {len(self.reflections)} reflections:\n{paths_txt}{default_note}")
 
     def _save_png(self):
         """Save the 2θ histogram figure as a PNG.
