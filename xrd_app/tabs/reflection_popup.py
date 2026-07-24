@@ -113,6 +113,7 @@ class ReflectionDialog(QDialog):
             self.img_view.setColorMap(_get_cmap(self._cmap_name))
         except Exception:
             pass
+        self.img_view.getView().scene().sigMouseClicked.connect(self._on_image_click)
         figs.addWidget(self.img_view, 1)
 
         self.hist = pg.PlotWidget()
@@ -177,7 +178,7 @@ class ReflectionDialog(QDialog):
             "again to cancel.")
         self.compute_btn.clicked.connect(self._on_compute_clicked)
         crow.addWidget(self.compute_btn)
-        self.status = QLabel("click 'Compute' (then click the histogram to set 2θ)")
+        self.status = QLabel("click 'Compute' (then click the histogram or image to set 2θ)")
         crow.addWidget(self.status, 1)
         lay.addLayout(crow)
 
@@ -255,7 +256,7 @@ class ReflectionDialog(QDialog):
         self.default_cb.setToolTip(
             "Also write this set to the project Metadata/ so every scan that has "
             "no reflections of its own uses it as the running default")
-        self.default_cb.setChecked(True)
+        self.default_cb.setChecked(False)
         brow.addWidget(self.default_cb)
         save_refl_btn = QPushButton("Save reflections")
         save_refl_btn.setToolTip(
@@ -942,6 +943,21 @@ class ReflectionDialog(QDialog):
             return
         pt = vb.mapSceneToView(ev.scenePos())
         self._set_picked_tth(float(pt.x()))
+
+    def _on_image_click(self, ev):
+        if self._tth is None:
+            return
+        vb = self.img_view.getView()
+        if vb is None or not vb.sceneBoundingRect().contains(ev.scenePos()):
+            return
+        pt = vb.mapSceneToView(ev.scenePos())
+        col = int(round(float(pt.x())))
+        row = int(round(float(pt.y())))
+        if row < 0 or col < 0 or row >= self._tth.shape[0] or col >= self._tth.shape[1]:
+            return
+        val = self._tth[row, col]
+        if np.isfinite(val):
+            self._set_picked_tth(float(val))
 
     # ----- save -------------------------------------------------------
     def _save_reflections(self):
