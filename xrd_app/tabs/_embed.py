@@ -57,8 +57,14 @@ def bins_status_text(dm, bin_size, scan=None) -> str:
     if path and os.path.exists(path):
         ts = datetime.datetime.fromtimestamp(Path(path).stat().st_mtime)
         return f"{bin_size}×{bin_size}: built {ts:%Y-%m-%d %H:%M}"
+    try:
+        archive = dm.unbinned_archive_h5(scan=scan)
+    except Exception:
+        archive = None
+    if archive and archive.exists():
+        return f"{bin_size}×{bin_size}: from lossless unbinned archive"
     if bin_size == 1:
-        return "1×1: raw frames (per-frame, no binning)"
+        return "1×1: loose raw frames (unbinned archive not built)"
     if not path:
         return f"{bin_size}×{bin_size}: raw frames (no binned file)"
     return f"{bin_size}×{bin_size}: not built — run Programs → Create bins"

@@ -608,6 +608,13 @@ class DataManager:
             return sdir / f"grid_mapping_{bin_size}x{bin_size}{tag}.json"
         return sdir / f"grid_mapping{tag}.json"
 
+    def unbinned_archive_h5(self, override: Optional[str] = None,
+                            scan: object = None) -> Path:
+        """Lossless acquisition-order detector-frame archive for a scan."""
+        if override:
+            return self._abs(override)
+        return self.binned_dir(scan) / "xrd_unbinned_archive.h5"
+
     def binned_h5(self, bin_size: int, override: Optional[str] = None,
                   scan: object = None, variant: Optional[str] = None) -> Path:
         if override:

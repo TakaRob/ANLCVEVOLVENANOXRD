@@ -76,7 +76,45 @@ def column_headers(meta) -> list:
         "Coverage % (union/total)",
         "Preferred χ (°)",
         "χ spread (±°)",
-        "Shape fill % (solidity)",
+        "Shape solidity (fill %)",
+        total,
+    ]
+
+
+def column_help(meta) -> list:
+    """Plain-language description for each column, aligned to :data:`COLUMNS`.
+
+    Used as GUI header tooltips (and printable help) so the terse headers are
+    self-explanatory on hover. Kept next to :func:`column_headers` so the two
+    stay in step; units follow the same grid/territory switch.
+    """
+    territory = bool(meta.get("territory"))
+    units = "coordinate-CSV units" if territory else "grid bins"
+    total = ("Convex-hull area of every territory's outline, in coordinate-CSV "
+             "units — the denominator for Coverage %."
+             if territory else
+             "Total grid cells in the scan (n_bin_rows × n_bin_cols) — the "
+             "denominator for Coverage %.")
+    return [
+        "Scan identifier.",
+        "Bragg reflection this row summarizes (or all reflections combined).",
+        "Number of kept shapes (peaks that persisted when linked across "
+        "neighboring bins).",
+        f"Sum of every shape's footprint in {units}; overlapping shapes are "
+        "counted once each.",
+        f"Footprint of the set-union of all shapes in {units}; overlaps counted "
+        "once overall.",
+        "Footprint union ÷ scan total — the fraction of the mapped area covered "
+        "by shapes.",
+        "Tip χ (azimuthal angle) of the most-populous, area-weighted orientation "
+        "cluster — the same one the Orientation Map paints.",
+        "Half the angular span of that dominant χ cluster — how tightly "
+        "orientations group.",
+        "How solidly shapes fill their own outline, area-weighted: for each "
+        "shape, occupied area ÷ the convex-hull polygon drawn around its "
+        "outermost bins. 100% = a solid, gap-free blob; lower means ragged "
+        "edges, holes, or missing low-intensity detections. Large shapes weigh "
+        "more.",
         total,
     ]
 

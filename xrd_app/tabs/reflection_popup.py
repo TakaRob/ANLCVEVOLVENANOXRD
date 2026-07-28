@@ -386,8 +386,10 @@ class ReflectionDialog(QDialog):
             return
 
         bin_size = self._source_bin()
-        has_h5 = bin_size != 1
-        if not has_h5:
+        has_local_source = (bin_size != 1 or
+                            self.dm.unbinned_archive_h5(scan=self.scan).exists() or
+                            self.dm.binned_h5(1, scan=self.scan).exists())
+        if not has_local_source:
             # No binned file anywhere → raw frames. Confirm on a second press
             # first, since summing raw is much slower than reading prebuilt bins.
             if not self._raw_armed:
@@ -398,7 +400,10 @@ class ReflectionDialog(QDialog):
                 return
 
         mb = self.max_bins.value() or None
-        noun = "raw frames" if not has_h5 else "bins"
+        if bin_size == 1 and self.dm.unbinned_archive_h5(scan=self.scan).exists():
+            noun = "archived frames"
+        else:
+            noun = "raw frames" if not has_local_source else "bins"
 
         def _progress(i, n):
             if self._cancel:

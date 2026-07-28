@@ -629,6 +629,8 @@ class OrientationMapWindow(QMainWindow):
         self._render_main()
         if self._locked_sector is not None:
             self._restore_locked()   # redraw pinned histograms under new weights
+        for hist in (self.az_hist, self.arc_hist):
+            hist.autoRange()
 
     def _on_toggle(self):
         self._show_arcs = self.arcs_cb.isChecked()

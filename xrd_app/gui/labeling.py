@@ -942,6 +942,10 @@ class LabelingTool(QMainWindow):
 
     def _load_bin_data_for_size(self, bin_size):
         """Load bin keys and mapping for the given bin size."""
+        old_source = getattr(self, "_bin_source", None)
+        if old_source is not None:
+            old_source.close()
+        self._bin_source = None
         self.bin_size = bin_size
         # Prefer a built HDF5 for any bin size, including 1×1 (one frame per
         # bin). A bins-only project (raw frames deleted to save disk) then still
@@ -963,6 +967,12 @@ class LabelingTool(QMainWindow):
 
         if raw_keys is not None:
             self.bin_keys = sorted(raw_keys, key=lambda k: (int(k.split("_")[0]), int(k.split("_")[1])))
+            self.n_bins = len(self.bin_keys)
+            self.bin_mapping = None
+        elif self.dm.unbinned_archive_h5().exists() and self.dm.grid_mapping(bin_size=bin_size).exists():
+            from ..core import io as _io
+            self._bin_source = _io.open_bin_source(self.dm, bin_size)
+            self.bin_keys = self._bin_source.keys()
             self.n_bins = len(self.bin_keys)
             self.bin_mapping = None
         elif bin_size == 1:
@@ -1683,7 +1693,9 @@ class LabelingTool(QMainWindow):
             return self._image_cache[bin_key_str]
 
         img = None
-        if self.bins_h5_path and os.path.exists(self.bins_h5_path):
+        if self._bin_source is not None:
+            img = self._bin_source.image(bin_key_str)
+        elif self.bins_h5_path and os.path.exists(self.bins_h5_path):
             try:
                 with h5py.File(self.bins_h5_path, "r") as f:
                     if bin_key_str in f:

@@ -402,7 +402,7 @@ class _WrapSpinBox(QSpinBox):
 
     @staticmethod
     def _wrap(v):
-        return v - 360 if v > 180 else v
+        return v - 360 if v >= 180 else v
 
     def textFromValue(self, v):
         return str(self._wrap(v))
@@ -416,6 +416,26 @@ class _WrapSpinBox(QSpinBox):
         if v < lo:
             v += 360
         return max(lo, min(hi, v))
+
+
+class _ChiAxisItem(pg.AxisItem):
+    """χ histogram axis: keep unwrapped coordinates, display wrapped labels."""
+
+    @staticmethod
+    def _wrap(v):
+        return v - 360 if v >= 180 else v
+
+    def tickStrings(self, values, scale, spacing):
+        labels = []
+        for v in values:
+            wrapped = self._wrap(v * scale)
+            if abs(wrapped) < 1e-9:
+                wrapped = 0.0
+            if abs(wrapped - round(wrapped)) < 1e-6:
+                labels.append(str(int(round(wrapped))))
+            else:
+                labels.append(f"{wrapped:g}")
+        return labels
 
 
 class DeviceMapWindow(QMainWindow):
@@ -628,7 +648,8 @@ class DeviceMapWindow(QMainWindow):
         ref_row.addWidget(self.chi_weight_combo)
         rl.addLayout(ref_row)
 
-        self.chi_hist = pg.PlotWidget()
+        self.chi_hist = pg.PlotWidget(
+            plotItem=pg.PlotItem(axisItems={"bottom": _ChiAxisItem("bottom")}))
         self.chi_hist.setBackground("w")
         self.chi_hist.setFixedHeight(230)
         self.chi_hist.setLabel("bottom", "χ (°)")
@@ -641,10 +662,9 @@ class DeviceMapWindow(QMainWindow):
 
         entry_row = QHBoxLayout()
         entry_row.addWidget(QLabel("Min:"))
-        # Unwrapped display (continuous, matches the histogram's x-axis) — a wrap
-        # -to-±180 spin here made the slider read e.g. "163 to -125" while the
-        # histogram showed "160 to 240" for the same range.
-        self.chi_min_spin = QSpinBox()
+        # Internal values stay continuous for filtering; display wraps past 180°
+        # so the histogram reads like the feature labels (e.g. 235° -> -125°).
+        self.chi_min_spin = _WrapSpinBox()
         self.chi_min_spin.setRange(self._chi_data_min, self._chi_data_max)
         self.chi_min_spin.setValue(self._chi_data_min)
         self.chi_min_spin.setSuffix("°")
@@ -653,7 +673,7 @@ class DeviceMapWindow(QMainWindow):
         entry_row.addWidget(self.chi_min_spin)
         entry_row.addStretch()
         entry_row.addWidget(QLabel("Max:"))
-        self.chi_max_spin = QSpinBox()
+        self.chi_max_spin = _WrapSpinBox()
         self.chi_max_spin.setRange(self._chi_data_min, self._chi_data_max)
         self.chi_max_spin.setValue(self._chi_data_max)
         self.chi_max_spin.setSuffix("°")
@@ -700,7 +720,7 @@ class DeviceMapWindow(QMainWindow):
         return c + 360 if (self._chi_wraps and c < 0) else c
 
     def _wrap_chi(self, u):
-        return u - 360 if u > 180 else u
+        return u - 360 if u >= 180 else u
 
     def _chi_range(self):
         if (self._chi_lo <= self._chi_data_min and self._chi_hi >= self._chi_data_max):
@@ -1234,9 +1254,10 @@ class DeviceMapWindow(QMainWindow):
     def _update_chi_visuals(self):
         self._draw_chi_histogram()
         self._draw_chi_arc()
-        # Unwrapped (continuous) to match the histogram x-axis and the spin boxes.
+        # Display wraps past 180° while internal values stay continuous.
         self.chi_range_label.setText(
-            f"χ: {self._chi_lo:.0f}° to {self._chi_hi:.0f}°")
+            f"χ: {self._wrap_chi(self._chi_lo):.0f}° to "
+            f"{self._wrap_chi(self._chi_hi):.0f}°")
 
     def _draw_chi_histogram(self):
         self.chi_hist.clear()
@@ -1298,6 +1319,7 @@ class DeviceMapWindow(QMainWindow):
     def _on_chi_weight_changed(self):
         self._chi_weight = self.chi_weight_combo.currentData()
         self._draw_chi_histogram()
+        self.chi_hist.autoRange()
 
     def _sync_chi_widgets(self):
         for w in (self.chi_range_slider, self.chi_min_spin, self.chi_max_spin):

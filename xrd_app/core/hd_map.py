@@ -26,7 +26,7 @@ import numpy as np
 from . import io
 
 
-def build_cell_xy(grid_mapping: dict, positions_csv) -> dict:
+def build_cell_xy(grid_mapping: dict, positions_csv=None, archive=None) -> dict:
     """``{cell_key: (x, y)}`` real stage position for each 1×1 cell.
 
     ``grid_mapping`` is the loaded 1×1 grid-mapping dict (``bins`` maps a cell
@@ -38,14 +38,19 @@ def build_cell_xy(grid_mapping: dict, positions_csv) -> dict:
     real-position layer.
     """
     bins = grid_mapping.get("bins") or {}
-    if not bins or not positions_csv or not Path(positions_csv).exists():
+    have_positions = positions_csv and Path(positions_csv).exists()
+    have_archive_positions = archive and io.archive_has_real_positions(archive)
+    if not bins or not (have_positions or have_archive_positions):
         return {}
     n_total = grid_mapping.get("n_total_frames")
     if not n_total:
         n_total = 1 + max((max(v) for v in bins.values() if v), default=-1)
     if n_total <= 0:
         return {}
-    frame_x, frame_y = io.load_positions_xy(positions_csv, n_total)
+    if have_positions:
+        frame_x, frame_y = io.load_positions_xy(positions_csv, n_total)
+    else:
+        frame_x, frame_y = io.archive_positions(archive)
     if not (np.isfinite(frame_x).any() and np.isfinite(frame_y).any()):
         return {}  # X-only / no real positions → no scatter layer
 
@@ -61,7 +66,7 @@ def build_cell_xy(grid_mapping: dict, positions_csv) -> dict:
     return out
 
 
-def scan_trajectory(grid_mapping: dict, positions_csv=None) -> dict:
+def scan_trajectory(grid_mapping: dict, positions_csv=None, archive=None) -> dict:
     """Acquisition-order scan path through the 1×1 cells.
 
     The beam visits one frame per 1×1 cell in global frame order (the serpentine
@@ -93,10 +98,14 @@ def scan_trajectory(grid_mapping: dict, positions_csv=None) -> dict:
     xy_path = None
     if positions_csv and Path(positions_csv).exists():
         frame_x, frame_y = io.load_positions_xy(positions_csv, n_total)
-        if np.isfinite(frame_x).any() and np.isfinite(frame_y).any():
-            xy_path = [[float(frame_x[gi]), float(frame_y[gi])]
-                       for gi in range(n_total)
-                       if np.isfinite(frame_x[gi]) and np.isfinite(frame_y[gi])]
+    elif archive and io.archive_has_real_positions(archive):
+        frame_x, frame_y = io.archive_positions(archive)
+    else:
+        frame_x = frame_y = np.array([])
+    if np.isfinite(frame_x).any() and np.isfinite(frame_y).any():
+        xy_path = [[float(frame_x[gi]), float(frame_y[gi])]
+                   for gi in range(min(n_total, len(frame_x)))
+                   if np.isfinite(frame_x[gi]) and np.isfinite(frame_y[gi])]
     return {"grid": grid_path, "xy": xy_path}
 
 

@@ -656,54 +656,55 @@ class _ExpansionWorker(QThread):
         parts = self._bin_key.split("_")
         center_row, center_col = int(parts[0]), int(parts[1])
         center_bk = self._bin_key
-        target_x, target_y = seed["x"], seed["y"]
 
         h5 = v._get_source()
-        visited = {center_bk}
+        accepted = {center_bk: seed}
+        peak_cache = {}
         queue = [center_bk]
         members = [(center_bk, 0, center_row, center_col,
                     seed["x"], seed["y"], seed)]
-        max_radius = 10
 
         while queue:
             bk = queue.pop(0)
             br, bc = int(bk.split("_")[0]), int(bk.split("_")[1])
+            reference = accepted[bk]
             for dr in [-1, 0, 1]:
                 for dc in [-1, 0, 1]:
                     if dr == 0 and dc == 0:
                         continue
                     nr, nc = br + dr, bc + dc
                     nbk = f"{nr}_{nc}"
-                    with v.h5_lock:
-                        if nbk in visited or nbk not in h5:
-                            continue
-                        dist = max(abs(nr - center_row), abs(nc - center_col))
-                        if dist > max_radius:
-                            continue
-                        visited.add(nbk)
-                        image = np.clip(h5[nbk][:].astype(np.float64), 0, 1e9)
+                    if nbk in accepted:
+                        continue
+                    if nbk not in peak_cache:
+                        with v.h5_lock:
+                            if nbk not in h5:
+                                continue
+                            image = np.clip(h5[nbk][:].astype(np.float64), 0, 1e9)
 
-                    peaks, cleaned = detect_peaks_with_intensity(
-                        image, v._tth_map, v._ref_degs,
-                        v._ref_labels, v._tth_data, v._det)
+                        peaks, cleaned = detect_peaks_with_intensity(
+                            image, v._tth_map, v._ref_degs,
+                            v._ref_labels, v._tth_data, v._det)
 
-                    for p in peaks:
-                        r = 3
-                        py0 = max(0, p['y'] - r)
-                        py1 = min(cleaned.shape[0], p['y'] + r + 1)
-                        px0 = max(0, p['x'] - r)
-                        px1 = min(cleaned.shape[1], p['x'] + r + 1)
-                        p['cleaned_intensity'] = float(
-                            np.max(cleaned[py0:py1, px0:px1]))
+                        for p in peaks:
+                            r = 3
+                            py0 = max(0, p['y'] - r)
+                            py1 = min(cleaned.shape[0], p['y'] + r + 1)
+                            px0 = max(0, p['x'] - r)
+                            px1 = min(cleaned.shape[1], p['x'] + r + 1)
+                            p['cleaned_intensity'] = float(
+                                np.max(cleaned[py0:py1, px0:px1]))
+                        peak_cache[nbk] = peaks
 
                     match = None
-                    for p in peaks:
-                        d = ((p["x"] - target_x)**2 +
-                             (p["y"] - target_y)**2) ** 0.5
+                    for p in peak_cache[nbk]:
+                        d = ((p["x"] - reference["x"])**2 +
+                             (p["y"] - reference["y"])**2) ** 0.5
                         if d <= self.LINK_TOLERANCE and p["label"] == seed["label"]:
                             if match is None or p["snr"] > match["snr"]:
                                 match = p
                     if match:
+                        accepted[nbk] = match
                         members.append((nbk, 0, nr, nc,
                                         match["x"], match["y"], match))
                         queue.append(nbk)
@@ -741,15 +742,12 @@ class _RawIntensityWorker(QThread):
         for i, bk in enumerate(self._cells):
             try:
                 with v.h5_lock:
-                    img = v._get_sub_source().image(bk)
+                    patch = v._get_sub_source().region(
+                        bk, self._det_y - win, self._det_y + win + 1,
+                        self._det_x - win, self._det_x + win + 1)
             except Exception:
-                img = None
-            if img is not None:
-                y0 = max(0, self._det_y - win)
-                y1 = min(img.shape[0], self._det_y + win + 1)
-                x0 = max(0, self._det_x - win)
-                x1 = min(img.shape[1], self._det_x + win + 1)
-                patch = img[y0:y1, x0:x1]
+                patch = None
+            if patch is not None:
                 if patch.size:
                     out[bk] = {"intensity": float(patch.max()),
                                "integrated": float(patch.sum())}
@@ -1811,9 +1809,13 @@ class FeatureViewer(QMainWindow):
             import datetime
             ts = datetime.datetime.fromtimestamp(os.path.getmtime(p))
             return f"bins {self._bin_size}×{self._bin_size} built {ts:%Y-%m-%d %H:%M}"
+        archive = (_DM.unbinned_archive_h5(self._scan)
+                   if _DM is not None else None)
+        if archive and archive.exists():
+            return f"{self._bin_size}×{self._bin_size}: lossless unbinned archive"
         if self._bin_size == 1:
-            return "1×1: raw frames (per-frame, no binning)"
-        return f"{self._bin_size}×{self._bin_size}: raw frames (slower — build bins to speed up)"
+            return "1×1: loose raw frames (archive not built)"
+        return f"{self._bin_size}×{self._bin_size}: loose raw frames (slower)"
 
     def _update_scan_status(self):
         self.scan_status.setText(
@@ -1834,8 +1836,11 @@ class FeatureViewer(QMainWindow):
         # A built 1×1 h5 counts too, so a bins-only project (raw deleted) loads
         # 1×1 straight from the h5 without arming the raw-frames warning.
         h5 = _DM.bins_h5(bin_size, scan=scan) if _DM is not None else None
-        has_h5 = h5 and os.path.exists(h5)
-        if not has_h5 and self._raw_armed != (scan, bin_size):
+        archive = (_DM.unbinned_archive_h5(scan=scan)
+                   if _DM is not None else None)
+        has_local_source = ((h5 and os.path.exists(h5)) or
+                            (archive and archive.exists()))
+        if not has_local_source and self._raw_armed != (scan, bin_size):
             self._raw_armed = (scan, bin_size)
             self.scan_status.setText(
                 f"No binned file for {bin_size}×{bin_size}. "

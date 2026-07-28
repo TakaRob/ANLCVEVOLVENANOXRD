@@ -200,12 +200,14 @@ def regrid_scan(num: int, project_root: Path, position_root: Path,
 
         if rebin:
             first = Path(xrd_files[0]) if xrd_files else None
-            if first is not None and first.exists():
+            archive = project_root / "Binned" / scan / "xrd_unbinned_archive.h5"
+            if archive.exists() or (first is not None and first.exists()):
                 out_h5 = project_root / "Binned" / scan / f"xrd_{b}x{b}_bins.h5"
-                io.build_bins(new_gm, out_h5, bin_size=b, log=print)
+                io.build_bins(new_gm, out_h5, bin_size=b, log=print,
+                              archive=archive if archive.exists() else None)
                 info["h5"] = f"rebuilt -> {out_h5.name}"
             else:
-                info["h5"] = f"SKIPPED (raw frames not reachable: {first})"
+                info["h5"] = f"SKIPPED (archive/raw frames not reachable: {first})"
         st["sizes"][b] = info
 
     # Drop the real CSV beside the mappings so future `xrd-app` runs resolve it.

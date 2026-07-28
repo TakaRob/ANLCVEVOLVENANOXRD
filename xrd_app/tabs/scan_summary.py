@@ -232,10 +232,17 @@ class ScanSummaryTab(QWidget):
 
     def _fill_table(self):
         headers = self._headers()
+        helps = st.column_help(self._meta)
         self._table.setSortingEnabled(False)
         self._table.clear()
         self._table.setColumnCount(len(headers))
         self._table.setHorizontalHeaderLabels(headers)
+        # Explain each terse header on hover — especially "shape solidity",
+        # which isn't obvious from the label alone.
+        for c, tip in enumerate(helps):
+            hitem = self._table.horizontalHeaderItem(c)
+            if hitem is not None:
+                hitem.setToolTip(tip)
         self._table.setRowCount(len(self._rows))
         for r, row in enumerate(self._rows):
             for c, key in enumerate(st.COLUMNS):

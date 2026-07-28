@@ -30,6 +30,10 @@ import h5py
 import numpy as np
 
 H5_DATASET = "entry/data/data"
+ARCHIVE_FRAMES = "frames"
+ARCHIVE_METADATA = "metadata"
+ARCHIVE_FORMAT = "xrd-app-unbinned-archive"
+ARCHIVE_VERSION = 1
 # Lozano-style per-frame stage positions: a small HDF5 (``Scan_NNNN.h5``) with an
 # ``entry/data/Position`` group holding already-reduced ``X_Position``/``Y_Position``
 # (µm) arrays — one value per frame. Distinct from the raw SOCKETSERVER stream
@@ -329,8 +333,43 @@ def has_raw_frames(xrd_dir: Union[str, Path], scan_number: int) -> bool:
     return len(scan_h5_files(xrd_dir, scan_number)) > 0
 
 
-def load_xrd_metadata(xrd_dir: Union[str, Path], scan_number: int = 203):
-    """List raw scan H5 files and build a flat frame index."""
+def archive_positions(archive: Union[str, Path]):
+    """Return embedded per-frame ``(x, y)`` arrays."""
+    with h5py.File(archive, "r") as f:
+        meta = f[ARCHIVE_METADATA]
+        return (np.asarray(meta["x"][()], dtype=np.float64),
+                np.asarray(meta["y"][()], dtype=np.float64))
+
+
+def archive_has_real_positions(archive: Union[str, Path]) -> bool:
+    try:
+        with h5py.File(archive, "r") as f:
+            return bool(f.attrs.get("positions_real", False))
+    except OSError:
+        return False
+
+
+def archive_metadata(archive: Union[str, Path]):
+    """Return ``(source_files, frame_map, n_frames)`` without reading pixels."""
+    with h5py.File(archive, "r") as f:
+        if f.attrs.get("format") != ARCHIVE_FORMAT or ARCHIVE_FRAMES not in f:
+            raise ValueError(f"Not an {ARCHIVE_FORMAT}: {archive}")
+        meta = f[ARCHIVE_METADATA]
+        source_files = [
+            s.decode("utf-8") if isinstance(s, bytes) else str(s)
+            for s in meta["source_files"][()]
+        ]
+        file_index = meta["source_file_index"][()]
+        local_index = meta["source_frame_index"][()]
+        frame_map = np.column_stack([file_index, local_index]).astype(int).tolist()
+        return source_files, frame_map, int(f[ARCHIVE_FRAMES].shape[0])
+
+
+def load_xrd_metadata(xrd_dir: Union[str, Path], scan_number: int = 203,
+                      archive: Optional[Union[str, Path]] = None):
+    """Build the acquisition frame index from an archive or loose raw files."""
+    if archive is not None and Path(archive).is_file():
+        return archive_metadata(archive)
     xrd_files = scan_h5_files(xrd_dir, scan_number)
     frame_map = []
     for fi, fp in enumerate(xrd_files):
@@ -793,6 +832,7 @@ def generate_grid_mapping(
     deskew: bool = True,
     deskew_method: str = "auto",
     log: Callable[[str], None] = print,
+    archive: Optional[Union[str, Path]] = None,
 ) -> dict:
     """Build the grid-mapping dict (and optionally write it to ``output``).
 
@@ -818,7 +858,8 @@ def generate_grid_mapping(
     recorded in the output JSON as ``coordinate_source``.
     """
     log(f"Loading scan metadata from {xrd_dir} ...")
-    xrd_files, frame_map, n_total = load_xrd_metadata(xrd_dir, scan_number)
+    xrd_files, frame_map, n_total = load_xrd_metadata(
+        xrd_dir, scan_number, archive=archive)
     log(f"  {n_total} frames across {len(xrd_files)} H5 files")
 
     # "auto" (the default): true-(X, Y) both-axes lattice at 1×1 — where the
@@ -828,10 +869,16 @@ def generate_grid_mapping(
     if deskew_method in (None, "auto"):
         deskew_method = "positions_xy" if bin_size == 1 else "faithful"
 
-    have_positions = (pos_csv is not None and Path(pos_csv).exists()
-                      and not is_recreated_csv(pos_csv))
+    have_position_file = (pos_csv is not None and Path(pos_csv).exists()
+                          and not is_recreated_csv(pos_csv))
+    have_archive_positions = bool(
+        archive and archive_has_real_positions(archive))
+    have_positions = have_position_file or have_archive_positions
     if have_positions and deskew:
-        frame_x, frame_y = load_positions_xy(pos_csv, n_total)
+        if have_position_file:
+            frame_x, frame_y = load_positions_xy(pos_csv, n_total)
+        else:
+            frame_x, frame_y = archive_positions(archive)
         if np.isfinite(frame_y).any():
             fpr = is_file_per_row(frame_map)[0]
             if deskew_method == "positions_xy":
@@ -869,7 +916,10 @@ def generate_grid_mapping(
         log(f"  Scan grid: {n_rows} rows x {n_cols} cols")
     elif have_positions:
         log("Computing serpentine scan grid from X positions (--rawgrid) ...")
-        frame_x = load_positions(pos_csv, n_total)
+        if have_position_file:
+            frame_x = load_positions(pos_csv, n_total)
+        else:
+            frame_x, _ = archive_positions(archive)
         grid_row, grid_col, n_rows, n_cols = build_scan_grid(frame_x, n_total)
         coordinate_source = "serpentine"
         log(f"  Scan grid: {n_rows} rows x {n_cols} cols")
@@ -941,10 +991,12 @@ def generate_grid_mapping(
 # ─────────────────────────────────────────────────────────────────────
 # Binning (port of prebuild_bins.py)
 # ─────────────────────────────────────────────────────────────────────
-def get_compression_kwargs(compression: str):
+def get_compression_kwargs(compression: str, bitshuffle: bool = False):
     if compression == "zstd":
         try:
             import hdf5plugin
+            if bitshuffle:
+                return dict(hdf5plugin.Bitshuffle(cname="zstd", clevel=3)), "bitshuffle+zstd3"
             return {**hdf5plugin.Zstd(clevel=3), "shuffle": True}, "zstd3+shuffle"
         except (ImportError, AttributeError):
             return {"compression": "gzip", "compression_opts": 4, "shuffle": True}, "gzip4+shuffle fallback"
@@ -962,12 +1014,178 @@ def get_compression_kwargs(compression: str):
         raise ValueError(f"Unknown compression: {compression}")
 
 
+def build_unbinned_archive(
+    xrd_dir: Union[str, Path],
+    output: Union[str, Path],
+    scan_number: int,
+    positions: Optional[Union[str, Path]] = None,
+    compression: str = "zstd",
+    log: Callable[[str], None] = print,
+) -> Path:
+    """Create a lossless, grid-neutral archive with one detector frame per chunk."""
+    xrd_files = scan_h5_files(xrd_dir, scan_number)
+    if not xrd_files:
+        raise FileNotFoundError(
+            f"No raw XRD files for scan {scan_number} in {xrd_dir}")
+
+    counts, shape, dtype = [], None, None
+    for fp in xrd_files:
+        with h5py.File(fp, "r") as f:
+            if H5_DATASET not in f:
+                raise KeyError(f"{fp}: no {H5_DATASET}")
+            ds = f[H5_DATASET]
+            if ds.ndim != 3:
+                raise ValueError(f"{fp}: expected 3-D detector data, got {ds.shape}")
+            current_shape = tuple(int(v) for v in ds.shape[1:])
+            if shape is None:
+                shape, dtype = current_shape, ds.dtype
+            elif current_shape != shape or ds.dtype != dtype:
+                raise ValueError(
+                    f"Inconsistent raw detector data in {fp}: "
+                    f"shape={current_shape}, dtype={ds.dtype}; expected {shape}, {dtype}")
+            counts.append(int(ds.shape[0]))
+
+    n_frames = sum(counts)
+    frame_x = frame_y = None
+    positions_real = False
+    if positions and Path(positions).exists():
+        frame_x, frame_y = load_positions_xy(positions, n_frames)
+        positions_real = not is_recreated_csv(positions)
+
+    output = Path(output)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    tmp = output.with_name(output.name + ".tmp")
+    if tmp.exists():
+        tmp.unlink()
+    comp_kwargs, compression_label = get_compression_kwargs(
+        compression, bitshuffle=True)
+    log(f"Archiving {n_frames} unbinned frames -> {output}")
+    log(f"  Chunks: 1 x {shape[0]} x {shape[1]}; compression: {compression_label}")
+
+    out = None
+    try:
+        out = h5py.File(tmp, "w")
+        out.attrs["format"] = ARCHIVE_FORMAT
+        out.attrs["format_version"] = ARCHIVE_VERSION
+        out.attrs["scan_number"] = int(scan_number)
+        out.attrs["n_frames"] = n_frames
+        out.attrs["detector_shape"] = shape
+        out.attrs["source_dtype"] = np.dtype(dtype).str
+        out.attrs["source_dataset"] = H5_DATASET
+        out.attrs["compression"] = compression_label
+        out.attrs["positions_real"] = positions_real
+        if positions:
+            out.attrs["positions_source"] = str(positions)
+        frames = out.create_dataset(
+            ARCHIVE_FRAMES, shape=(n_frames, *shape), dtype=dtype,
+            chunks=(1, *shape), **comp_kwargs)
+        meta = out.create_group(ARCHIVE_METADATA)
+        string_dtype = h5py.string_dtype(encoding="utf-8")
+        meta.create_dataset("source_files", data=[str(p) for p in xrd_files],
+                            dtype=string_dtype)
+        file_idx = np.repeat(np.arange(len(counts), dtype=np.int32), counts)
+        local_idx = np.concatenate(
+            [np.arange(n, dtype=np.int32) for n in counts])
+        meta.create_dataset("source_file_index", data=file_idx)
+        meta.create_dataset("source_frame_index", data=local_idx)
+        meta.create_dataset(
+            "x", data=(frame_x if frame_x is not None else
+                       np.full(n_frames, np.nan, dtype=np.float64)))
+        meta.create_dataset(
+            "y", data=(frame_y if frame_y is not None else
+                       np.full(n_frames, np.nan, dtype=np.float64)))
+
+        offset = 0
+        t0 = time.time()
+        for fi, (fp, count) in enumerate(zip(xrd_files, counts)):
+            with h5py.File(fp, "r") as src:
+                ds = src[H5_DATASET]
+                for j in range(count):
+                    frames[offset + j] = ds[j]
+            offset += count
+            elapsed = time.time() - t0
+            rate = offset / elapsed if elapsed else 0.0
+            eta = (n_frames - offset) / rate if rate else 0.0
+            log(f"  [{fi + 1}/{len(xrd_files)} files, {offset}/{n_frames} frames] "
+                f"{elapsed:.0f}s elapsed, ~{eta:.0f}s remaining")
+        out.flush()
+        out.close()
+        out = None
+        os.replace(tmp, output)
+    finally:
+        if out is not None:
+            out.close()
+        if tmp.exists():
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+
+    size_mb = output.stat().st_size / 1024 / 1024
+    log(f"Done! {output}: {size_mb:.0f} MB ({size_mb / 1024:.1f} GB)")
+    return output
+
+
+class FrameStore:
+    """Acquisition-indexed detector frames from an archive or loose raw files."""
+
+    def __init__(self, archive=None, xrd_files=None, frame_map=None):
+        self._archive = None
+        self._handles = OrderedDict()
+        self._xrd_files = list(xrd_files or [])
+        self._frame_map = list(frame_map or [])
+        if archive is not None and Path(archive).is_file():
+            try:
+                import hdf5plugin  # noqa: F401
+            except ImportError:
+                pass
+            self._archive = h5py.File(archive, "r")
+            if self._archive.attrs.get("format") != ARCHIVE_FORMAT:
+                self._archive.close()
+                self._archive = None
+                raise ValueError(f"Not an {ARCHIVE_FORMAT}: {archive}")
+            self._frames = self._archive[ARCHIVE_FRAMES]
+
+    @property
+    def is_archive(self):
+        return self._archive is not None
+
+    def _dataset(self, global_index):
+        if self._archive is not None:
+            return self._frames, int(global_index)
+        fi, local = self._frame_map[int(global_index)]
+        if fi not in self._handles:
+            if len(self._handles) >= 32:
+                _, old = self._handles.popitem(last=False)
+                old.close()
+            self._handles[fi] = h5py.File(self._xrd_files[fi], "r")
+        else:
+            self._handles.move_to_end(fi)
+        return self._handles[fi][H5_DATASET], int(local)
+
+    def frame(self, global_index):
+        ds, index = self._dataset(global_index)
+        return ds[index]
+
+    def region(self, global_index, y0, y1, x0, x1):
+        ds, index = self._dataset(global_index)
+        return ds[index, max(0, y0):y1, max(0, x0):x1]
+
+    def close(self):
+        if self._archive is not None:
+            self._archive.close()
+        for handle in self._handles.values():
+            handle.close()
+        self._handles.clear()
+
+
 def build_bins(
     grid_mapping: Union[str, Path, dict],
     output: Union[str, Path],
     bin_size: Optional[int] = None,
     compression: str = "zstd",
     log: Callable[[str], None] = print,
+    archive: Optional[Union[str, Path]] = None,
 ) -> Path:
     """Sum each bin's raw frames into a single binned HDF5 file.
 
@@ -995,36 +1213,24 @@ def build_bins(
     # (discarded) .tmp file corrupt instead of the real output, so any previous
     # good bins file survives and the GUI never reads a half-written file.
     tmp = output.with_name(output.name + ".tmp")
-    max_open_files = 32
-    h5_handles: OrderedDict[int, h5py.File] = OrderedDict()
+    frame_store = FrameStore(archive=archive, xrd_files=xrd_files,
+                             frame_map=frame_map)
     out = h5py.File(str(tmp), "w")
     out.attrs["bin_size"] = bin_size
     out.attrs["n_bin_rows"] = gm["n_bin_rows"]
     out.attrs["n_bin_cols"] = gm["n_bin_cols"]
     out.attrs["n_bins"] = n_bins
+    if frame_store.is_archive:
+        out.attrs["pixel_source"] = "xrd_unbinned_archive.h5"
     out.attrs["detector_shape"] = list(DETECTOR_SHAPE)
 
     t0 = time.time()
     try:
         for i, (bin_key, frame_indices) in enumerate(sorted(bins.items())):
-            by_file: dict = {}
-            for gi in frame_indices:
-                fi, fj = frame_map[gi]
-                by_file.setdefault(fi, []).append(fj)
-
             summed = None
-            for fi, frame_list in by_file.items():
-                if fi not in h5_handles:
-                    if len(h5_handles) >= max_open_files:
-                        _, old_fh = h5_handles.popitem(last=False)
-                        old_fh.close()
-                    h5_handles[fi] = h5py.File(xrd_files[fi], "r")
-                else:
-                    h5_handles.move_to_end(fi)
-                ds = h5_handles[fi][h5_dataset]
-                for fj in frame_list:
-                    frame = ds[fj].astype(np.float64)
-                    summed = frame if summed is None else summed + frame
+            for gi in frame_indices:
+                frame = frame_store.frame(gi).astype(np.float64)
+                summed = frame if summed is None else summed + frame
 
             if summed is not None:
                 summed[summed < 0] = 0
@@ -1041,8 +1247,7 @@ def build_bins(
         # Atomic publish: rename the completed temp file onto the real path.
         os.replace(tmp, output)
     finally:
-        for fh in h5_handles.values():
-            fh.close()
+        frame_store.close()
         if out is not None:
             # Build was interrupted (ctrl+C, exception): drop the partial file.
             out.close()
@@ -1190,6 +1395,69 @@ class _H5Source(BinImageSource):
             pass
 
 
+class _ArchiveSource(BinImageSource):
+    """Map spatial cells onto acquisition frames in the unbinned archive."""
+
+    is_raw = False
+    is_archive = True
+    source_kind = "archive"
+
+    def __init__(self, archive, grid_mapping):
+        gm = load_grid_mapping(grid_mapping)
+        self._bins = gm["bins"]
+        self._store = FrameStore(archive=archive)
+        self._cache = {}
+
+    def keys(self) -> list:
+        return sorted(self._bins.keys(), key=_bin_sort_key)
+
+    def __contains__(self, key) -> bool:
+        return key in self._bins
+
+    def _sum(self, key, region=None):
+        if key not in self._bins:
+            return None
+        summed = None
+        for gi in self._bins[key]:
+            if region is None:
+                frame = self._store.frame(gi)
+            else:
+                frame = self._store.region(gi, *region)
+            frame = frame.astype(np.float64)
+            summed = frame if summed is None else summed + frame
+        if summed is not None:
+            summed[summed < 0] = 0
+            summed[summed > 1e9] = 0
+        return summed
+
+    def image(self, key: str) -> Optional[np.ndarray]:
+        if key in self._cache:
+            return self._cache[key]
+        image = self._sum(key)
+        if len(self._cache) < 64 and image is not None:
+            self._cache[key] = image
+        return image
+
+    def region(self, key, y0, y1, x0, x1):
+        return self._sum(key, (y0, y1, x0, x1))
+
+    def sum_all(self, max_bins=None, progress=None) -> np.ndarray:
+        keys = self.keys()
+        if max_bins:
+            keys = keys[:max_bins]
+        acc = None
+        for i, key in enumerate(keys):
+            image = self.image(key)
+            if image is not None:
+                acc = image if acc is None else acc + image
+            if progress is not None:
+                progress(i + 1, len(keys))
+        return acc if acc is not None else np.zeros((1, 1))
+
+    def close(self):
+        self._store.close()
+
+
 class _RawSource(BinImageSource):
     """Bin raw frames on demand — used when no binned h5 exists.
 
@@ -1307,6 +1575,16 @@ def open_bin_source(dm, bin_size, scan=None, n_cols=None, grid_mapping=None,
     catalog loads its own per-territory frames rather than the plain grid's.
     """
     h5 = dm.bins_h5(bin_size, scan=scan, variant=variant)
+    gm = grid_mapping or dm.grid_mapping(bin_size=bin_size, scan=scan,
+                                         variant=variant)
+    archive = dm.unbinned_archive_h5(scan=scan)
+    # The ordinary 1x1 bins file may contain collision sums and float conversion.
+    # Prefer the lossless archive plus mapping there; explicit variants (notably
+    # territory) and coarser prebuilt bins retain their exact-file precedence.
+    if bin_size == 1 and not variant and archive.exists() and gm and Path(gm).exists():
+        return _ArchiveSource(archive, gm)
     if h5 and os.path.exists(h5):
         return _H5Source(h5)
-    return _RawSource(dm, bin_size, scan=scan, n_cols=n_cols, grid_mapping=grid_mapping)
+    if archive.exists() and gm and Path(gm).exists():
+        return _ArchiveSource(archive, gm)
+    return _RawSource(dm, bin_size, scan=scan, n_cols=n_cols, grid_mapping=gm)

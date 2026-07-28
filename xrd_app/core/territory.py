@@ -39,24 +39,27 @@ from . import io
 # Neighbor graph over true (X, Y) frame positions
 # ─────────────────────────────────────────────────────────────────────
 def _delaunay_adjacency(points: np.ndarray) -> list:
-    """Frame adjacency (``list[set[int]]``) from a Delaunay triangulation.
+    """Local frame adjacency from a distance-pruned Delaunay triangulation.
 
-    Falls back to a kNN graph if the triangulation is degenerate
-    (collinear / duplicate positions), so a single-row or pathological scan
-    still produces a usable neighbor graph.
+    Delaunay fills the convex hull, so an unfiltered graph bridges across concave
+    scan boundaries (for example, joining opposite ends of a bowtie raster).
+    Keep only edges within three typical frame spacings. Falls back to a kNN
+    graph if the triangulation is degenerate (collinear / duplicate positions).
     """
     n = len(points)
     adj = [set() for _ in range(n)]
     try:
         from scipy.spatial import Delaunay
         tri = Delaunay(points)
+        max_edge = 3.0 * _median_step(points)
         for simplex in tri.simplices:
             m = len(simplex)
             for i in range(m):
                 for j in range(i + 1, m):
                     a, b = int(simplex[i]), int(simplex[j])
-                    adj[a].add(b)
-                    adj[b].add(a)
+                    if np.linalg.norm(points[a] - points[b]) <= max_edge:
+                        adj[a].add(b)
+                        adj[b].add(a)
         if any(adj):
             return adj
     except Exception:
@@ -155,6 +158,48 @@ def _territory_neighbors(territory_of: np.ndarray, adj: list, n_terr: int) -> li
     return nbrs
 
 
+def grow_peak_feature(peaks_by_cell: dict, neighbors: dict, seed_cell: str,
+                      seed_peak: dict, link_tolerance: float = 5.0,
+                      anchor: str = "frontier", allowed_cells=None) -> dict:
+    """Grow one feature through adjacent cells using detector-peak continuity.
+
+    ``frontier`` compares each candidate with the accepted peak in the adjoining
+    cell, allowing a Bragg peak to drift smoothly across real space. ``seed``
+    reproduces the old fixed-center behavior for controlled comparisons.
+    Returns ``{cell_key: peak}``, keeping the strongest matching peak per cell.
+    """
+    if anchor not in {"frontier", "seed"}:
+        raise ValueError("anchor must be 'frontier' or 'seed'")
+
+    accepted = {seed_cell: seed_peak}
+    queue = [seed_cell]
+    tol2 = float(link_tolerance) ** 2
+    reflection = seed_peak.get("label")
+
+    while queue:
+        cell = queue.pop(0)
+        reference = accepted[cell] if anchor == "frontier" else seed_peak
+        for neighbor in neighbors.get(cell, []):
+            if neighbor in accepted:
+                continue
+            if allowed_cells is not None and neighbor not in allowed_cells:
+                continue
+            matches = []
+            for peak in peaks_by_cell.get(neighbor, []):
+                if peak.get("label") != reflection:
+                    continue
+                d2 = ((float(peak["x"]) - float(reference["x"])) ** 2 +
+                      (float(peak["y"]) - float(reference["y"])) ** 2)
+                if d2 <= tol2:
+                    matches.append(peak)
+            if matches:
+                accepted[neighbor] = max(
+                    matches, key=lambda p: float(p.get("snr", 0.0)))
+                queue.append(neighbor)
+
+    return accepted
+
+
 # ─────────────────────────────────────────────────────────────────────
 # Per-territory geometry (to-scale footprint)
 # ─────────────────────────────────────────────────────────────────────
@@ -195,6 +240,7 @@ def build_territory_mapping(
     scan_number: int = 203,
     output: Optional[Union[str, Path]] = None,
     log: Callable[[str], None] = print,
+    archive: Optional[Union[str, Path]] = None,
 ) -> dict:
     """Build (and optionally write) the territorial grid-mapping dict.
 
@@ -204,20 +250,26 @@ def build_territory_mapping(
     "truth" is never built on the very skew it is meant to measure.
     """
     log(f"Loading scan metadata from {xrd_dir} ...")
-    xrd_files, frame_map, n_total = io.load_xrd_metadata(xrd_dir, scan_number)
+    xrd_files, frame_map, n_total = io.load_xrd_metadata(
+        xrd_dir, scan_number, archive=archive)
     log(f"  {n_total} frames across {len(xrd_files)} H5 files")
 
-    if pos_csv is None or not Path(pos_csv).exists():
+    have_position_file = pos_csv is not None and Path(pos_csv).exists()
+    have_archive_positions = bool(
+        archive and io.archive_has_real_positions(archive))
+    if not have_position_file and not have_archive_positions:
         raise FileNotFoundError(
-            f"Territorial binning needs a real position CSV (got {pos_csv!r}). "
-            "It bins by true (X, Y) to be skew-free; without positions there is "
-            "no skew-free truth to build.")
-    if io.is_recreated_csv(pos_csv):
+            f"Territorial binning needs real positions (got {pos_csv!r}, and the "
+            "unbinned archive has none).")
+    if have_position_file and io.is_recreated_csv(pos_csv):
         raise ValueError(
             f"{pos_csv} is a recreated CSV (synthetic lattice, not true "
             "positions). Territorial binning needs real stage (X, Y) positions.")
 
-    frame_x, frame_y = io.load_positions_xy(pos_csv, n_total)
+    if have_position_file:
+        frame_x, frame_y = io.load_positions_xy(pos_csv, n_total)
+    else:
+        frame_x, frame_y = io.archive_positions(archive)
     if not np.isfinite(frame_y).any():
         raise ValueError(
             f"{pos_csv} has no Y_Position column. Territorial binning needs "
@@ -274,7 +326,8 @@ def build_territory_mapping(
         "coordinate_source": "territory_xy",
         # Territorial binning always requires a real (X, Y) CSV (enforced above),
         # so this mapping is real-positions by construction — `bin` accepts it.
-        "positions_csv": str(pos_csv),
+        "positions_csv": str(pos_csv) if have_position_file else None,
+        "positions_archive": str(archive) if have_archive_positions else None,
         "positions_real": True,
         "target_size": target_size,
         "step": step,

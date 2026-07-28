@@ -310,6 +310,7 @@ def status(root, bin_size, scan):
     entries = [
         ("scans.json", dm.scans_registry_path()),
         ("raw_scan_dir", dm.raw_scan_dir()),
+        ("unbinned_archive", dm.unbinned_archive_h5()),
         ("tth_map", dm.tth_map()),
         ("reflections", dm.reflections()),
         ("grid_mapping", dm.grid_mapping(bin_size=bin_size)),
@@ -659,15 +660,16 @@ def grid(bin_size, scan, shape, xrd_dir, positions, rawgrid, deskew_method, vari
     pos = Path(positions) if positions else dm.position_csv()
     out = Path(output) if output else dm.grid_mapping(bin_size=bin_size, variant=variant)
     out.parent.mkdir(parents=True, exist_ok=True)
-    _require(xdir, "raw frames directory")
-
-    if not io.has_raw_frames(xdir, scan_no):
-        click.echo(f"Error: no raw frame files (scan_{scan_no:04d}_*.h5) in {xdir}.")
-        click.echo("  This scan looks incomplete (no XRD frames). Skip it or check the raw data.")
+    archive = dm.unbinned_archive_h5(scan=scan)
+    if not archive.exists() and not io.has_raw_frames(xdir, scan_no):
+        click.echo(f"Error: no unbinned archive ({archive}) or raw frame files "
+                   f"(scan_{scan_no:04d}_*.h5) in {xdir}.")
+        click.echo("  Build the archive while raw data is connected, or check the scan source.")
         raise SystemExit(1)
 
     n_cols = _parse_shape_cols(shape)
-    pos_real = Path(pos).exists() and not io.is_recreated_csv(pos)
+    pos_real = ((Path(pos).exists() and not io.is_recreated_csv(pos)) or
+                (archive.exists() and io.archive_has_real_positions(archive)))
 
     # The real coordinate CSV is REQUIRED. When we don't have one (and weren't
     # asked to synthesize a raster shape), build it from the REAL stage positions
@@ -701,7 +703,7 @@ def grid(bin_size, scan, shape, xrd_dir, positions, rawgrid, deskew_method, vari
     io.generate_grid_mapping(xdir, pos if pos_real else None, bin_size,
                              scan_number=scan_no, output=out, n_cols=n_cols,
                              deskew=not rawgrid, deskew_method=deskew_method,
-                             log=click.echo)
+                             log=click.echo, archive=archive if archive.exists() else None)
     click.echo(f"Wrote grid_mapping -> {out}")
 
 
@@ -741,16 +743,17 @@ def territory_grid(target_size, scan, xrd_dir, positions, variant, output, root)
     pos = Path(positions) if positions else dm.position_csv()
     out = Path(output) if output else dm.grid_mapping(bin_size=1, variant=variant)
     out.parent.mkdir(parents=True, exist_ok=True)
-    _require(xdir, "raw frames directory")
-
-    if not io.has_raw_frames(xdir, scan_no):
-        click.echo(f"Error: no raw frame files (scan_{scan_no:04d}_*.h5) in {xdir}.")
+    archive = dm.unbinned_archive_h5(scan=scan)
+    if not archive.exists() and not io.has_raw_frames(xdir, scan_no):
+        click.echo(f"Error: no unbinned archive ({archive}) or raw frame files "
+                   f"(scan_{scan_no:04d}_*.h5) in {xdir}.")
         raise SystemExit(1)
 
     try:
         territory.build_territory_mapping(
             xdir, pos, target_size=target_size, scan_number=scan_no,
-            output=out, log=click.echo)
+            output=out, log=click.echo,
+            archive=archive if archive.exists() else None)
     except (FileNotFoundError, ValueError) as e:
         click.echo(f"Error: {e}")
         raise SystemExit(1)
@@ -781,6 +784,7 @@ def territory_build(ctx, target_size, scan, algorithm, snr, compression, root):
     dm = DataManager(root, scan=scan)
     # The peak set name shapes will pick up (same rule peaks/batch use).
     algo = algorithm or Path(dm.detector_script(algorithm, bin_size=1)).stem
+    ctx.invoke(archive_unbinned, scan=scan, compression=compression, root=root)
     ctx.invoke(territory_grid, target_size=target_size, scan=scan, root=root)
     ctx.invoke(bin, bin_size=1, scan=scan, variant='territory',
                compression=compression, root=root)
@@ -872,6 +876,39 @@ def create_positions(scan, socket_dir, method, theta, reduction, from_h5, output
 
 
 # ─────────────────────────────────────────────────────────────────────
+# archive-unbinned — lossless acquisition-order detector archive
+# ─────────────────────────────────────────────────────────────────────
+@main.command(name='archive-unbinned')
+@click.option('--scan', default=None, help='Scan number/name (defaults to config scan)')
+@click.option('--xrd-dir', help='Directory of raw per-frame H5 files (defaults to resolved)')
+@click.option('--positions', help='Per-frame position CSV/H5 embedded as x/y metadata')
+@click.option('--output', help='Output HDF5 (default: Binned/<scan>/xrd_unbinned_archive.h5)')
+@click.option('--compression', type=click.Choice(['zstd', 'gzip', 'lz4', 'none']), default='zstd')
+@click.option('--force', is_flag=True, help='Replace an existing archive')
+@click.option('--root', default='.', help='Project root directory')
+def archive_unbinned(scan, xrd_dir, positions, output, compression, force, root):
+    """Archive every detector frame losslessly, once, independent of any grid."""
+    from .core import io
+    dm = DataManager(root, scan=scan)
+    scan_no = _require_scan_no(dm)
+    xdir = Path(xrd_dir) if xrd_dir else dm.xrd_frames_dir(scan=scan)
+    pos = Path(positions) if positions else dm.position_csv(scan=scan)
+    out = Path(output) if output else dm.unbinned_archive_h5(scan=scan)
+    if out.exists() and not force:
+        try:
+            _, _, n_frames = io.archive_metadata(out)
+            click.echo(f"Unbinned archive exists ({n_frames} frames), skipping: {out}")
+            return
+        except (OSError, KeyError, ValueError):
+            raise click.ClickException(
+                f"Existing archive is invalid: {out}. Re-run with --force to replace it.")
+    io.build_unbinned_archive(
+        xdir, out, scan_no, positions=pos if pos.exists() else None,
+        compression=compression, log=click.echo)
+    click.echo(f"Wrote unbinned archive -> {out}")
+
+
+# ─────────────────────────────────────────────────────────────────────
 # bin — pre-build the binned HDF5
 # ─────────────────────────────────────────────────────────────────────
 @main.command()
@@ -908,7 +945,9 @@ def bin(bin_size, scan, grid_mapping, variant, output, compression, root):
                    "positions.csv / SOCKETSERVER stream), then re-run bin.")
         raise SystemExit(1)
 
-    io.build_bins(gm_data, out, bin_size=bin_size, compression=compression, log=click.echo)
+    archive = dm.unbinned_archive_h5(scan=scan)
+    io.build_bins(gm_data, out, bin_size=bin_size, compression=compression,
+                  log=click.echo, archive=archive if archive.exists() else None)
     click.echo(f"Wrote bins -> {out}")
 
 
@@ -1121,8 +1160,10 @@ def batch(ctx, scans, all_scans, bin_size, algorithm, shape_algo, snr, grid_shap
         dm = DataManager(root, scan=name)
         # Skip incomplete scans (no XRD/ frame files) rather than crashing — many
         # Scan_NNNN/ dirs on the beamline mount have no frames yet.
-        if not io.has_raw_frames(dm.xrd_frames_dir(scan=name), dm.scan_number(name) or 0):
-            click.echo("  no raw frames (incomplete scan) — skipping\n")
+        if (not dm.unbinned_archive_h5(scan=name).exists() and
+                not io.has_raw_frames(dm.xrd_frames_dir(scan=name),
+                                      dm.scan_number(name) or 0)):
+            click.echo("  no unbinned archive or raw frames (incomplete scan) — skipping\n")
             skipped.append(name)
             continue
         algo = algorithm or Path(dm.detector_script(algorithm, bin_size=bin_size)).stem
@@ -1130,6 +1171,7 @@ def batch(ctx, scans, all_scans, bin_size, algorithm, shape_algo, snr, grid_shap
             click.echo("  shapes exist — skipping (--skip-existing)\n")
             continue
         try:
+            ctx.invoke(archive_unbinned, scan=name, compression=compression, root=root)
             ctx.invoke(grid, bin_size=bin_size, scan=name, shape=grid_shape,
                        rawgrid=rawgrid, root=root)
             ctx.invoke(bin, bin_size=bin_size, scan=name, compression=compression, root=root)
@@ -1193,7 +1235,8 @@ def run_pipeline(ctx, bin_size, scan, algorithm, shape_algo, snr, root):
 @click.option('--root', default='.', help='Project root directory')
 @click.pass_context
 def make_bins(ctx, bin_size, scan, grid_shape, rawgrid, compression, root):
-    """Build the binned HDF5 for one scan: grid mapping, then bins."""
+    """Archive raw frames once, then build the requested grid and bins."""
+    ctx.invoke(archive_unbinned, scan=scan, compression=compression, root=root)
     ctx.invoke(grid, bin_size=bin_size, scan=scan, shape=grid_shape,
                rawgrid=rawgrid, root=root)
     ctx.invoke(bin, bin_size=bin_size, scan=scan, compression=compression, root=root)
@@ -1684,16 +1727,19 @@ def _ensure_1x1_grid_mapping(dm, scan, source_bin_size, log=click.echo):
     try:
         scan_no = _require_scan_no(dm)
         xdir = dm.xrd_frames_dir(scan=scan)
-        if not io.has_raw_frames(xdir, scan_no):
-            log("[hd-device-map] no 1×1 grid mapping and no raw frames "
-                f"({xdir}) to build one — real-position scatter unavailable.")
+        archive = dm.unbinned_archive_h5(scan=scan)
+        if not archive.exists() and not io.has_raw_frames(xdir, scan_no):
+            log("[hd-device-map] no 1×1 grid mapping, unbinned archive, or raw "
+                f"frames ({xdir}) — real-position scatter unavailable.")
             return False
 
         # Real positions are required for the (x, y) layer. Build them from the
         # SOCKETSERVER interferometry stream when there's no real CSV (same
         # source the 'grid' command uses); if neither exists, skip gracefully.
         pos = dm.position_csv(scan=scan)
-        pos_real = Path(pos).exists() and not io.is_recreated_csv(pos)
+        pos_real = ((Path(pos).exists() and not io.is_recreated_csv(pos)) or
+                    (archive.exists() and io.archive_has_real_positions(archive)))
+
         if not pos_real:
             sdir = dm.socketserver_dir(scan=scan)
             if P.has_socketserver(sdir, scan_no):
@@ -1719,8 +1765,10 @@ def _ensure_1x1_grid_mapping(dm, scan, source_bin_size, log=click.echo):
         log(f"[hd-device-map] no 1×1 grid mapping — building one ({deskew}, to "
             f"match the {source_bin_size}×{source_bin_size} catalog) for real "
             "positions …")
-        io.generate_grid_mapping(xdir, pos, 1, scan_number=scan_no,
-                                 output=gm_path, deskew_method=deskew, log=log)
+        io.generate_grid_mapping(
+            xdir, pos, 1, scan_number=scan_no, output=gm_path,
+            deskew_method=deskew, log=log,
+            archive=archive if archive.exists() else None)
         return True
     except Exception as e:  # never let grid-building abort the HD map
         log(f"[hd-device-map] could not auto-build 1×1 grid mapping ({e}); "
@@ -1800,7 +1848,9 @@ def hd_device_map(bin_size, scan, catalog, win, max_cells, out_name, root):
         pos_csv = gm.get("positions_csv")
         if not pos_csv or not Path(pos_csv).exists():
             pos_csv = dm.position_csv(scan=scan)
-        cell_xy = hd_map.build_cell_xy(gm, pos_csv) if gm.get("bins") else {}
+        cell_xy = hd_map.build_cell_xy(
+            gm, pos_csv, archive=dm.unbinned_archive_h5(scan=scan)
+        ) if gm.get("bins") else {}
 
         hd_features = hd_map.sample_hd_intensity(
             features, source, bin_size, win=win, cell_xy=cell_xy,

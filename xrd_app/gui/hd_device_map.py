@@ -1119,7 +1119,8 @@ def _load_trajectory(dm, scan):
         pos_csv = gm.get("positions_csv")
         if not pos_csv or not Path(pos_csv).exists():
             pos_csv = dm.position_csv(scan=scan)
-        return hd_core.scan_trajectory(gm, pos_csv)
+        return hd_core.scan_trajectory(
+            gm, pos_csv, archive=dm.unbinned_archive_h5(scan=scan))
     except Exception:
         return {"grid": [], "xy": None}
 

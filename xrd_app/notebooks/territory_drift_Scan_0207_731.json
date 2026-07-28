@@ -1,0 +1,41 @@
+{
+  "scan": "Scan_0207",
+  "feature_id": 731,
+  "reflection": "(001)",
+  "link_tolerance": 5.0,
+  "reference_frames": 4053,
+  "methods": {
+    "regular_old": {
+      "cells": 415,
+      "frames": 446,
+      "precision": 1.0,
+      "recall": 0.11004194423883543,
+      "detector_dx": 3.0,
+      "detector_dy": 5.0
+    },
+    "regular_new": {
+      "cells": 3216,
+      "frames": 3531,
+      "precision": 0.9872557349192863,
+      "recall": 0.8601036269430051,
+      "detector_dx": 7.0,
+      "detector_dy": 17.0
+    },
+    "territory_old": {
+      "cells": 301,
+      "frames": 301,
+      "precision": 1.0,
+      "recall": 0.07426597582037997,
+      "detector_dx": 2.0,
+      "detector_dy": 4.0
+    },
+    "territory_new": {
+      "cells": 4053,
+      "frames": 4053,
+      "precision": 1.0,
+      "recall": 1.0,
+      "detector_dx": 7.0,
+      "detector_dy": 15.0
+    }
+  }
+}
