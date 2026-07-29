@@ -1378,7 +1378,9 @@ class FeatureViewer(QMainWindow):
         self.expand_cb.stateChanged.connect(self._on_expand_changed)
         cb_bar.addWidget(self.expand_cb)
         self.fill_cb = QCheckBox("Fill surface")
-        self.fill_cb.setToolTip("Interpolate between bins and render\nas a continuous surface")
+        self.fill_cb.setToolTip(
+            "Expand sampled bins to their nearest neighbors and render\n"
+            "the heatmap and 3D view as a continuous surface")
         self.fill_cb.stateChanged.connect(self._on_fill_changed)
         cb_bar.addWidget(self.fill_cb)
         self.heat_bg_cb = QCheckBox("White bg")
@@ -3051,6 +3053,34 @@ class FeatureViewer(QMainWindow):
             if best > 0:
                 Z[ri, ci] = max(Z[ri, ci], best)
         z_max = float(Z.max()) if Z.max() > 0 else 1.0
+        if self._fill_surface and np.count_nonzero(Z) >= 2:
+            import scipy.ndimage as _ndi
+            mask = Z > 0
+            indices = _ndi.distance_transform_edt(
+                ~mask, return_distances=False, return_indices=True)
+            filled = Z[tuple(indices)]
+            points = np.column_stack(np.nonzero(mask))
+            support = None
+            if len(points) >= 3:
+                try:
+                    from scipy.spatial import Delaunay
+                    rr, cc = np.indices(mask.shape)
+                    pixels = np.column_stack([rr.ravel(), cc.ravel()])
+                    support = (Delaunay(points).find_simplex(pixels) >= 0).reshape(mask.shape)
+                except Exception:
+                    pass
+            if support is None:
+                # Connect line-like samples before widening them; Delaunay has no
+                # area for a collinear feature but it should still look continuous.
+                support = mask.copy()
+                axis = np.ptp(points, axis=0).argmax()
+                ordered = points[np.argsort(points[:, axis])]
+                for start, end in zip(ordered[:-1], ordered[1:]):
+                    count = int(np.max(np.abs(end - start))) + 1
+                    line = np.rint(np.linspace(start, end, count)).astype(int)
+                    support[line[:, 0], line[:, 1]] = True
+                support = _ndi.binary_dilation(support, iterations=1)
+            Z = np.where(support, filled, Z)
         return Z, z_max, (r_lo, r_hi, c_lo, c_hi)
 
     def _region_sub_feats(self, feat, bounds):
@@ -3645,6 +3675,7 @@ class FeatureViewer(QMainWindow):
         self._fill_surface = bool(state)
         feat = self._current_feature()
         if feat:
+            self._render_heatmap(feat)
             self._render_isometric(feat)
 
     def _on_heat_bg_toggled(self, state):

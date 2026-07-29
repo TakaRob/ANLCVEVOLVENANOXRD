@@ -132,7 +132,6 @@ class HDDeviceMapWindow(QMainWindow):
         self.show_points = False
         self.show_trajectory = False
         self.dot_size = 6           # scatter point diameter (screen px)
-        self.reflect_xy = True      # reflect across x=y to match the binned images
         self._isolate = True
         self._locked_idx = None
         self._highlighted_idx = None
@@ -284,13 +283,6 @@ class HDDeviceMapWindow(QMainWindow):
         dot_row.addWidget(self.dot_spin)
         dot_row.addStretch()
         dl.addLayout(dot_row)
-        self.reflect_cb = QCheckBox("Reflect X↔Y (match binned images)")
-        self.reflect_cb.setToolTip(
-            "Reflect the map across the x=y diagonal so its orientation matches "
-            "the binned device images.")
-        self.reflect_cb.setChecked(self.reflect_xy)
-        self.reflect_cb.toggled.connect(self._on_reflect_toggle)
-        dl.addWidget(self.reflect_cb)
         rl.addWidget(disp)
 
         # Layers
@@ -469,10 +461,10 @@ class HDDeviceMapWindow(QMainWindow):
             self._show_feature_info(self._locked_idx)
 
     def _redraw_grid(self, visible, chi_range, isolate):
-        # Reflect across x=y (swap row/col) to match the binned device images.
-        flip = self.reflect_xy
-        self.plot.setLabel("bottom", "Row (1×1)" if flip else "Col (1×1)")
-        self.plot.setLabel("left", "Col (1×1)" if flip else "Row (1×1)")
+        # HD profiles are keyed (row, col); transpose to the Device View's
+        # canonical plot orientation so both tabs display the same physical axes.
+        self.plot.setLabel("bottom", "Row (1×1)")
+        self.plot.setLabel("left", "Col (1×1)")
         self.plot.invertY(True)
         cmap = dv._get_cmap("viridis")
         if self.metric == "none":
@@ -489,8 +481,7 @@ class HDDeviceMapWindow(QMainWindow):
                 grid = self._combined_grid(visible, chi_range)
             vmin, vmax = self._levels(grid)
             rgba = dv._scalar_to_rgba(grid, vmin, vmax, cmap)
-            if flip:
-                rgba = np.ascontiguousarray(rgba.transpose(1, 0, 2))
+            rgba = np.ascontiguousarray(rgba.transpose(1, 0, 2))
             self.img_item.setVisible(True)
             self.img_item.setImage(rgba, autoLevels=False)
             self._update_colorbar(cmap, vmin, vmax)
@@ -507,7 +498,7 @@ class HDDeviceMapWindow(QMainWindow):
                     if m is not None:
                         merged |= m
             if merged.any():
-                data = merged.T if flip else merged
+                data = merged.T
                 col = QColor(self.ref_colors[ref])
                 iso = pg.IsocurveItem(data=data.astype(float), level=0.5,
                                       pen=pg.mkPen(col, width=1.5))
@@ -519,9 +510,8 @@ class HDDeviceMapWindow(QMainWindow):
                               only_idx=self._locked_idx if isolate else None)
 
     def _redraw_xy(self, visible, chi_range, isolate):
-        flip = self.reflect_xy
-        self.plot.setLabel("bottom", "Stage Y (µm)" if flip else "Stage X (µm)")
-        self.plot.setLabel("left", "Stage X (µm)" if flip else "Stage Y (µm)")
+        self.plot.setLabel("bottom", "Stage Y (µm)")
+        self.plot.setLabel("left", "Stage X (µm)")
         self.plot.invertY(False)
         self._update_colorbar(None, None, None)
         cmap = dv._get_cmap("viridis")
@@ -687,8 +677,7 @@ class HDDeviceMapWindow(QMainWindow):
         if rgba is None:
             self.xrf_img.setVisible(False)
             return
-        if self.reflect_xy:   # match the flipped 1×1 heatmap
-            rgba = np.ascontiguousarray(rgba.transpose(1, 0, 2))
+        rgba = np.ascontiguousarray(rgba.transpose(1, 0, 2))
         self.xrf_img.setImage(rgba, autoLevels=False)
         self.xrf_img.setVisible(True)
 
@@ -752,7 +741,7 @@ class HDDeviceMapWindow(QMainWindow):
         if not pts:
             return
         arr = np.asarray(pts, dtype=float)
-        px, py = (arr[:, 1], arr[:, 0]) if self.reflect_xy else (arr[:, 0], arr[:, 1])
+        px, py = arr[:, 1], arr[:, 0]
         pen = pg.mkPen(QColor(60, 60, 60, 150), width=0.8, style=Qt.DotLine)
         line = pg.PlotDataItem(px, py, pen=pen, antialias=True, connect="all")
         line.setZValue(8)
@@ -773,11 +762,6 @@ class HDDeviceMapWindow(QMainWindow):
         self.chi_label.setText(f"χ: {lo}° to {hi}°")   # label updates immediately
         self._draw_chi_histogram()                     # selection band moves live
         self._schedule_redraw()                        # heavy redraw coalesced
-
-    def _on_reflect_toggle(self, checked):
-        self.reflect_xy = bool(checked)
-        self._redraw()
-        self.plot.autoRange()
 
     def _draw_chi_histogram(self):
         """Feature-count distribution over χ, with the selected band highlighted
@@ -806,8 +790,8 @@ class HDDeviceMapWindow(QMainWindow):
                 pos=v, angle=90, pen=pg.mkPen("r", width=1.2, style=Qt.DashLine)))
 
     def _pxy(self, x, y):
-        """Map plot coordinates through the x=y reflection when enabled."""
-        return (y, x) if self.reflect_xy else (x, y)
+        """Map data coordinates to the canonical Device View orientation."""
+        return y, x
 
     def _on_catalog_changed(self):
         path = self.cat_combo.currentData()
@@ -899,7 +883,7 @@ class HDDeviceMapWindow(QMainWindow):
     def get_view_state(self):
         return {"metric": self.metric, "display": self.display,
                 "isolate": self._isolate, "trajectory": self.show_trajectory,
-                "dot_size": self.dot_size, "reflect_xy": self.reflect_xy,
+                "dot_size": self.dot_size,
                 "xrf_on": self.xrf_on, "xrf_mode": self.xrf_mode,
                 "xrf_normalize": self.xrf_normalize, "xrf_opacity": self.xrf_opacity,
                 "xrf_hidden": [e for e, cb in self.xrf_cbs.items()
@@ -924,9 +908,6 @@ class HDDeviceMapWindow(QMainWindow):
         if "dot_size" in state:
             self.dot_size = int(state["dot_size"])
             self.dot_spin.setValue(self.dot_size)
-        if "reflect_xy" in state:
-            self.reflect_xy = bool(state["reflect_xy"])
-            self.reflect_cb.setChecked(self.reflect_xy)
         self._apply_xrf_view_state(state)
         self._redraw()
 
