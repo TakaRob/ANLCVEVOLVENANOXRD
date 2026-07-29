@@ -461,10 +461,8 @@ class HDDeviceMapWindow(QMainWindow):
             self._show_feature_info(self._locked_idx)
 
     def _redraw_grid(self, visible, chi_range, isolate):
-        # HD profiles are keyed (row, col); transpose to the Device View's
-        # canonical plot orientation so both tabs display the same physical axes.
-        self.plot.setLabel("bottom", "Row (1×1)")
-        self.plot.setLabel("left", "Col (1×1)")
+        self.plot.setLabel("bottom", "Col (1×1)")
+        self.plot.setLabel("left", "Row (1×1)")
         self.plot.invertY(True)
         cmap = dv._get_cmap("viridis")
         if self.metric == "none":
@@ -481,7 +479,6 @@ class HDDeviceMapWindow(QMainWindow):
                 grid = self._combined_grid(visible, chi_range)
             vmin, vmax = self._levels(grid)
             rgba = dv._scalar_to_rgba(grid, vmin, vmax, cmap)
-            rgba = np.ascontiguousarray(rgba.transpose(1, 0, 2))
             self.img_item.setVisible(True)
             self.img_item.setImage(rgba, autoLevels=False)
             self._update_colorbar(cmap, vmin, vmax)
@@ -498,7 +495,7 @@ class HDDeviceMapWindow(QMainWindow):
                     if m is not None:
                         merged |= m
             if merged.any():
-                data = merged.T
+                data = merged
                 col = QColor(self.ref_colors[ref])
                 iso = pg.IsocurveItem(data=data.astype(float), level=0.5,
                                       pen=pg.mkPen(col, width=1.5))
@@ -510,8 +507,8 @@ class HDDeviceMapWindow(QMainWindow):
                               only_idx=self._locked_idx if isolate else None)
 
     def _redraw_xy(self, visible, chi_range, isolate):
-        self.plot.setLabel("bottom", "Stage Y (µm)")
-        self.plot.setLabel("left", "Stage X (µm)")
+        self.plot.setLabel("bottom", "Stage X (µm)")
+        self.plot.setLabel("left", "Stage Y (µm)")
         self.plot.invertY(False)
         self._update_colorbar(None, None, None)
         cmap = dv._get_cmap("viridis")
@@ -677,7 +674,6 @@ class HDDeviceMapWindow(QMainWindow):
         if rgba is None:
             self.xrf_img.setVisible(False)
             return
-        rgba = np.ascontiguousarray(rgba.transpose(1, 0, 2))
         self.xrf_img.setImage(rgba, autoLevels=False)
         self.xrf_img.setVisible(True)
 
@@ -741,7 +737,7 @@ class HDDeviceMapWindow(QMainWindow):
         if not pts:
             return
         arr = np.asarray(pts, dtype=float)
-        px, py = arr[:, 1], arr[:, 0]
+        px, py = arr[:, 0], arr[:, 1]
         pen = pg.mkPen(QColor(60, 60, 60, 150), width=0.8, style=Qt.DotLine)
         line = pg.PlotDataItem(px, py, pen=pen, antialias=True, connect="all")
         line.setZValue(8)
@@ -790,8 +786,8 @@ class HDDeviceMapWindow(QMainWindow):
                 pos=v, angle=90, pen=pg.mkPen("r", width=1.2, style=Qt.DashLine)))
 
     def _pxy(self, x, y):
-        """Map data coordinates to the canonical Device View orientation."""
-        return y, x
+        """Map data coordinates into plot space."""
+        return x, y
 
     def _on_catalog_changed(self):
         path = self.cat_combo.currentData()
