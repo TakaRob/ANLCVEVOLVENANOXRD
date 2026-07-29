@@ -352,6 +352,83 @@ def build_territory_mapping(
     return result
 
 
+def orient_centroids_to_grid(gm: dict, reference_bins: dict,
+                             reference_bin_size: int = 1):
+    """Orient territory centroids to a regular grid using shared frame IDs.
+
+    Territorial ``centroid_rc`` coordinates start at physical ``(Y_min, X_min)``,
+    while regular scan rows/columns follow the acquisition-oriented grid. Choose
+    the transpose and axis reversals that correlate with the regular grid, then
+    return ``(cell_to_rc, n_rows, n_cols)``. If the mappings do not share enough
+    frames to establish an orientation, the physical coordinates are unchanged.
+    """
+    territories = gm.get("territories") or {}
+    source_bins = gm.get("bins") or {}
+    source = {}
+    for key, info in territories.items():
+        rc = info.get("centroid_rc")
+        if rc and len(rc) == 2:
+            try:
+                source[key] = (float(rc[0]), float(rc[1]))
+            except (TypeError, ValueError):
+                pass
+
+    frame_target = {}
+    bs = max(int(reference_bin_size), 1)
+    for key, frames in (reference_bins or {}).items():
+        try:
+            row, col = (int(v) for v in key.split("_"))
+        except (AttributeError, TypeError, ValueError):
+            continue
+        target = (row * bs + (bs - 1) / 2, col * bs + (bs - 1) / 2)
+        for frame in frames:
+            frame_target[frame] = target
+
+    src_rows, src_cols, target_rows, target_cols = [], [], [], []
+    for key, frames in source_bins.items():
+        if key not in source:
+            continue
+        targets = [frame_target[frame] for frame in frames if frame in frame_target]
+        if not targets:
+            continue
+        src_rows.append(source[key][0])
+        src_cols.append(source[key][1])
+        target_rows.append(float(np.mean([rc[0] for rc in targets])))
+        target_cols.append(float(np.mean([rc[1] for rc in targets])))
+
+    def correlation(a, b):
+        if len(a) < 2 or np.std(a) == 0 or np.std(b) == 0:
+            return 0.0
+        return float(np.corrcoef(a, b)[0, 1])
+
+    direct = (correlation(src_rows, target_rows),
+              correlation(src_cols, target_cols))
+    swapped = (correlation(src_cols, target_rows),
+               correlation(src_rows, target_cols))
+    transpose = sum(abs(v) for v in swapped) > sum(abs(v) for v in direct)
+    row_corr, col_corr = swapped if transpose else direct
+
+    n_source_rows = int(gm.get("n_bin_rows") or 0)
+    n_source_cols = int(gm.get("n_bin_cols") or 0)
+    if not n_source_rows and source:
+        n_source_rows = int(max(rc[0] for rc in source.values())) + 1
+    if not n_source_cols and source:
+        n_source_cols = int(max(rc[1] for rc in source.values())) + 1
+    n_rows, n_cols = ((n_source_cols, n_source_rows) if transpose
+                      else (n_source_rows, n_source_cols))
+
+    remap = {}
+    for key, (source_row, source_col) in source.items():
+        row, col = ((source_col, source_row) if transpose
+                    else (source_row, source_col))
+        if row_corr < 0:
+            row = n_rows - 1 - row
+        if col_corr < 0:
+            col = n_cols - 1 - col
+        remap[key] = (int(round(row)), int(round(col)))
+    return remap, n_rows, n_cols
+
+
 # ─────────────────────────────────────────────────────────────────────
 # Gridless coordinate linking for an existing (1×1) grid mapping
 # ─────────────────────────────────────────────────────────────────────

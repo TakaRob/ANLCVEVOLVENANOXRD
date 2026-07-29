@@ -1174,11 +1174,10 @@ class FeatureViewer(QMainWindow):
         selected 1×1 catalog; returns the loaded grid mapping dict (or None).
 
         Territory cells key each cluster ``"<tid>_0"`` (column literal 0), so their
-        true 2-D position lives in ``territories[key].centroid_rc`` — snap it to
-        the nearest (row, col), exactly as :meth:`_build_territory_remap` does for
-        the binned grid. ``bins["<tid>_0"]`` lists the frames in each territory,
-        inverted here into the frame→territory bridge. Plain grids parse
-        ``"row_col"`` directly (no remap)."""
+        true 2-D position lives in ``territories[key].centroid_rc``. Shared frame
+        IDs orient those physical coordinates to the regular grid before snapping
+        them to ``(row, col)``. ``bins["<tid>_0"]`` is also inverted into the
+        frame→territory bridge. Plain grids parse ``"row_col"`` directly."""
         self._sub_variant = None
         self._sub_terr_rc = None
         self._sub_rc_terr = None
@@ -1194,19 +1193,14 @@ class FeatureViewer(QMainWindow):
         self._sub_variant = variant
         if variant != "territory":
             return gm
-        remap, inv = {}, {}
-        for key, t in (gm.get("territories") or {}).items():
-            rc = t.get("centroid_rc")
-            if not rc or len(rc) != 2:
-                continue
-            try:
-                cell = (int(round(float(rc[0]))), int(round(float(rc[1]))))
-            except (TypeError, ValueError):
-                continue
-            remap[key] = cell
-            inv[cell] = key          # last territory wins a shared (row, col)
+        from ..core import territory
+        remap, n_rows, n_cols = territory.orient_centroids_to_grid(
+            gm, self._binned_bins, self._bin_size)
+        inv = {cell: key for key, cell in remap.items()}
         self._sub_terr_rc = remap or None
         self._sub_rc_terr = inv or None
+        gm["n_bin_rows"] = n_rows
+        gm["n_bin_cols"] = n_cols
         # A territory aggregates many raw frames; ``bins["<tid>_0"]`` lists the
         # frame indices belonging to that territory. Invert it so a binned
         # feature's member frames can be mapped to the territory that contains

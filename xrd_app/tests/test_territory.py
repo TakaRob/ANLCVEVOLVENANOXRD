@@ -65,3 +65,49 @@ def test_growth_does_not_cross_reflection_or_detector_jump():
         link_tolerance=3, anchor="frontier")
 
     assert set(grown) == {"0", "1"}
+
+
+def test_orient_centroids_flips_to_match_regular_grid():
+    gm = {
+        "n_bin_rows": 2,
+        "n_bin_cols": 3,
+        "bins": {"a": [0], "b": [1], "c": [2], "d": [3]},
+        "territories": {
+            "a": {"centroid_rc": [0, 0]},
+            "b": {"centroid_rc": [0, 2]},
+            "c": {"centroid_rc": [1, 0]},
+            "d": {"centroid_rc": [1, 2]},
+        },
+    }
+    regular = {
+        "1_2": [0], "1_0": [1], "0_2": [2], "0_0": [3],
+    }
+
+    remap, n_rows, n_cols = territory.orient_centroids_to_grid(gm, regular)
+
+    assert (n_rows, n_cols) == (2, 3)
+    assert remap == {"a": (1, 2), "b": (1, 0),
+                     "c": (0, 2), "d": (0, 0)}
+
+
+def test_orient_centroids_transposes_to_match_regular_grid():
+    gm = {
+        "n_bin_rows": 2,
+        "n_bin_cols": 3,
+        "bins": {"a": [0], "b": [1], "c": [2], "d": [3]},
+        "territories": {
+            "a": {"centroid_rc": [0, 0]},
+            "b": {"centroid_rc": [0, 2]},
+            "c": {"centroid_rc": [1, 0]},
+            "d": {"centroid_rc": [1, 2]},
+        },
+    }
+    regular = {
+        "0_0": [0], "2_0": [1], "0_1": [2], "2_1": [3],
+    }
+
+    remap, n_rows, n_cols = territory.orient_centroids_to_grid(gm, regular)
+
+    assert (n_rows, n_cols) == (3, 2)
+    assert remap == {"a": (0, 0), "b": (2, 0),
+                     "c": (0, 1), "d": (2, 1)}
