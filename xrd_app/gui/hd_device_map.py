@@ -555,6 +555,9 @@ class HDDeviceMapWindow(QMainWindow):
         sc.setZValue(4)
         self.plot.addItem(sc)
         self._items.append(sc)
+        if self.show_points:
+            self._draw_points(visible, chi_range, space=DISPLAY_XY,
+                              only_idx=self._locked_idx if isolate else None)
 
     def _draw_points(self, visible, chi_range, space, only_idx=None):
         spots = []
