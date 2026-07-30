@@ -452,11 +452,11 @@ class TerritoryBuilder(QWidget):
         row.addWidget(QLabel("Target frames/territory:"))
         self._target = QSpinBox()
         self._target.setRange(1, 999)
-        self._target.setValue(9)
+        self._target.setValue(1)
         self._target.setToolTip(
             "Frames grouped per territory before it stops growing. 1 ≈ true 1×1 "
-            "resolution (cells drawn as boxes); larger = higher per-cell SNR and "
-            "to-scale hull footprints. 9 is the default reference.")
+            "resolution (cells drawn as boxes; the default); larger = higher "
+            "per-cell SNR and to-scale hull footprints.")
         row.addWidget(self._target)
         self._run_btn = QPushButton("Build territorial reference")
         self._run_btn.setMinimumHeight(40)

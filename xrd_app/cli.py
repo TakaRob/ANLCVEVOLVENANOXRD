@@ -711,7 +711,7 @@ def grid(bin_size, scan, shape, xrd_dir, positions, rawgrid, deskew_method, vari
 # territory-grid — skew-free reference binning by true (X, Y) territories
 # ─────────────────────────────────────────────────────────────────────
 @main.command(name='territory-grid')
-@click.option('--target-size', type=int, default=9,
+@click.option('--target-size', type=int, default=1,
               help='Frames per territory before it stops growing (sweepable; '
                    'small ≈ 1×1 resolution, large = higher per-cell SNR).')
 @click.option('--scan', default=None, help='Scan number/name (defaults to config scan)')
@@ -764,7 +764,7 @@ def territory_grid(target_size, scan, xrd_dir, positions, variant, output, root)
 # territory-build — the whole skew-free territorial reference in one command
 # ─────────────────────────────────────────────────────────────────────
 @main.command(name='territory-build')
-@click.option('--target-size', type=int, default=9,
+@click.option('--target-size', type=int, default=1,
               help='Frames per territory before it stops growing (see territory-grid).')
 @click.option('--scan', default=None, help='Scan number/name (defaults to config scan)')
 @click.option('--algorithm', default=None, help='Peak detector path OR bundled name')

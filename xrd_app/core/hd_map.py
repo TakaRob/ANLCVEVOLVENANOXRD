@@ -197,6 +197,55 @@ def sample_hd_intensity(
     return out
 
 
+def infer_xy_orientation(hd_features) -> dict:
+    """Infer how stage ``(X,Y)`` maps onto the HD grid's ``(col,row)`` axes.
+
+    The beamline scan axes vary by scan: for example, row can follow ``-X`` in
+    one scan and ``+X`` in another. Use cells carrying both grid and real-stage
+    coordinates to choose the stage axis for each plot axis and whether that axis
+    must be inverted to match the regular grid display.
+    """
+    cells = {}
+    for feat in hd_features:
+        for key, entry in feat.get("hd_profile", {}).items():
+            if key in cells or "x" not in entry or "y" not in entry:
+                continue
+            try:
+                row, col = _parse_cell_key(key)
+                cells[key] = (row, col, float(entry["x"]), float(entry["y"]))
+            except (TypeError, ValueError):
+                continue
+
+    default = {"horizontal": "x", "vertical": "y",
+               "invert_x": False, "invert_y": True}
+    if len(cells) < 3:
+        return default
+    values = np.asarray(list(cells.values()), dtype=float)
+    row, col, stage_x, stage_y = values.T
+
+    def corr(a, b):
+        if np.std(a) == 0 or np.std(b) == 0:
+            return 0.0
+        return float(np.corrcoef(a, b)[0, 1])
+
+    direct = (corr(col, stage_x), corr(row, stage_y))
+    swapped = (corr(col, stage_y), corr(row, stage_x))
+    if sum(abs(v) for v in swapped) > sum(abs(v) for v in direct):
+        horizontal, vertical = "y", "x"
+        horizontal_corr, vertical_corr = swapped
+    else:
+        horizontal, vertical = "x", "y"
+        horizontal_corr, vertical_corr = direct
+    return {
+        "horizontal": horizontal,
+        "vertical": vertical,
+        # Plot right must follow increasing column. Plot down must follow
+        # increasing row (the grid view uses an upper-left origin).
+        "invert_x": horizontal_corr < 0,
+        "invert_y": vertical_corr > 0,
+    }
+
+
 def summarize(hd_features) -> dict:
     """Counts for the CLI physics-check line: features, sampled cells, empties."""
     n_cells = sum(len(f["hd_profile"]) for f in hd_features)

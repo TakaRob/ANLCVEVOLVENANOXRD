@@ -236,7 +236,7 @@ def _hull_or_box(pts: np.ndarray, step: float) -> list:
 def build_territory_mapping(
     xrd_dir: Union[str, Path],
     pos_csv: Union[str, Path],
-    target_size: int = 9,
+    target_size: int = 1,
     scan_number: int = 203,
     output: Optional[Union[str, Path]] = None,
     log: Callable[[str], None] = print,

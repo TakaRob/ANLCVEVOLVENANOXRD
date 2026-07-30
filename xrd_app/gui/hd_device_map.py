@@ -168,6 +168,7 @@ class HDDeviceMapWindow(QMainWindow):
     def _load(self, catalog_path):
         self.features, self.n_rows, self.n_cols, self.positions_real = \
             load_hd_features(catalog_path)
+        self.xy_orientation = hd_core.infer_xy_orientation(self.features)
         self.reflections = sorted(set(f.get("reflection", "unknown")
                                       for f in self.features))
         self.ref_colors = dv._assign_ref_colors(self.reflections)
@@ -463,6 +464,7 @@ class HDDeviceMapWindow(QMainWindow):
     def _redraw_grid(self, visible, chi_range, isolate):
         self.plot.setLabel("bottom", "Col (1×1)")
         self.plot.setLabel("left", "Row (1×1)")
+        self.plot.getViewBox().invertX(False)
         self.plot.invertY(True)
         cmap = dv._get_cmap("viridis")
         if self.metric == "none":
@@ -507,9 +509,11 @@ class HDDeviceMapWindow(QMainWindow):
                               only_idx=self._locked_idx if isolate else None)
 
     def _redraw_xy(self, visible, chi_range, isolate):
-        self.plot.setLabel("bottom", "Stage X (µm)")
-        self.plot.setLabel("left", "Stage Y (µm)")
-        self.plot.invertY(False)
+        orient = self.xy_orientation
+        self.plot.setLabel("bottom", f"Stage {orient['horizontal'].upper()} (µm)")
+        self.plot.setLabel("left", f"Stage {orient['vertical'].upper()} (µm)")
+        self.plot.getViewBox().invertX(orient["invert_x"])
+        self.plot.invertY(orient["invert_y"])
         self._update_colorbar(None, None, None)
         cmap = dv._get_cmap("viridis")
         # Gather sampled points (x, y, value, ref).
@@ -737,7 +741,12 @@ class HDDeviceMapWindow(QMainWindow):
         if not pts:
             return
         arr = np.asarray(pts, dtype=float)
-        px, py = arr[:, 0], arr[:, 1]
+        if space == DISPLAY_XY:
+            orient = self.xy_orientation
+            axes = {"x": arr[:, 0], "y": arr[:, 1]}
+            px, py = axes[orient["horizontal"]], axes[orient["vertical"]]
+        else:
+            px, py = arr[:, 0], arr[:, 1]
         pen = pg.mkPen(QColor(60, 60, 60, 150), width=0.8, style=Qt.DotLine)
         line = pg.PlotDataItem(px, py, pen=pen, antialias=True, connect="all")
         line.setZValue(8)
@@ -786,7 +795,11 @@ class HDDeviceMapWindow(QMainWindow):
                 pos=v, angle=90, pen=pg.mkPen("r", width=1.2, style=Qt.DashLine)))
 
     def _pxy(self, x, y):
-        """Map data coordinates into plot space."""
+        """Map grid or stage coordinates into the active plot-axis order."""
+        if self.display == DISPLAY_XY and self.positions_real:
+            orient = self.xy_orientation
+            values = {"x": x, "y": y}
+            return values[orient["horizontal"]], values[orient["vertical"]]
         return x, y
 
     def _on_catalog_changed(self):

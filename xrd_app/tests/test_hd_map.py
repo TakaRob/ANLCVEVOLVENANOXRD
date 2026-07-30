@@ -83,3 +83,32 @@ def test_scan_trajectory_grid_order():
     # grid path is [col, row] in acquisition order
     assert t["grid"] == [[0, 0], [1, 0], [1, 1], [0, 1]]
     assert t["xy"] is None                     # no positions CSV
+
+
+def _oriented_feature(x_from_row, y_from_col):
+    profile = {}
+    for row in range(3):
+        for col in range(4):
+            profile[f"{row}_{col}"] = {
+                "x": float(x_from_row(row)),
+                "y": float(y_from_col(col)),
+            }
+    return {"hd_profile": profile}
+
+
+def test_infer_xy_orientation_handles_negative_row_x_scan():
+    feature = _oriented_feature(lambda row: 10 - row, lambda col: 20 + col)
+
+    orient = hd_map.infer_xy_orientation([feature])
+
+    assert orient == {"horizontal": "y", "vertical": "x",
+                      "invert_x": False, "invert_y": False}
+
+
+def test_infer_xy_orientation_handles_positive_row_x_scan():
+    feature = _oriented_feature(lambda row: 10 + row, lambda col: 20 - col)
+
+    orient = hd_map.infer_xy_orientation([feature])
+
+    assert orient == {"horizontal": "y", "vertical": "x",
+                      "invert_x": True, "invert_y": True}
