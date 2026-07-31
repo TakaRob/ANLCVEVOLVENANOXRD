@@ -438,6 +438,33 @@ class _ChiAxisItem(pg.AxisItem):
         return labels
 
 
+def _draw_feature_point_labels(plot, entries, colors, font_pt, label_offset=(0.5, -0.5)):
+    """Draw the shared Device View feature-center markers and labels."""
+    font = QFont()
+    font.setPointSize(font_pt)
+    spots, items = [], []
+    dx, dy = label_offset
+    for feat, pos in entries:
+        ref = feat.get("reflection")
+        color = colors.get(ref, "k")
+        spots.append({"pos": pos, "brush": pg.mkBrush(color), "size": 6, "pen": None})
+        fid = feat.get("feature_id", "?")
+        chi = feat.get("chi_deg")
+        label = f"#{fid}" + (f" χ={chi:.0f}°" if chi is not None else "")
+        text = pg.TextItem(label, color=color, anchor=(0, 1))
+        text.setFont(font)
+        text.setPos(pos[0] + dx, pos[1] + dy)
+        text.setZValue(15)
+        plot.addItem(text)
+        items.append(text)
+    if spots:
+        scatter = pg.ScatterPlotItem(spots=spots)
+        scatter.setZValue(14)
+        plot.addItem(scatter)
+        items.append(scatter)
+    return items
+
+
 class DeviceMapWindow(QMainWindow):
     def __init__(self, features, grids, n_rows, n_cols, xrf=None):
         super().__init__()
@@ -957,38 +984,19 @@ class DeviceMapWindow(QMainWindow):
     def _draw_points(self, chi_range, only_idx=None):
         # Cache args so a window resize can re-lay the labels at the new font size.
         self._points_state = (chi_range, only_idx)
-        font = QFont()
-        font.setPointSize(self._label_font_pt())
-        spots = []
+        entries = []
         for i, feat in enumerate(self.features):
             if only_idx is not None and i != only_idx:
                 continue
             ref = feat["reflection"]
             if ref not in self.visible_refs or not _feat_in_chi_range(feat, chi_range):
                 continue
-            # Grid (row, col) → pixel *center* (col+0.5, row+0.5); the ImageItem
-            # fill and IsocurveItem outline both center the cell there, so plotting
-            # at the raw corner leaves the marker half a bin up-left of the feature
-            # — invisible at 3×3 but a full-cell miss at 1×1. Use grid space (not
-            # center_row/col, which are physical XY in coord-based catalogs).
+            # Grid (row, col) → pixel center. Use grid space, not center_row/col,
+            # which are physical XY in coordinate-based catalogs.
             gr, gc = _feat_grid_rc(feat)
-            c, r = gc + 0.5, gr + 0.5
-            spots.append({"pos": (c, r), "brush": pg.mkBrush(REF_COLORS.get(ref, "k")),
-                          "size": 6, "pen": None})
-            fid = feat.get("feature_id", "?")
-            chi = feat.get("chi_deg", 0)
-            t = pg.TextItem(f"#{fid} χ={chi:.0f}°", color=REF_COLORS.get(ref, "k"),
-                            anchor=(0, 1))
-            t.setFont(font)
-            t.setPos(c + 0.5, r - 0.5)
-            t.setZValue(15)
-            self.plot.addItem(t)
-            self._point_items.append(t)
-        if spots:
-            sc = pg.ScatterPlotItem(spots=spots)
-            sc.setZValue(14)
-            self.plot.addItem(sc)
-            self._point_items.append(sc)
+            entries.append((feat, (gc + 0.5, gr + 0.5)))
+        self._point_items.extend(_draw_feature_point_labels(
+            self.plot, entries, REF_COLORS, self._label_font_pt()))
 
     def resizeEvent(self, event):
         super().resizeEvent(event)

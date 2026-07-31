@@ -560,25 +560,23 @@ class HDDeviceMapWindow(QMainWindow):
                               only_idx=self._locked_idx if isolate else None)
 
     def _draw_points(self, visible, chi_range, space, only_idx=None):
-        spots = []
+        entries = []
         for i, f in enumerate(self.features):
             if only_idx is not None and i != only_idx:
                 continue
             if not self._feature_visible(f, visible, chi_range):
                 continue
             if space == DISPLAY_GRID:
-                pos = self._pxy(f["center_col"], f["center_row"])
+                pos = self._pxy(f["center_col"] + 0.5, f["center_row"] + 0.5)
             else:
                 if f.get("center_x") is None:
                     continue
                 pos = self._pxy(f["center_x"], f["center_y"])
-            spots.append({"pos": pos, "size": 7, "pen": pg.mkPen("k", width=0.5),
-                          "brush": pg.mkBrush(self.ref_colors.get(f.get("reflection"), "k"))})
-        if spots:
-            sc = pg.ScatterPlotItem(spots=spots)
-            sc.setZValue(14)
-            self.plot.addItem(sc)
-            self._items.append(sc)
+            entries.append((f, pos))
+        font_pt = max(8, min(24, int(round((self.glw.height() or 600) / 45))))
+        offset = (0.5, -0.5) if space == DISPLAY_GRID else (0, 0)
+        self._items.extend(dv._draw_feature_point_labels(
+            self.plot, entries, self.ref_colors, font_pt, label_offset=offset))
 
     def _rebuild_legend(self, visible):
         self.legend.clear()

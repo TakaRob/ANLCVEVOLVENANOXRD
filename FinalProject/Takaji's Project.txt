@@ -1,0 +1,81 @@
+Takaji's Project.pptx  —  extracted text
+(Text recovered from the PowerPoint XML, slide by slide, in deck order. Blank
+slides in the list held only images/plots with no text and are omitted.)
+
+===== SLIDE 1 (title) =====
+Automated Structural Mapping from Nano-XRD Datasets
+Takaji Robson, as advised by Grace & Pedro
+
+===== SLIDE 2 =====
+Takaji Robson
+Middlebury Physics — graduated May 2026
+
+===== SLIDE 3 — High-Throughput Nano-XRD at APS 19-ID =====
+Beamline capabilities: Nano-focused X-ray diffraction (nano-XRD) enables
+spatially resolved crystal grain size and orientation mapping in semiconductor
+thin films.
+Bottlenecks:
+ - High data volume: each scan generates on the order of 10^6 2D diffraction
+   frames, creating massive .hdf5 data (80-1000 GB). 10,000-250,000 frames.
+
+===== SLIDE 4 — Goal =====
+Create an automated computer-vision pipeline that allows researchers to easily
+visualize data and detected device features.
+Test and implement standardized algorithms and data structures that can be
+widely utilized across diverse data sets coming from 19-ID.
+
+===== SLIDE 5 =====
+Preferential growth (001) (111) Miller indices, perovskite thin films.
+3 devices, 47 scans. (DI: deionized water) (GB: glovebox)
+ - No_DI_Yes_GB
+ - 5%_DI_Yes_GB
+ - 5%_DI_No_GB
+
+===== SLIDE 6 — Nano-XRD Results =====
+Preferential growth (001):(111) Miller indices, perovskite thin films.
+ - No Glove Box preserves (001) grain dominance over (111).
+ - No_GB devices show a reduced (001):(111) size ratio and larger (111) grains.
+ - 5% DI increases the average size and total area share of (001) grains.
+
+===== SLIDE 7 — How? =====
+To address this challenge, we developed xrd-app, a command-line computer vision
+pipeline for automated processing of raw HDF5 nano-XRD data.
+Pipeline: Raw -> Binning -> Peak Detection -> Contour Finding.  (CVEvolve)
+
+===== SLIDE 8 — Binning =====
+Sums NxN neighboring frames prior to detection. Reduces spatial grid size while
+boosting per-position signal-to-noise ratio linearly with bin size.
+Passes true coordinates (by interferometer), X and Y distribution, and snaps
+each raw frame to its closest true coordinate on a square-pixel 1x1 grid.
+Calculates the median of distances between points. Frames from the minimum X and
+Y of the coordinates, making min(X,Y) an origin.
+
+===== SLIDE 10 =====
+1x1 / 5x5 / 3x3
+
+===== SLIDE 11 — CVEvolve =====
+Du M, Yin X, Luo Y, Beniwal D, Tang S, Sharma H, Cherukara MJ. CVEvolve:
+Autonomous Algorithm Discovery for Unstructured Scientific Data.
+Make an algorithm — ***algorithm.py***
+
+===== SLIDE 12 — Grain Contouring =====
+Links neighboring detections across space using a Union-Find spatial algorithm +
+Gaussian-profile filter to reject noisy or fragmented detections.
+
+===== SLIDE 16 =====
+001 (blue) vs 111 (purple): scans 179, 182
+
+===== SLIDE 17 =====
+001 vs 111: scans 203, 207
+
+===== SLIDE 18 =====
+001 vs 111: scans 215, 218
+
+===== SLIDE 19 — Best Results =====
+ - Quickly identified unsuitable (degraded) sample scans.
+ - Identified crystal grains.
+
+===== SPEAKER NOTES (best-effort) =====
+The workflow performs data compression, frame-by-frame Bragg peak detection, and
+spatial linking of neighboring detections to reconstruct grain-level structural
+features efficiently.

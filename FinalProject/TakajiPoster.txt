@@ -1,0 +1,117 @@
+TakajiPoster.pptx  —  extracted text
+(Text recovered from the PowerPoint XML and re-ordered into the poster's logical
+sections; PowerPoint stores shapes in z-order, so the on-slide reading order is
+reconstructed here. Numbers/labels are verbatim from the deck.)
+
+===================================================================
+TITLE
+===================================================================
+High resolution structural mapping of perovskite thin films (ISN 19-ID)
+Resolving (111) and (001) microstructure via automated nano-XRD analysis
+Takaji Robson — X-ray Science Division
+
+===================================================================
+ABSTRACT
+===================================================================
+Nano-focused X-ray diffraction (nano-XRD) at the APS 19-ID beamline enables
+spatially resolved characterization of crystal grain size and orientation in
+semiconductor thin films. However, each scan produces on the order of [10^?]
+diffraction frames, making quick analysis demanding. To address this, we
+developed xrd-app, a command-line computer vision pipeline that compresses raw
+HDF5 data, detects Bragg peaks frame by frame, and links neighboring detections
+across space to reconstruct grain features, enabling fast and automated analysis
+of key structural info.
+
+To manage the large data volume, we implemented two key design strategies:
+ - Utilize CVEvolve: generates tuned algorithms for peak detection.
+ - Spatial Binning: sums neighboring frames and raises per-position signal to
+   noise (SNR) linearly with bin size.
+ - Contouring: a Union-Find + Gaussian-profile filtering that merges scattered
+   detections into coherent grain outlines.
+
+We applied this workflow to 6 focused scans across three perovskite-halide solar
+cells. Results show that No Glove Box promotes a preferred (001) grain
+orientation relative to (111), while 5% Cl treatment increases the average size
+of (001) grains.
+
+===================================================================
+BINNING
+===================================================================
+Median SNR increases with bin size, improving peak detection. Binning also
+stabilizes grain outlines by smoothing over scan-to-scan offsets introduced by
+the S-shaped raster trajectory. In the un-binned case, these offsets can appear
+as holes or horizontal disconnects in the grain maps.
+
+Binning sums neighboring frames before detections, reducing spatial resolution
+for SNR. Device grid reduced (e.g. 151x145 to 51x49).
+
+===================================================================
+CONTOURING
+===================================================================
+Detections along the detector image are characterized by their azimuthal
+orientation, intensity, and radial breadth.
+
+Links per-position detections into grains, combining a Union-Find with a
+Gaussian-profile filter to identify grains with a bright monotonic center and
+reject noise or fragmented detections.
+
+This contouring step enables less restrictive detection but assumes a minimum
+grain size.
+
+===================================================================
+XRD-APP RESULTS
+===================================================================
+Nano-XRD experiments can generate large datasets; for example, Scan_0203
+contains 25,170 frames. The three devices in this study were measured across 56
+scans, ranging from 80-200 GB. By combining spatial binning with contouring,
+this workflow provides an automated detection approach that allows less
+restrictive peak-detection algorithms by assuming grain persistence across
+neighboring pixels.
+
+===================================================================
+XRD-APP CONCLUSIONS
+===================================================================
+(section present on poster — content is the results/next-steps text below)
+
+===================================================================
+DEVICE RESULTS (example: Scan_0182)
+===================================================================
+Scan_0182 — (001) reflection
+ - Binned 3x3, 80x84 pixels — Detected: 78 grains
+ - Real position — 69,561 frames, 251 files (rows), x278 scans — Detected: 208 grains
+
+Scan_0182 — (111) reflection
+ - (binned) — Detected: 35 grains
+ - Real position — Detected: 104 grains
+
+===================================================================
+DEVICE CONCLUSIONS
+===================================================================
+No Glove Box preserves (001) grain dominance over (111).
+No_GB devices show a reduced (001):(111) size ratio and larger (111) grains.
+5% Cl treatment increases the average size and total area share of (001) grains.
+
+No Glove Box preserves (001) grain dominance. In No_GB devices the 001:111 size
+ratio collapses from ~3.4 to ~0.9, and the largest (111) grain doubles in size
+compared to the overall device area. 5% Cl strengthens (001) dominance, the
+total summed area ratio climbing from 2.9 to 4.6 over (111). Mean (001) size
+rises while (111) remains relatively unchanged.
+
+===================================================================
+NEXT STEPS
+===================================================================
+ - Apply the same workflow to additional device types.
+ - Correlate nano-XRD grain maps with properly aligned XRF signatures.
+ - Extend the approach to rocking-curve analysis to reconstruct 3D spatial maps
+   of identified features.
+
+===================================================================
+REFERENCES
+===================================================================
+[1] Stuckelberger ME, Nietzold T, West BM, Luo Y, Li X, Werner J, et al.
+    J. Phys. Chem. C. 2020, 124(33), 17949-17956. DOI: 10.1021/acs.jpcc.0c04645.
+[2] Du M, Yin X, Luo Y, Beniwal D, Tang S, Sharma H, Cherukara MJ. CVEvolve:
+    Autonomous Algorithm Discovery for Unstructured Scientific Data Processing.
+    arXiv:2605.11359, 2026.
+[3] Li Y, Zhang Z, Zhang H, Liu Y, Gao H, Mao Y. ACS Appl. Mater. Interfaces.
+    2025, 17(34), 48231-48239. DOI: 10.1021/acsami.5c09430.

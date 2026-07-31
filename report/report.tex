@@ -1,0 +1,509 @@
+%=====================================================================
+%  SULI Research Report Paper
+%  Formatted per the AIP Style Manual guidelines excerpted in
+%  FinalProject/Instructions.txt:
+%    - 12 pt font, all pages numbered from the title/abstract page
+%    - title in sentence case, placed ~1/3 down page 1
+%    - single-paragraph abstract, double spaced, wider margins
+%    - AIP heading scheme: I. PRINCIPAL / A. Sub / 1. / a.
+%    - numbered TABLE (roman) and FIG. (arabic), each cited in text
+%    - ACKNOWLEDGMENTS, then APPENDIX, then REFERENCES
+%    - superscript numeral citations
+%
+%  COMPILE:  latexmk -pdf report.tex   (or Ctrl+Alt+B in VS Code)
+%  Figures live in ../report_figures/ and ../ (see \graphicspath).
+%=====================================================================
+\documentclass[12pt]{article}
+
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern}
+\usepackage[margin=1in]{geometry}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{xcolor}
+\usepackage{caption}
+\usepackage{float}
+\usepackage{enumitem}
+\usepackage{microtype}
+\usepackage{setspace}
+\usepackage{changepage}
+\usepackage{titlesec}
+\usepackage{indentfirst}
+\usepackage[hidelinks]{hyperref}
+
+\graphicspath{{../report_figures/}{../}}
+
+% --- AIP heading numbering: I. / A. / 1. / a. ---
+\renewcommand{\thesection}{\Roman{section}}
+\renewcommand{\thesubsection}{\Alph{subsection}}
+\renewcommand{\thesubsubsection}{\arabic{subsubsection}}
+\titleformat{\section}[block]{\centering\normalfont\bfseries}{\thesection.}{0.6em}{\MakeUppercase}
+\titleformat{\subsection}[block]{\normalfont\bfseries}{\thesubsection.}{0.5em}{}
+\titleformat{\subsubsection}[block]{\normalfont\itshape}{\thesubsubsection.}{0.5em}{}
+\titlespacing*{\section}{0pt}{1.4em}{0.8em}
+
+% --- TABLE (roman) / FIG. (arabic), captions labelled per AIP ---
+\renewcommand{\thetable}{\Roman{table}}
+\captionsetup[table]{name=TABLE,labelsep=period,font=small,labelfont=bf,justification=raggedright,singlelinecheck=false}
+\captionsetup[figure]{name=FIG.,labelsep=period,font=small,labelfont=bf}
+
+% --- page numbers on every page (default plain footer) ---
+\pagestyle{plain}
+
+% --- helpers ---
+% Inline red flag for a gap to resolve before final submission.
+\newcommand{\todo}[1]{\textcolor{red}{\textbf{[TODO: #1]}}}
+% Superscript citation.
+\newcommand{\cq}[1]{\textsuperscript{#1}}
+% Missing-value marker for tables (AIP: raised dots, not dashes).
+\newcommand{\na}{\ensuremath{\ldots}}
+\newcommand{\um}{\ensuremath{\mu}m}
+
+\begin{document}
+
+%=====================================================================
+% TITLE + ABSTRACT PAGE  (title ~1/3 down, numbered page 1)
+%=====================================================================
+\thispagestyle{plain}
+\vspace*{1.8in}
+\begin{center}
+{\large\bfseries High-resolution structural mapping of perovskite thin films:
+resolving (111) and (001) microstructure via automated nano-XRD analysis and a
+CLI-based computer vision pipeline\par}
+\vspace{1.5em}
+{\normalsize Takaji Robson\par}
+\vspace{0.4em}
+{\small X-ray Science Division, Argonne National Laboratory\\
+In Situ Nanoprobe (ISN), Advanced Photon Source, beamline 19-ID\par}
+\vspace{0.4em}
+{\small Science Undergraduate Laboratory Internship (SULI), 2026\par}
+\end{center}
+
+\vspace{1.5em}
+% --- Abstract: one paragraph, double spaced, wider margins, no math/figs/tables ---
+\begin{adjustwidth}{0.5in}{0.5in}
+\begin{spacing}{2.0}
+\noindent\textbf{ABSTRACT---}Nano-focused X-ray diffraction (nano-XRD) at the
+Advanced Photon Source (APS) In Situ Nanoprobe (beamline 19-ID) provides
+spatially resolved measurements of crystal grain size and orientation in
+semiconductor thin films, but each scan can generate on the order of $10^5$
+diffraction frames, creating a computational bottleneck for rapid analysis. To
+address this challenge, we developed xrd-app, a command-line computer-vision
+pipeline for automated processing of raw HDF5 nano-XRD data. The workflow
+performs data compression, frame-by-frame Bragg peak detection, and spatial
+linking of neighboring detections to reconstruct grain-level structural features.
+Two design strategies improve speed and robustness. First, an automated
+algorithm-discovery system (CVEvolve) generates and tunes peak-detection
+algorithms optimized for diffraction data. Second, spatial binning combines
+neighboring frames, increasing the per-position signal-to-noise ratio
+approximately linearly with bin size and improving the detection of weaker peaks.
+Detected signals are then consolidated through a contouring stage based on
+Union-Find clustering and Gaussian-profile filtering, which merges scattered
+detections into coherent grain outlines. We applied this workflow to six focused
+scans across three perovskite-halide solar cells. The results indicate that
+samples processed outside a glove box exhibit a stronger preferred (001)
+orientation relative to (111), while a deionized-water (DI) treatment increases
+the average size of (001)-oriented grains.
+\end{spacing}
+\end{adjustwidth}
+
+\vspace{1em}
+
+%=====================================================================
+\section{Introduction}
+%=====================================================================
+Metal-halide perovskite thin films are leading candidates for next-generation
+photovoltaics because they combine high power-conversion efficiency with
+low-cost, solution-based fabrication. Device performance is strongly coupled to
+microstructure: the size, orientation, and spatial distribution of crystalline
+grains govern charge transport and defect density. Synchrotron nano-focused
+X-ray diffraction (nano-XRD) is uniquely suited to probing this microstructure,
+because a nano-focused beam can map the local crystallographic orientation and
+grain size across a working device with sub-micrometer spatial
+resolution.\cq{1}
+
+At the APS In Situ Nanoprobe (beamline 19-ID), a single nano-XRD raster scan
+records a two-dimensional charge-coupled-device (CCD) diffraction frame at every
+spatial position, so a full scan comprises on the order of $10^5$ frames stored
+as compressed HDF5. Extracting grain-level information from such a dataset by
+hand is impractical, and the volume of data---tens to hundreds of gigabytes per
+scan---creates a computational bottleneck for rapid, reproducible analysis.
+
+The purpose of this work is to develop and validate an automated computer-vision
+pipeline, xrd-app, that converts raw nano-XRD frames into physically meaningful
+grain maps with minimal human intervention, and to apply it to a set of
+perovskite-halide devices to test whether processing conditions leave a
+measurable fingerprint on grain microstructure. This paper is organized as
+follows. Section~II describes the data and the four processing stages---binning,
+peak detection with automated detector optimization, grain contouring, and
+deskewing. Section~III reports the effect of each stage on data quality and then
+presents the grain-level comparison across devices. Section~IV summarizes the
+findings and outlines future work.
+
+%=====================================================================
+\section{Methods}
+%=====================================================================
+
+\subsection{Nano-XRD data acquisition and structure}
+Measurements were performed at APS beamline 19-ID using a 15\,keV nano-focused
+beam and a CCD area detector with a 75\,\um\ pixel pitch. Each raster position
+yields one detector frame; the pixel-to-$2\theta$ mapping is fixed by a
+calibration image, and the spatial position of each frame is recorded by
+interferometer readout. Reflections of interest for the perovskite films and the
+indium tin oxide (ITO) substrate---including PbI$_2$, (001), (011), (111),
+(002), and (012)/(112)---appear in known radial ($2\theta$) bands, which define
+where genuine Bragg peaks are expected. A representative scan (Scan\_0203)
+contains 25{,}170 occupied spatial positions; the six focused scans analyzed
+here range from roughly 80 to 200\,GB each. Basic instrument and dataset
+parameters are collected in Table~\ref{tab:dataset}.
+
+\begin{table}[H]
+\centering
+\caption{Instrument and dataset parameters for the reference scan (Scan\_0203).}
+\label{tab:dataset}
+\small
+\begin{tabular}{@{}ll@{}}
+\toprule
+Parameter & Value\\
+\midrule
+Beamline & APS 19-ID (In Situ Nanoprobe)\\
+Photon energy & 15\,keV\\
+Detector pixel pitch & 75\,\um\\
+Frame size & $1062\times1028$ px (full); $256\times256$ px (region of interest)\\
+Reflections & PbI$_2$, (001), (011), (111), (002), ITO, (012), (112)\\
+Unbinned grid & 156 rows $\times$ 221 cols $=$ 34{,}476 cells; 25{,}170 occupied\\
+$5\times5$ binned grid & 32 rows $\times$ 45 cols $=$ 1{,}440 cells; 1{,}188 occupied\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Spatial binning}
+Because a single-position frame often contains only a weak diffraction signal,
+the pipeline can sum $N\times N$ neighboring frames prior to detection. Binning
+reduces the spatial grid size (for example, from $151\times145$ to $51\times49$)
+but raises the per-position signal-to-noise ratio (SNR) approximately linearly
+with the bin dimension $N$, because coherent signal accumulates faster than
+random noise. Binning also stabilizes grain outlines by averaging over the
+small, systematic position offsets introduced by the serpentine (S-shaped)
+raster trajectory; in the unbinned case these offsets can appear as holes or
+horizontal breaks in the reconstructed grain maps. To bin on a physically
+faithful lattice, the pipeline reads the true interferometer coordinates, snaps
+each raw frame to its nearest node on a square-pixel grid whose origin is the
+minimum $(x,y)$ of the scan, and uses the median inter-point distance to set the
+node spacing. Figure~\ref{fig:binning} illustrates the concept.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.82\linewidth]{binning_explainer}
+\caption{Spatial binning sums neighboring frames before detection, trading
+spatial resolution for a higher per-position signal-to-noise ratio.}
+\label{fig:binning}
+\end{figure}
+
+\subsection{Peak detection and automated detector optimization}
+Bragg peaks are detected frame by frame within the expected $2\theta$ bands.
+Rather than hand-tuning a single detector, we used CVEvolve, an automated
+algorithm-discovery system that iteratively generates and tunes candidate
+detection algorithms and scores each against ground-truth
+annotations.\cq{2} Candidate detectors were scored with the mean $F_2$
+statistic (a recall-weighted harmonic mean, $\beta\approx2$) rather than $F_1$,
+because the ground truth is derived from coarser $3\times3$ annotations mapped to
+the central frame and therefore undercounts the peaks visible at full unbinned
+sensitivity. Weighting recall roughly four times precision avoids penalizing
+genuine detections that the sparse ground truth happens to omit. Matches were
+accepted within a 40\,px tolerance.
+
+\subsection{Grain contouring}
+A detection in a single spatial bin (a \emph{peak}) may be noise; a physically
+real feature is a peak that persists across neighboring positions. The
+contouring stage links per-position detections into \emph{grains} by combining a
+Union-Find spatial clustering step with a Gaussian-profile filter that retains
+clusters having a bright, monotonic center and rejects fragmented or noisy
+detections. Each retained grain is characterized by its footprint (number of
+bins), azimuthal orientation $\chi$, intensity, and radial breadth
+($\Delta 2\theta$). This step permits a less restrictive per-frame detection
+threshold, because it assumes grain persistence across neighboring pixels, at
+the cost of imposing an effective minimum grain size. Figures~\ref{fig:contour}
+and~\ref{fig:contourslice} show a representative contoured grain and its
+intensity cross-section.
+
+\begin{figure}[H]
+\centering
+\begin{minipage}{0.48\linewidth}\centering
+  \includegraphics[width=\linewidth]{contour_example}
+  \captionof{figure}{A contoured grain reconstructed by Union-Find linking of
+  neighboring per-position detections.}
+  \label{fig:contour}
+\end{minipage}\hfill
+\begin{minipage}{0.48\linewidth}\centering
+  \includegraphics[width=\linewidth]{contour_slice}
+  \captionof{figure}{Intensity cross-section through a grain; the
+  Gaussian-profile filter keeps bright, monotonic centers.}
+  \label{fig:contourslice}
+\end{minipage}
+\end{figure}
+
+\subsection{Deskewing the unbinned grid}
+At the unbinned ($1\times1$) resolution, grains tend to over-segment into
+horizontal slices: 53\% of multi-bin features span exactly one scan row. The
+cause is the serpentine raster, whose row-registration offset plus single-frame
+centroid jitter exceeds the 5\,px linking tolerance between adjacent rows, so
+only within-row links survive. Because the offset is correlated within a row but
+reverses sign between rows, the fragmentation is horizontal. A deskewing step
+re-links detections using the true stage positions. This remedy is specific to
+unbinned data; binning already averages out the raster backlash, so re-gridding
+an already-clean binned grid only injects rounding noise.
+
+%=====================================================================
+\section{Results and discussion}
+%=====================================================================
+
+\subsection{Signal-to-noise and feature yield versus bin size}
+Table~\ref{tab:counts} lists the number of occupied bins, raw peaks, and
+retained grains as a function of bin size for Scan\_0203. Both the total number
+of raw peaks and the number of retained grains \emph{decrease} with bin size,
+because the bin count falls as $\sim1/N^2$, faster than the per-bin yield rises.
+However, the quality of each detection improves sharply: as shown in
+Table~\ref{tab:snr}, the median peak SNR rises from about 5.3 at $1\times1$
+(barely above threshold) to roughly 17--24 when binned, and the median grain
+intensity rises tenfold. Figures~\ref{fig:snrhist} and~\ref{fig:snrtrend}
+show the full SNR distribution and the median/90th-percentile trend shifting to
+higher values with bin size. The apparent paradox---fewer but stronger
+detections---arises because most bins contain only background and a
+sub-bin-sized grain does not fill a larger bin, so summed signal grows more
+slowly than $N^2$ while noise grows as $N$.
+
+\begin{table}[H]
+\centering
+\caption{Occupied bins, raw peaks, and retained grains versus bin size
+(Scan\_0203; detector \texttt{tophat\_band\_adaptive\_snr}, SNR threshold 4,
+linking tolerance 5\,px).}
+\label{tab:counts}
+\small
+\begin{tabular}{@{}lrrrl@{}}
+\toprule
+Bin size & Occupied bins & Raw peaks & Retained grains & Spatial resolution\\
+\midrule
+$1\times1$ & 25{,}170 & 186{,}063 & 1{,}825 & full\\
+$2\times2$ & 7{,}231  & 16{,}915  & 310   & \na\\
+$3\times3$ & 3{,}253  & 9{,}124   & 213   & $52\times74$\\
+$4\times4$ & 1{,}859  & 6{,}125   & 199   & \na\\
+$5\times5$ & 1{,}188  & 3{,}889   & 144   & \na\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[H]
+\centering
+\caption{Signal-to-noise ratio and intensity at real detections rise with
+binning even as total counts fall (Scan\_0203).}
+\label{tab:snr}
+\small
+\begin{tabular}{@{}lll@{}}
+\toprule
+Quantity & $1\times1$ & Binned\\
+\midrule
+Median peak SNR & 5.3 & 17--24\\
+90th-percentile peak SNR & 27 & 357\\
+Median grain intensity (arb.) & 6 & 64\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[H]
+\centering
+\begin{minipage}{0.48\linewidth}\centering
+  \includegraphics[width=\linewidth]{snr_hist_by_binsize}
+  \captionof{figure}{Distribution of detection SNR at each bin size; the
+  distribution shifts to higher SNR as bin size grows.}
+  \label{fig:snrhist}
+\end{minipage}\hfill
+\begin{minipage}{0.48\linewidth}\centering
+  \includegraphics[width=\linewidth]{trend_median_p90_vs_binsize}
+  \captionof{figure}{Median and 90th-percentile detection SNR versus bin size.}
+  \label{fig:snrtrend}
+\end{minipage}
+\end{figure}
+
+The file size of the pre-built binned HDF5 does not fall as fast as the bin count
+(10\,GB at $1\times1$ versus 971\,MB at $5\times5$), because each stored bin
+retains a full-resolution detector image regardless of bin size. Building a
+binned file is the throughput bottleneck (about 15\,min per bin size), while
+detection itself takes seconds to minutes. Taken together, a $3\times3$ bin is a
+practical sweet spot: the SNR gain has largely saturated and the horizontal
+fragmentation is gone, while the spatial resolution ($52\times74$) remains high
+enough to resolve device-scale structure.
+
+\subsection{Automated detector optimization}
+The CVEvolve search at the binned ($5\times5$) scale converged on a top-hat,
+band-limited, adaptive-SNR detector (\texttt{tophat\_band\_adaptive\_snr}) with a
+holdout $F_1$ of 0.79 (Table~\ref{tab:cvevolve}), found in the first search
+round. A parallel search at the unbinned scale raised the holdout $F_2$ from
+0.181 to 0.463 but was not pursued to convergence: only about 0.8\% of the
+25{,}170 occupied bins were labeled, so hard tuning against so few labels risked
+overfitting. We therefore retained the recall-first baseline at $1\times1$ and
+performed detector optimization at the binned scale, where SNR is high and the
+labeled fraction is larger.
+
+\begin{table}[H]
+\centering
+\caption{Summary of the two automated detector-optimization runs (Scan\_0203).}
+\label{tab:cvevolve}
+\small
+\begin{tabular}{@{}lll@{}}
+\toprule
+Quantity & $5\times5$ run & $1\times1$ run\\
+\midrule
+Scoring metric & $F_1$ (40\,px tol.) & mean $F_2$ (recall-weighted)\\
+Labeled bins (dev + holdout) & \na\ + 116 & 138 + 60\\
+Rounds completed & 11 & 13\\
+Baseline score & \na & $F_2=0.181$\\
+Best holdout score & $F_1=0.79$ & $F_2=0.463$\\
+Total wall-clock time (h) & 44.7 & 21.5\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Deskewing the unbinned grid}
+Re-linking unbinned detections by true stage position reduced the fraction of
+single-row grains from 53\% to 33--44\%, confirming that part of the
+fragmentation is a correctable raster artifact. A diagnostic split shows that
+about 38\% of unbinned detections have a same-grain partner one row away but
+shifted outside the linking window (recoverable by deskewing), whereas about 45\%
+have no detection at all in the adjacent row (an SNR dropout, recoverable only by
+binning or a lower threshold). For this sample the systematic skew is small
+(median $\sim$2 columns), so binning is the more effective remedy; deskewing
+would matter more on scans with larger backlash. Consistently, applying the
+deskew to already-binned data degraded the result, so the step is restricted to
+unbinned grids.
+
+\subsection{Device-level grain statistics}
+Applying the full workflow to six focused scans across three perovskite-halide
+devices---distinguished by whether the film was processed in a glove box (GB) and
+by a deionized-water (DI) treatment---reveals reproducible microstructural
+differences. Figure~\ref{fig:gb} compares the glove-box and no-glove-box
+conditions. In the no-glove-box devices, the (001):(111) grain-size ratio changes
+markedly (from $\sim$3.4 to $\sim$0.9) and the largest (111) grain roughly
+doubles relative to the overall device area, indicating substantially enhanced
+(111) grain growth without glove-box control.
+\todo{reconcile wording: the poster states No\_GB ``preserves (001) dominance''
+yet the size ratio falls~--- clarify count-dominance vs.\ size-ratio.}
+
+Figure~\ref{fig:treat} compares the treatment conditions. The DI treatment
+increases both the average size and the total area share of (001)-oriented
+grains: the summed (001):(111) area ratio rises from about 2.9 to 4.6, while the
+mean (001) grain size increases and the (111) population is relatively unchanged.
+As a concrete example of the per-reflection output, for Scan\_0182 the pipeline
+detected 78 (001) grains and 35 (111) grains on the $3\times3$ binned grid, and
+208 (001) versus 104 (111) grains when reconstructed on the true-position grid.
+
+\begin{figure}[H]
+\centering
+\begin{minipage}{0.48\linewidth}\centering
+  \includegraphics[width=\linewidth]{conclusion1_GB}
+  \captionof{figure}{Glove-box vs.\ no-glove-box: (001):(111) grain statistics.}
+  \label{fig:gb}
+\end{minipage}\hfill
+\begin{minipage}{0.48\linewidth}\centering
+  \includegraphics[width=\linewidth]{conclusion2_5pctDI}
+  \captionof{figure}{Effect of the deionized-water (DI) treatment on (001) grain
+  size and area share.}
+  \label{fig:treat}
+\end{minipage}
+\end{figure}
+
+%=====================================================================
+\section{Conclusions and future work}
+%=====================================================================
+We developed xrd-app, an automated command-line computer-vision pipeline that
+turns raw nano-XRD frames into grain-level structural maps, and validated it on
+perovskite-halide solar cells measured at APS 19-ID. Spatial binning raises the
+per-position signal-to-noise ratio approximately linearly with bin size, with a
+practical optimum near $3\times3$; automated detector discovery produced a
+band-limited top-hat detector reaching a holdout $F_1$ of 0.79 at the binned
+scale; and a Union-Find plus Gaussian-profile contouring stage consolidates
+scattered detections into physically meaningful grains while tolerating a less
+restrictive detection threshold. Applied across three devices, the workflow shows
+that processing outside a glove box strongly enhances (111) grain growth relative
+to (001), and that a deionized-water (DI) treatment increases the size and area
+share of (001)-oriented grains. These structure--processing correlations, obtained
+automatically from datasets that would be impractical to analyze by hand,
+demonstrate the pipeline's value for rapid materials feedback.
+
+Future work will (1) apply the same workflow to additional device types, (2)
+correlate the nano-XRD grain maps with spatially aligned X-ray fluorescence
+signatures to connect microstructure with elemental composition, and (3) extend
+the analysis to rocking-curve series in order to reconstruct three-dimensional
+spatial maps of the identified grains.
+
+%=====================================================================
+\section*{Acknowledgments}
+\addcontentsline{toc}{section}{Acknowledgments}
+%=====================================================================
+This work was performed under the Science Undergraduate Laboratory Internship
+(SULI) program, sponsored by the U.S. Department of Energy, Office of Science,
+Office of Workforce Development for Teachers and Scientists. The author thanks
+his mentors Grace and Pedro for guidance throughout the project, and the staff of
+the X-ray Science Division and the In Situ Nanoprobe at the Advanced Photon
+Source. This research used resources of the Advanced Photon Source, a U.S.
+Department of Energy (DOE) Office of Science user facility operated for the DOE
+Office of Science by Argonne National Laboratory under Contract No.
+DE-AC02-06CH11357.
+\todo{confirm mentor surnames and the exact grant/contract wording.}
+
+%=====================================================================
+\appendix
+\section*{Appendix: supplementary figures}
+\addcontentsline{toc}{section}{Appendix}
+%=====================================================================
+The reflection-resolved grain statistics summarized in Section~III~D are shown in
+more detail in Figs.~\ref{fig:areabyrefl}--\ref{fig:chibyrefl}.
+
+\begin{figure}[H]
+\centering
+\begin{minipage}{0.48\linewidth}\centering
+  \includegraphics[width=\linewidth]{area_by_reflection}
+  \captionof{figure}{Grain footprint (area) resolved by reflection.}
+  \label{fig:areabyrefl}
+\end{minipage}\hfill
+\begin{minipage}{0.48\linewidth}\centering
+  \includegraphics[width=\linewidth]{intensity_by_reflection}
+  \captionof{figure}{Integrated grain intensity resolved by reflection.}
+  \label{fig:intbyrefl}
+\end{minipage}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\begin{minipage}{0.48\linewidth}\centering
+  \includegraphics[width=\linewidth]{chi_histogram}
+  \captionof{figure}{Distribution of azimuthal angle $\chi$ over all retained
+  grains.}
+  \label{fig:chihist}
+\end{minipage}\hfill
+\begin{minipage}{0.48\linewidth}\centering
+  \includegraphics[width=\linewidth]{chi_by_reflection}
+  \captionof{figure}{Azimuthal angle $\chi$ resolved by reflection.}
+  \label{fig:chibyrefl}
+\end{minipage}
+\end{figure}
+
+%=====================================================================
+\section*{References}
+\addcontentsline{toc}{section}{References}
+%=====================================================================
+\begin{enumerate}[label={\arabic*.},leftmargin=2em,itemsep=2pt]
+\item M. E. Stuckelberger, T. Nietzold, B. M. West, Y. Luo, X. Li, J. Werner,
+\emph{et al.}, J. Phys. Chem. C \textbf{124}, 17949--17956 (2020).
+\todo{add article title.}
+\item M. Du, X. Yin, Y. Luo, D. Beniwal, S. Tang, H. Sharma, and M. J. Cherukara,
+``CVEvolve: Autonomous algorithm discovery for unstructured scientific data
+processing,'' arXiv:2605.11359 (2026).
+\item Y. Li, Z. Zhang, H. Zhang, Y. Liu, H. Gao, and Y. Mao, ACS Appl. Mater.
+Interfaces \textbf{17}, 48231--48239 (2025). \todo{add article title.}
+\end{enumerate}
+
+\end{document}

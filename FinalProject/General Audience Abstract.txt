@@ -1,0 +1,11 @@
+General Audience Abstract 
+
+Takaji Robson 
+
+During my SULI appointment at Argonne National Laboratory, I worked on improving how scientists analyze X-ray data from promising solar-cell materials. My research took place at the Advanced Photon Source, a U.S. Department of Energy user facility that provides extremely bright X-rays for studying matter at very small scales. I focused on perovskite-halide thin films, which are attractive for next-generation solar cells because they can be highly efficient and potentially less expensive to manufacture than traditional materials. 
+
+To understand these materials, researchers at the APS-19ID beamline use nano-focused X-ray diffraction to map the size and orientation of tiny crystal grains within a film. However, each scan can produce hundreds of thousands of images, creating a major data-processing challenge. During my appointment, I developed xrd-app, a command-line software tool that automates this analysis. The workflow compresses raw data, detects diffraction signals, and links related measurements across neighboring scan points to reconstruct grain-level structural features. I also used methods such as spatial binning and clustering to improve the detection of weaker signals and make the analysis faster and more reliable. 
+
+Applying this tool to scans from perovskite solar-cell samples showed that processing conditions affect crystal structure. Samples handled outside a glove box displayed a stronger preferred crystal orientation, and adding a small amount of deionized water increased the average size of grains with that orientation. These findings help connect fabrication methods to material structure, which is important for improving device performance. 
+
+This work supports the Department of Energy mission by advancing materials research for clean energy technologies and by improving the computational tools needed to study them efficiently. Through this experience, I strengthened my skills in scientific programming, data analysis, and communicating research to broad audiences, while gaining firsthand experience in a national laboratory environment and collaborative energy research. 

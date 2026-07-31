@@ -394,6 +394,10 @@ class DataManager:
         tag = f"_{variant}" if variant else ""
         return self.labels_dir(scan) / f"{algo}_hdmap_{bin_size}x{bin_size}{tag}.json"
 
+    def roi_map_json(self, name: str, bin_size: int, scan: object = None) -> Path:
+        """Spatial intensity map made from a manually selected detector ROI."""
+        return self.labels_dir(scan) / f"{name}_roimap_{bin_size}x{bin_size}.json"
+
     def manual_labels_json(self, scan: object = None) -> Path:
         return self.labels_dir(scan) / "manual_labels.json"
 

@@ -37,14 +37,28 @@ DEFAULT_MAX_PEAKS_PER_BIN = 25
 # ── Phase 1: per-bin detection ─────────────────────────────────────
 def detect_peaks_with_intensity(image, tth_map, degs, deg_labels, tth_data, det,
                                 snr_threshold=DEFAULT_SNR,
-                                max_peaks=DEFAULT_MAX_PEAKS_PER_BIN):
-    """Run the detector pipeline but preserve intensity/SNR per peak."""
+                                max_peaks=DEFAULT_MAX_PEAKS_PER_BIN,
+                                detector_roi=None):
+    """Run the detector pipeline but preserve intensity/SNR per peak.
+
+    ``detector_roi`` is a half-open ``(x0, y0, x1, y1)`` rectangle. It is
+    intersected with each 2θ band before connected-component detection, so the
+    selected detector area is a true search constraint rather than a later
+    centroid filter.
+    """
     cleaned = det.radial_median_subtract(image, tth_data)
     tophat = det.fast_tophat(cleaned, size=15)
     bands = det.build_tth_band_masks(tth_map, degs, deg_labels, tth_tolerance=0.4)
+    roi_mask = None
+    if detector_roi is not None:
+        x0, y0, x1, y1 = detector_roi
+        roi_mask = np.zeros(image.shape, dtype=bool)
+        roi_mask[y0:y1, x0:x1] = True
 
     all_peaks = []
     for label, band_mask in bands.items():
+        if roi_mask is not None:
+            band_mask = band_mask & roi_mask
         peaks = det.detect_in_band(
             tophat, cleaned, band_mask, label,
             snr_threshold=snr_threshold, min_pixels=3, max_pixels=150,
@@ -89,7 +103,7 @@ def _detect_one_bin(bk):
     image = np.clip(_DET_STATE["h5"][bk][:].astype(np.float64), 0, 1e9)
     peaks, cleaned = detect_peaks_with_intensity(
         image, c["tth_map"], c["degs"], c["deg_labels"], c["tth_data"],
-        c["det"], c["snr"])
+        c["det"], c["snr"], detector_roi=c.get("detector_roi"))
     if peaks:
         for p in peaks:
             r = 3
@@ -102,7 +116,7 @@ def _detect_one_bin(bk):
 def run_detection_all_bins(h5_path, tth_map, degs, deg_labels, det,
                            snr_threshold=DEFAULT_SNR, log: Callable[[str], None] = print,
                            progress: Callable[[int, int], None] = None,
-                           n_workers: int = None):
+                           n_workers: int = None, detector_roi=None):
     """Detect peaks in every bin and return {bin_key: [peak_dicts]}.
 
     Per-bin detection is CPU-bound and independent, so it runs across cores
@@ -126,7 +140,8 @@ def run_detection_all_bins(h5_path, tth_map, degs, deg_labels, det,
 
     global _DET_CTX
     _DET_CTX = dict(det=det, tth_map=tth_map, degs=degs, deg_labels=deg_labels,
-                    tth_data=tth_data, snr=snr_threshold, h5_path=str(h5_path))
+                    tth_data=tth_data, snr=snr_threshold, h5_path=str(h5_path),
+                    detector_roi=detector_roi)
 
     def _consume(it):
         for i, (bk, peaks) in enumerate(it):
@@ -253,6 +268,8 @@ def run_peaks(
     progress: Callable[[int, int], None] = None,
     log: Callable[[str], None] = print,
     n_workers: int = None,
+    detector_roi=None,
+    reflection: str = None,
 ) -> dict:
     """Phase 1 only: run a detector over every bin → per-bin peaks.
 
@@ -265,13 +282,32 @@ def run_peaks(
     cleaned_intensity, …) so it round-trips into :func:`run_shapes`.
     """
     det = io.load_module(detector_path)
+    required = ("precompute_tth", "radial_median_subtract", "fast_tophat",
+                "build_tth_band_masks", "detect_in_band")
+    missing = [name for name in required if not hasattr(det, name)]
+    if missing:
+        raise TypeError(f"Detector {detector_path} does not support binned peak "
+                        f"detection; missing: {', '.join(missing)}")
     tth_map = io.load_tth_map(tth_path)
     degs, deg_labels = io.load_reflections(reflections_path)
+    if reflection is not None:
+        selected = [(d, label) for d, label in zip(degs, deg_labels)
+                    if label == reflection]
+        if not selected:
+            raise ValueError(f"Reflection {reflection!r} is not in {reflections_path}")
+        degs, deg_labels = map(list, zip(*selected))
+    if detector_roi is not None:
+        from .roi_map import normalize_roi
+        x0, y0, x1, y1 = normalize_roi(detector_roi)
+        x1, y1 = min(x1, tth_map.shape[1]), min(y1, tth_map.shape[0])
+        if x1 <= x0 or y1 <= y0:
+            raise ValueError("Detector ROI lies outside the detector image")
+        detector_roi = (x0, y0, x1, y1)
     log(f"  Reflections: {deg_labels}")
 
     all_detections = run_detection_all_bins(
         bins_h5, tth_map, degs, deg_labels, det, snr_threshold, log, progress,
-        n_workers=n_workers)
+        n_workers=n_workers, detector_roi=detector_roi)
 
     peaks_by_bin = {bk: _coerce(peaks) for bk, peaks in all_detections.items()}
     n_peaks = sum(len(v) for v in peaks_by_bin.values())
@@ -281,6 +317,10 @@ def run_peaks(
         "snr": snr_threshold,
         "n_peaks": n_peaks,
         "n_bins_with_peaks": len(peaks_by_bin),
+        "detector_roi": ({"x0": detector_roi[0], "y0": detector_roi[1],
+                          "x1": detector_roi[2], "y1": detector_roi[3]}
+                         if detector_roi is not None else None),
+        "reflection": reflection,
         "peaks_by_bin": peaks_by_bin,
     }
 

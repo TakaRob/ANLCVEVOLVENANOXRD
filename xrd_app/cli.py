@@ -500,6 +500,16 @@ def gui(root, scan, bin_size, fresh):
     raise SystemExit(launch_app(root, scan=scan, bin_size=bin_size, fresh=fresh))
 
 
+@main.command(name='roifeature')
+@click.option('--source', default=None,
+              help='Existing project folder or raw Scan_NNNN folder (otherwise choose in GUI)')
+@click.option('--bin-size', type=int, default=3, help='Spatial bin size for feature finding')
+def roi_feature_gui(source, bin_size):
+    """Open the focused ROI-feature GUI, optionally directly from a raw scan."""
+    from .gui.roifeature import launch
+    raise SystemExit(launch(source=source, bin_size=bin_size))
+
+
 # ─────────────────────────────────────────────────────────────────────
 # shared helpers
 # ─────────────────────────────────────────────────────────────────────
@@ -1125,6 +1135,106 @@ def shapes(bin_size, scan, algorithm, from_peaks, peak_algo, link_tolerance, var
 
     click.echo(f"\nDone: {result['n_kept']} shapes kept, "
                f"{result['n_filtered']} filtered -> {out}")
+
+
+# ─────────────────────────────────────────────────────────────────────
+# roi-shapes — detector ROI peak search -> standard shape catalog
+# ─────────────────────────────────────────────────────────────────────
+@main.command(name='roi-shapes')
+@click.option('--bin-size', type=int, default=3, help='Spatial bin size to process')
+@click.option('--scan', default=None, help='Scan number/name (defaults to config scan)')
+@click.option('--peak-algorithm', default=None, help='Peak detector path or bundled name')
+@click.option('--shape-algorithm', default='gaussian', help='Shape algorithm path or bundled name')
+@click.option('--reflection', required=True, help='Reflection label to search, e.g. (011)')
+@click.option('--roi', required=True, help='Detector rectangle X0,Y0,X1,Y1 (half-open pixels)')
+@click.option('--name', required=True, help='Output tag used by Shape/Verify catalogs')
+@click.option('--snr', type=float, default=4.0, help='SNR threshold for peak detection')
+@click.option('--link-tolerance', type=int, default=5, help='Cross-bin link tolerance (px)')
+@click.option('--root', default='.', help='Project root directory')
+def roi_shapes(bin_size, scan, peak_algorithm, shape_algorithm, reflection, roi,
+               name, snr, link_tolerance, root):
+    """Find one reflection inside a detector ROI, then build standard shapes."""
+    import re
+    from .core import catalogs, lineage, processing
+
+    try:
+        detector_roi = tuple(int(v.strip()) for v in roi.split(','))
+        if len(detector_roi) != 4:
+            raise ValueError
+    except ValueError:
+        raise click.BadParameter('expected X0,Y0,X1,Y1', param_hint='--roi')
+    tag = re.sub(r'[^A-Za-z0-9_.-]+', '_', name.strip()).strip('_.-')
+    if not tag:
+        raise click.BadParameter('must contain letters or numbers', param_hint='--name')
+
+    dm = DataManager(root, scan=scan)
+    h5 = dm.binned_h5(bin_size, scan=scan)
+    tth = dm.tth_map(scan=scan)
+    refl = dm.reflections(scan=scan)
+    gm = dm.grid_mapping(bin_size=bin_size, scan=scan)
+    det = dm.detector_script(peak_algorithm, bin_size=bin_size)
+    pos = dm.position_csv(scan=scan) if bin_size == 1 else None
+    coordinate = bool(pos and Path(pos).exists())
+    effective_shape = ('territory' if coordinate and shape_algorithm in (None, 'gaussian')
+                       else shape_algorithm)
+    shape = dm.shape_script(effective_shape)
+    for label, path in (("tth", tth), ("reflections", refl),
+                        ("grid mapping", gm), ("peak detector", det),
+                        ("shape algorithm", shape)):
+        _require(path, label)
+    if not Path(h5).exists():
+        from .core import io
+        gm_data = io.load_grid_mapping(gm)
+        archive = dm.unbinned_archive_h5(scan=scan)
+        click.echo(f"[roi-shapes] {bin_size}x{bin_size} bins are not built; "
+                   "building them from the lossless archive/raw frames...")
+        io.build_bins(gm_data, h5, bin_size=bin_size, compression="zstd",
+                      log=click.echo, archive=archive if archive.exists() else None)
+
+    peak_algo = Path(det).stem
+    peak_result = processing.run_peaks(
+        bins_h5=h5, tth_path=tth, detector_path=det, reflections_path=refl,
+        bin_size=bin_size, snr_threshold=snr, detector_roi=detector_roi,
+        reflection=reflection, progress=_make_progress("ROI peaks"), log=click.echo)
+    peak_result["scan"] = dm.scan_name
+    peak_result["algorithm"] = peak_algo
+    peak_result["lineage"] = lineage.peak_lineage(
+        scan=dm.scan_name, bin_size=bin_size, algorithm=peak_algo,
+        detector_file=det, snr=snr)
+    peak_result["lineage"].update({"detector_roi": peak_result["detector_roi"],
+                                   "reflection": reflection, "manual_roi": True})
+    peaks_out = dm.peaks_json(peak_algo, bin_size, scan, variant=tag)
+    _write_json(peaks_out, peak_result)
+    catalogs.record_catalog(dm.labels_dir(scan), peaks_out.name, peak_result["lineage"])
+
+    grid_for_run = gm
+    if coordinate:
+        from .core import io, territory
+        grid_for_run = io.load_grid_mapping(gm)
+        n_total = grid_for_run.get("n_total_frames") or len(grid_for_run.get("frame_map", []))
+        frame_x, frame_y = io.load_positions_xy(pos, n_total)
+        territory.add_coordinate_neighbors(grid_for_run, frame_x, frame_y, log=click.echo)
+    elif bin_size == 1:
+        click.echo("[roi-shapes] no position CSV; using the saved 1x1 grid for linking")
+
+    shape_result = processing.run_shapes(
+        peaks=peak_result, tth_path=tth, grid_mapping=grid_for_run, reflections_path=refl,
+        bin_size=bin_size, link_tolerance=link_tolerance, shape_path=shape,
+        progress=_make_progress("ROI shapes"), log=click.echo)
+    shape_algo = Path(shape).stem
+    shape_result.update({"scan": dm.scan_name, "shape_algo": shape_algo,
+                         "peak_source": peak_algo})
+    shape_result["lineage"] = lineage.shape_lineage(
+        scan=dm.scan_name, bin_size=bin_size, shape_algorithm=shape_algo,
+        link_tolerance=link_tolerance, peak_source=peak_result["lineage"],
+        peak_source_file=peaks_out.name)
+    shapes_out = dm.shapes_json(shape_algo, bin_size, scan, variant=tag)
+    _write_json(shapes_out, shape_result)
+    catalogs.record_catalog(dm.labels_dir(scan), shapes_out.name,
+                            shape_result["lineage"])
+    click.echo(f"\nDone: {peak_result['n_peaks']} ROI peaks; "
+               f"{shape_result['n_kept']} shapes kept, "
+               f"{shape_result['n_filtered']} filtered -> {shapes_out}")
 
 
 # ─────────────────────────────────────────────────────────────────────

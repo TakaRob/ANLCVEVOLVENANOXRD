@@ -1,0 +1,9 @@
+ 
+
+Title: 
+
+High-Resolution Structural Mapping of Perovskite Thin Films. Resolving (111) and (001) Microstructures via Automated Nano-XRD Analysis and a CLI-Based Computer Vision Pipeline 
+
+Abstract: 
+
+Nano-focused X-ray diffraction (nano-XRD) at the Advanced Photon Source (APS) 19-ID beamline provides spatially resolved measurements of crystal grain size and orientation in semiconductor thin films, but each scan can generate on the order of 10^5 diffraction frames, creating a computational bottleneck for rapid analysis. To address this challenge, we developed xrd-app, a command-line computer vision pipeline for automated processing of raw HDF5 nano-XRD data. The workflow performs data compression, frame-by-frame Bragg peak detection, and spatial linking of neighboring detections to reconstruct grain-level structural features efficiently. Two main design strategies improve speed and robustness. First, CVEvolve is used to generate tuned peak-detection algorithms optimized for diffraction data. Second, spatial binning combines neighboring frames, increasing the per-position signal-to-noise ratio approximately linearly with bin size and improving detections of weaker peaks. Detected signals are then consolidated through a contouring stage based on Union-Find clustering and Gaussian-profile filtering, which merges scattered peak detections into coherent grain outlines. We applied this workflow to six focused scans across three perovskite-halide solar cells. The results indicate that samples processed outside a glove box exhibit a stronger preferred (001)(001) orientation relative to (111), while 5% DI treatment increases the average size of (001) oriented grains. 
