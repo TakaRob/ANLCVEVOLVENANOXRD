@@ -291,6 +291,7 @@ class HeatmapView(pg.GraphicsLayoutWidget):
         self.plot.addItem(self.img)
         self.colorbar = None
         self._markers = []
+        self._grid_items = []
         self._click_cb = None
         self._hover_cb = None
         self._grid_data = None
@@ -354,22 +355,44 @@ class HeatmapView(pg.GraphicsLayoutWidget):
         pt = self.plot.getViewBox().mapSceneToView(scene_pos)
         return pt.x(), pt.y()
 
+    def set_cell_outlines(self):
+        """Draw black pixel-aligned borders around every populated heatmap cell."""
+        for item in self._grid_items:
+            self.plot.removeItem(item)
+        self._grid_items = []
+        if self._grid_data is None:
+            return
+        rows, cols = np.nonzero(np.isfinite(self._grid_data))
+        for ri, ci in zip(rows, cols):
+            row, col = ri + self._grid_r_lo, ci + self._grid_c_lo
+            rect = QGraphicsRectItem(col - 0.5, row - 0.5, 1, 1)
+            pen = QPen(_qcolor("black"))
+            pen.setCosmetic(True)
+            pen.setWidthF(1.0)
+            rect.setPen(pen)
+            rect.setBrush(QBrush(Qt.NoBrush))
+            rect.setZValue(6)
+            self.plot.addItem(rect)
+            self._grid_items.append(rect)
+
     def set_markers(self, center, highlight):
-        """Redraw the white (center) and cyan (selected) bin markers."""
+        """Outline the center and fill the clicked cell with a distinct color."""
         for it in self._markers:
             self.plot.removeItem(it)
         self._markers = []
         center_color = "k" if self._white_bg else "w"
-        for bin_rc, pen_color, z in ((center, center_color, 8), (highlight, "c", 9)):
-            if bin_rc is None:
-                continue
-            r, c = bin_rc
-            s = pg.ScatterPlotItem([c], [r], symbol="s", size=16,
-                                   pen=pg.mkPen(pen_color, width=2),
-                                   brush=pg.mkBrush(None))
-            s.setZValue(z)
-            self.plot.addItem(s)
-            self._markers.append(s)
+        if center is not None:
+            r, c = center
+            rect = QGraphicsRectItem(c - 0.5, r - 0.5, 1, 1)
+            pen = QPen(_qcolor(center_color)); pen.setCosmetic(True); pen.setWidthF(2.5)
+            rect.setPen(pen); rect.setBrush(QBrush(Qt.NoBrush)); rect.setZValue(8)
+            self.plot.addItem(rect); self._markers.append(rect)
+        if highlight is not None:
+            r, c = highlight
+            rect = QGraphicsRectItem(c - 0.5, r - 0.5, 1, 1)
+            pen = QPen(_qcolor("cyan")); pen.setCosmetic(True); pen.setWidthF(3.0)
+            rect.setPen(pen); rect.setBrush(QBrush(_qcolor("cyan", 0.45))); rect.setZValue(9)
+            self.plot.addItem(rect); self._markers.append(rect)
 
     def _on_move(self, scene_pos):
         if self._hover_cb is None:
@@ -507,6 +530,7 @@ class DetectorView(pg.GraphicsLayoutWidget):
         self._display_data = None
         self._hover_cb = None
         self._click_cb = None
+        self.click_while_drag_enabled = False
         self.plot.scene().sigMouseMoved.connect(self._on_move)
         self.plot.scene().sigMouseClicked.connect(self._on_click)
 
@@ -590,7 +614,7 @@ class DetectorView(pg.GraphicsLayoutWidget):
     def _on_click(self, ev):
         if self._click_cb is None or ev.button() != Qt.LeftButton:
             return
-        if self.vb.drag_enabled:
+        if self.vb.drag_enabled and not self.click_while_drag_enabled:
             return
         pos = self._scene_to_view(ev.scenePos())
         if pos is None:
@@ -1457,12 +1481,34 @@ class FeatureViewer(QMainWindow):
         left_vbox.addWidget(left_splitter)
         splitter.addWidget(left_container)
 
-        # Center: detector image
+        # Center: detector image + its own intensity-scale controls. These mirror
+        # the Visualization panel so contrast/log remain accessible while clicking
+        # through features without scrolling the right sidebar.
+        detector_container = QWidget()
+        detector_layout = QVBoxLayout(detector_container)
+        detector_layout.setContentsMargins(0, 0, 0, 0)
         self.detector_canvas = DetectorView()
         self.detector_canvas.set_hover_callback(self._on_detector_hover)
         self.detector_canvas.set_click_callback(self._on_detector_click)
         self.detector_canvas.set_drag_callback(self._on_explore_drag)
-        splitter.addWidget(self.detector_canvas)
+        detector_layout.addWidget(self.detector_canvas, 1)
+        detector_scale = QHBoxLayout()
+        detector_scale.addWidget(QLabel("Detector intensity percentile:"))
+        self.detector_vmin_val = QLineEdit("2.0")
+        self.detector_vmin_val.setFixedWidth(52)
+        self.detector_vmin_val.setToolTip("Minimum display percentile (0-100)")
+        detector_scale.addWidget(self.detector_vmin_val)
+        detector_scale.addWidget(QLabel("to"))
+        self.detector_vmax_val = QLineEdit("98.5")
+        self.detector_vmax_val.setFixedWidth(52)
+        self.detector_vmax_val.setToolTip("Maximum display percentile (0-100)")
+        detector_scale.addWidget(self.detector_vmax_val)
+        self.detector_log_cb = QCheckBox("Log")
+        self.detector_log_cb.setToolTip("Log-scale the detector image display")
+        detector_scale.addWidget(self.detector_log_cb)
+        detector_scale.addStretch()
+        detector_layout.addLayout(detector_scale)
+        splitter.addWidget(detector_container)
 
         # Right: controls
         right_scroll = QWidget()
@@ -2416,6 +2462,9 @@ class FeatureViewer(QMainWindow):
         self.vmax_slider.valueChanged.connect(self._on_contrast_changed)
         self.vmin_val.editingFinished.connect(self._on_vmin_text)
         self.vmax_val.editingFinished.connect(self._on_vmax_text)
+        self.detector_vmin_val.editingFinished.connect(self._on_detector_vmin_text)
+        self.detector_vmax_val.editingFinished.connect(self._on_detector_vmax_text)
+        self.detector_log_cb.toggled.connect(self._on_detector_log_changed)
 
         self.noise_cb.toggled.connect(self._on_noise_toggle)
         self.noise_algo_combo.currentIndexChanged.connect(self._on_noise_algo_changed)
@@ -2840,6 +2889,7 @@ class FeatureViewer(QMainWindow):
         if Z is None:
             hv.img.clear()
             hv._grid_data = None
+            hv.set_cell_outlines()
             hv.set_markers(None, None)
             self._update_heatmap_colorbar(None, None, None)
             hv.plot.setTitle("No profile data", color="w", size="9pt")
@@ -2858,6 +2908,7 @@ class FeatureViewer(QMainWindow):
         hv.img.setImage(rgba, autoLevels=False)
         hv.img.setRect(QRectF(c_lo - 0.5, r_lo - 0.5, nc, nr))
         hv.fit_to_rect(c_lo - 0.5, r_lo - 0.5, nc, nr)
+        hv.set_cell_outlines()
         self._update_heatmap_colorbar(cmap, vmin, vmax)
 
         center = self._parse_bin(feat.get("center_bin", ""))
@@ -3160,6 +3211,7 @@ class FeatureViewer(QMainWindow):
             self._clear_heat_outlines()
             hv.img.clear()
             hv._grid_data = None
+            hv.set_cell_outlines()
             hv.set_markers(None, None)
             self._update_heatmap_colorbar(None, None, None)
             hv.plot.setTitle("No 1×1 data in region", color="w", size="9pt")
@@ -3178,6 +3230,7 @@ class FeatureViewer(QMainWindow):
         hv.img.setImage(rgba, autoLevels=False)
         hv.img.setRect(QRectF(c_lo - 0.5, r_lo - 0.5, nc, nr))
         hv.fit_to_rect(c_lo - 0.5, r_lo - 0.5, nc, nr)
+        hv.set_cell_outlines()
         self._update_heatmap_colorbar(cmap, vmin, vmax)
 
         self._draw_1x1_outlines(feat, bounds)
@@ -4347,7 +4400,13 @@ class FeatureViewer(QMainWindow):
 
     def _on_log_changed(self, state):
         self._log_scale = bool(state)
+        self.detector_log_cb.blockSignals(True)
+        self.detector_log_cb.setChecked(self._log_scale)
+        self.detector_log_cb.blockSignals(False)
         self._refresh_display()
+
+    def _on_detector_log_changed(self, checked):
+        self.log_cb.setChecked(bool(checked))
 
     def _on_contrast_changed(self, *_):
         lo = self.vmin_slider.value() / 10.0
@@ -4356,6 +4415,8 @@ class FeatureViewer(QMainWindow):
         self._vmax_pct = hi
         self.vmin_val.setText(f"{lo:.1f}")
         self.vmax_val.setText(f"{hi:.1f}")
+        self.detector_vmin_val.setText(f"{lo:.1f}")
+        self.detector_vmax_val.setText(f"{hi:.1f}")
         self._refresh_detector_only()
 
     def _set_contrast_preset(self, lo, hi):
@@ -4380,6 +4441,26 @@ class FeatureViewer(QMainWindow):
             self.vmax_slider.setValue(int(val * 10))
         except ValueError:
             pass
+
+    def _on_detector_vmin_text(self):
+        try:
+            value = max(0.0, min(99.9, float(self.detector_vmin_val.text())))
+        except ValueError:
+            self.detector_vmin_val.setText(f"{self._vmin_pct:.1f}")
+            return
+        if value >= self._vmax_pct:
+            value = max(0.0, self._vmax_pct - 0.1)
+        self.vmin_slider.setValue(int(round(value * 10)))
+
+    def _on_detector_vmax_text(self):
+        try:
+            value = max(0.1, min(100.0, float(self.detector_vmax_val.text())))
+        except ValueError:
+            self.detector_vmax_val.setText(f"{self._vmax_pct:.1f}")
+            return
+        if value <= self._vmin_pct:
+            value = min(100.0, self._vmin_pct + 0.1)
+        self.vmax_slider.setValue(int(round(value * 10)))
 
     # ── Noise reduction ────────────────────────────────────────────
 

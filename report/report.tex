@@ -34,7 +34,7 @@
 \usepackage{indentfirst}
 \usepackage[hidelinks]{hyperref}
 
-\graphicspath{{../report_figures/}{../}}
+\graphicspath{{../report_figures/}{../FinalProject/Figures/roi_shape_comparison/}{../}}
 
 % --- AIP heading numbering: I. / A. / 1. / a. ---
 \renewcommand{\thesection}{\Roman{section}}
@@ -367,6 +367,76 @@ Total wall-clock time (h) & 44.7 & 21.5\\
 \end{tabular}
 \end{table}
 
+\subsection{Outline robustness relative to fixed detector-ROI thresholding}
+A conventional alternative to linked peak detection is to place a fixed detector
+region of interest (ROI) around a known Bragg spot, integrate that aperture at
+every scan position, and define the grain as the connected region above a chosen
+SNR limit. We compared this approach with xrd-app for Scan\_0203 using a
+$7\times7$-pixel signal aperture, a surrounding $17\times17$-pixel background
+window, and the same $3\times3$ spatial bins. The independently constructed
+territorial map, which bins frames using their true stage coordinates, provided a
+common reference. Features were matched across the regular and territorial maps
+by reflection, detector position, and overlap among their underlying raw frames.
+Of the credible matches, three representative cases were selected objectively at
+the 90th, 50th, and 10th percentiles of elliptical-Gaussian fit quality
+($R^2$), rather than by visual preference.
+
+Figure~\ref{fig:roicomparison} shows the territorial footprint, xrd-app outline,
+fixed-ROI outline at SNR 4, and an edge profile for each case. The Gaussian curve
+in the final column is a fit used to display profile breadth; it is not an extra
+acceptance step in the production pipeline. Production xrd-app instead requires
+a non-flat, generally decreasing intensity profile after adaptive peak detection
+and spatial linking. This distinction matters for the poor case: its spatial
+profile is visibly non-Gaussian ($R^2=0.30$), but local detector continuity still
+recovers a coherent footprint with an intersection-over-union (IoU) of 0.61
+against the territorial reference. The fixed ROI reaches at most 0.52 for this
+feature over the tested thresholds and only 0.32 at SNR 4. For the ideal and
+median cases, xrd-app gives IoU values of 0.43 and 0.49, respectively. A tuned
+fixed ROI approaches these values, showing that simple thresholding remains
+adequate for compact, high-quality profiles when the correct cutoff is already
+known.
+
+\begin{figure}[p]
+\centering
+\includegraphics[width=\textwidth]{roi_vs_xrdapp_examples}
+\caption{Fixed detector-ROI thresholding compared with xrd-app for matched
+Scan\_0203 features. Rows show ideal, median, and poor Gaussian-fit cases selected
+at the 90th, 50th, and 10th percentiles of fit $R^2$. Columns show the
+true-position territorial reference, the $3\times3$ xrd-app linked shape, the
+connected fixed-ROI region at SNR 4, and the SNR dropoff along the fitted major
+axis. Orange points are xrd-app detections that follow local Bragg-peak movement;
+open blue points use one fixed detector aperture. Orange curves are
+visualization-only Gaussian fits, and dashed lines mark the SNR cutoff. The poor
+case demonstrates that xrd-app can retain a reproducible outline even when the
+intensity profile is not well described by one Gaussian.}
+\label{fig:roicomparison}
+\end{figure}
+
+The principal weakness of fixed-ROI segmentation is therefore not that every
+chosen cutoff fails, but that the required cutoff and resulting area are
+feature-dependent. Figure~\ref{fig:roisensitivity} sweeps the conventional SNR
+limit from 2 to 8. The inferred area changes from 13 to 35 bins for the ideal
+case, from 0 to 48 bins for the median case, and from 65 to 269 bins for the poor
+case. The median feature disappears completely at SNR 7 even though xrd-app
+retains a linked 16-bin shape. In contrast, the saved xrd-app outline has no
+feature-specific outline threshold to tune after detection: a common detector
+SNR threshold is followed by local detector-position matching and a spatial
+profile consistency test. This combination makes the reconstructed boundary less
+sensitive to isolated noisy or missing positions while still allowing imperfect
+physical shapes.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=\textwidth]{roi_threshold_sensitivity}
+\caption{Sensitivity of conventional fixed-ROI outlines to the selected SNR
+cutoff. Blue curves give frame-footprint IoU with the independently binned
+territorial reference; stars mark the best cutoff for each feature. Orange lines
+give the IoU of the saved xrd-app shape, which is unchanged throughout the
+conventional threshold sweep. The conventional area varies by factors of
+approximately 2.7--4.1 and can vanish entirely for a moderate-SNR feature.}
+\label{fig:roisensitivity}
+\end{figure}
+
 \subsection{Deskewing the unbinned grid}
 Re-linking unbinned detections by true stage position reduced the fraction of
 single-row grains from 53\% to 33--44\%, confirming that part of the
@@ -426,7 +496,10 @@ practical optimum near $3\times3$; automated detector discovery produced a
 band-limited top-hat detector reaching a holdout $F_1$ of 0.79 at the binned
 scale; and a Union-Find plus Gaussian-profile contouring stage consolidates
 scattered detections into physically meaningful grains while tolerating a less
-restrictive detection threshold. Applied across three devices, the workflow shows
+restrictive detection threshold. Against a true-position territorial reference,
+this linked approach remains effective for nonideal profiles for which a fixed
+ROI requires feature-specific threshold tuning and can change the inferred area
+by severalfold. Applied across three devices, the workflow shows
 that processing outside a glove box strongly enhances (111) grain growth relative
 to (001), and that a deionized-water (DI) treatment increases the size and area
 share of (001)-oriented grains. These structure--processing correlations, obtained
@@ -459,7 +532,7 @@ DE-AC02-06CH11357.
 \section*{Appendix: supplementary figures}
 \addcontentsline{toc}{section}{Appendix}
 %=====================================================================
-The reflection-resolved grain statistics summarized in Section~III~D are shown in
+The reflection-resolved grain statistics summarized in Section~III~E are shown in
 more detail in Figs.~\ref{fig:areabyrefl}--\ref{fig:chibyrefl}.
 
 \begin{figure}[H]

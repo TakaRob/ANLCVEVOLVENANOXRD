@@ -37,6 +37,56 @@ def _parse_key(key):
         return None
 
 
+def auto_roi_from_click(image, x: int, y: int, *, search_radius: int = 25,
+                        fit_radius: int = 18, sigma_extent: float = 2.0):
+    """Snap to a local maximum and bound its connected Gaussian-like footprint.
+
+    Background is estimated from the fit-window border. The component threshold
+    is ``exp(-sigma_extent² / 2)`` of the background-subtracted peak, corresponding
+    to the requested Gaussian sigma extent (2σ by default).
+    """
+    from scipy import ndimage
+
+    image = np.asarray(image, dtype=float)
+    if image.ndim != 2:
+        raise ValueError("Detector image must be two-dimensional")
+    h, w = image.shape
+    x, y = int(x), int(y)
+    x0, x1 = max(0, x - search_radius), min(w, x + search_radius + 1)
+    y0, y1 = max(0, y - search_radius), min(h, y + search_radius + 1)
+    search = image[y0:y1, x0:x1]
+    if not search.size or not np.isfinite(search).any():
+        return None
+    local_y, local_x = np.unravel_index(np.nanargmax(search), search.shape)
+    peak_x, peak_y = x0 + int(local_x), y0 + int(local_y)
+
+    fx0, fx1 = max(0, peak_x - fit_radius), min(w, peak_x + fit_radius + 1)
+    fy0, fy1 = max(0, peak_y - fit_radius), min(h, peak_y + fit_radius + 1)
+    patch = image[fy0:fy1, fx0:fx1]
+    border = np.concatenate((patch[0], patch[-1], patch[:, 0], patch[:, -1]))
+    background = float(np.nanmedian(border))
+    signal = np.clip(patch - background, 0, None)
+    peak = float(signal[peak_y - fy0, peak_x - fx0])
+    if not np.isfinite(peak) or peak <= 0:
+        half = 5
+        return (max(0, peak_x - half), max(0, peak_y - half),
+                min(w, peak_x + half + 1), min(h, peak_y + half + 1))
+
+    threshold = peak * np.exp(-(float(sigma_extent) ** 2) / 2.0)
+    mask = signal >= threshold
+    labels, _ = ndimage.label(mask, structure=np.ones((3, 3), dtype=int))
+    label = labels[peak_y - fy0, peak_x - fx0]
+    component = labels == label if label else mask
+    ys, xs = np.nonzero(component)
+    if not len(xs):
+        return None
+    margin = 2
+    return (max(0, fx0 + int(xs.min()) - margin),
+            max(0, fy0 + int(ys.min()) - margin),
+            min(w, fx0 + int(xs.max()) + margin + 1),
+            min(h, fy0 + int(ys.max()) + margin + 1))
+
+
 def sample_roi(
     source,
     roi,
@@ -125,6 +175,7 @@ def to_shape_feature(result: dict, reflection: str, *, feature_id: int = 1,
         item = {
             "intensity": round(float(entry["intensity"]), 1),
             "integrated": round(float(entry["integrated"]), 1),
+            "mean": round(float(entry["mean"]), 3),
             "det_x": det_x,
             "det_y": det_y,
         }

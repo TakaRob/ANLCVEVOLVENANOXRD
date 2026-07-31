@@ -76,6 +76,31 @@ def test_to_shape_feature_creates_one_complete_manual_feature():
     assert "manual fixed detector ROI" in feature["reason"]
 
 
+def test_auto_roi_snaps_to_and_bounds_gaussian_peak():
+    yy, xx = np.mgrid[:80, :90]
+    image = 5.0 + 100.0 * np.exp(-((xx - 52) ** 2 / (2 * 4 ** 2) +
+                                  (yy - 31) ** 2 / (2 * 6 ** 2)))
+
+    bounds = roi_map.auto_roi_from_click(image, 47, 35)
+
+    x0, y0, x1, y1 = bounds
+    assert x0 < 52 < x1
+    assert y0 < 31 < y1
+    assert 10 <= x1 - x0 <= 25
+    assert 15 <= y1 - y0 <= 35
+
+
+def test_auto_roi_ignores_brighter_disconnected_neighbor():
+    yy, xx = np.mgrid[:70, :80]
+    clicked = 80.0 * np.exp(-((xx - 25) ** 2 + (yy - 30) ** 2) / (2 * 3 ** 2))
+    neighbor = 120.0 * np.exp(-((xx - 44) ** 2 + (yy - 30) ** 2) / (2 * 3 ** 2))
+    bounds = roi_map.auto_roi_from_click(clicked + neighbor, 25, 30, search_radius=8)
+
+    x0, y0, x1, y1 = bounds
+    assert x0 < 25 < x1
+    assert not (x0 <= 44 < x1)
+
+
 def test_fixed_roi_matches_known_spatial_maximum():
     class Source:
         def keys(self):
