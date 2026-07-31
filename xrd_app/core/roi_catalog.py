@@ -17,6 +17,23 @@ def load(path) -> dict:
     return data if isinstance(data, dict) else {}
 
 
+def discover(labels_dir, bin_size: int) -> list[Path]:
+    """Return valid manual ROI catalogs for one scan and spatial bin size."""
+    labels_dir = Path(labels_dir)
+    if not labels_dir.is_dir():
+        return []
+    paths = []
+    for path in labels_dir.glob(f"*_roimap_{int(bin_size)}x{int(bin_size)}.json"):
+        data = load(path)
+        try:
+            matches_bin = int(data.get("bin_size", -1)) == int(bin_size)
+        except (TypeError, ValueError):
+            matches_bin = False
+        if data.get("kind") == "manual_roi_catalog" and matches_bin:
+            paths.append(path)
+    return sorted(paths, key=lambda path: path.name)
+
+
 def save_previews(path, preview_features, *, scan, bin_size, name) -> dict:
     """Merge completed previews by ROI and write one dedicated manual catalog."""
     existing = load(path)

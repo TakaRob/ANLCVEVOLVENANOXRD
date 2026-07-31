@@ -24,6 +24,8 @@ def test_save_all_uses_dedicated_catalog_invisible_to_shape_verify(tmp_path):
     assert [f["feature_id"] for f in result["features"]] == [1, 2]
     assert catalogs.parse_name(path.name) is None
     assert path not in catalogs.feature_sources(tmp_path, 3)
+    assert roi_catalog.discover(tmp_path, 3) == [path]
+    assert roi_catalog.discover(tmp_path, 1) == []
 
 
 def test_save_all_merges_by_roi_and_remove_updates_catalog(tmp_path):

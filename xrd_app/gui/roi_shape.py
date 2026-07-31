@@ -40,8 +40,7 @@ class ROIShapeWindow(QMainWindow):
         self.image = None
         self.roi = None
         self.result_path = None
-        self.features = []
-        self.feature_index = 0
+        self.preview_feature = None
         self.pending = []
         self.spatial_keys = []
         self.spatial_index = 0
@@ -50,6 +49,7 @@ class ROIShapeWindow(QMainWindow):
         self.resize(1500, 900)
         self._build_ui()
         self._populate_controls()
+        self._load_saved_features()
         self._load_detector_image()
 
     def _build_ui(self):
@@ -131,12 +131,6 @@ class ROIShapeWindow(QMainWindow):
         self.status.setWordWrap(True)
         form.addRow(self.status)
 
-        nav = QWidget(); nl = QHBoxLayout(nav); nl.setContentsMargins(0, 0, 0, 0)
-        self.prev_btn = QPushButton("Previous"); self.prev_btn.clicked.connect(lambda: self._step(-1))
-        self.next_btn = QPushButton("Next"); self.next_btn.clicked.connect(lambda: self._step(1))
-        self.feature_label = QLabel("No feature preview")
-        nl.addWidget(self.prev_btn); nl.addWidget(self.next_btn); nl.addWidget(self.feature_label)
-        form.addRow("Feature preview", nav)
         self.log = QPlainTextEdit(); self.log.setReadOnly(True); self.log.setMaximumHeight(190)
         form.addRow(self.log)
         split.addWidget(controls)
@@ -160,7 +154,50 @@ class ROIShapeWindow(QMainWindow):
             self.source = None
         self.spatial_keys = []
         self.spatial_index = 0
+        self._load_saved_features()
         self._load_detector_image()
+
+    def _load_saved_features(self):
+        """Restore dedicated ROI catalogs for the active scan and bin size."""
+        from ..core import roi_catalog
+
+        for entry in self.pending:
+            process = entry.get("process")
+            if process is not None and process.state() != QProcess.NotRunning:
+                process.kill()
+            rect = entry.get("rect")
+            if rect is not None:
+                rect.remove()
+        self.pending = []
+        self.preview_feature = None
+        self.result_path = None
+
+        paths = roi_catalog.discover(self.dm.labels_dir(self.scan), self.bin_size)
+        for path in paths:
+            data = roi_catalog.load(path)
+            for feature in data.get("features", []):
+                roi_data = feature.get("manual_roi") or {}
+                try:
+                    roi = roi_map.normalize_roi((roi_data["x0"], roi_data["y0"],
+                                                 roi_data["x1"], roi_data["y1"]))
+                except (KeyError, TypeError, ValueError):
+                    continue
+                self.pending.append({
+                    "roi": roi,
+                    "status": "saved",
+                    "rect": None,
+                    "feature": feature,
+                    "catalog_path": path,
+                    "preview_path": None,
+                    "process": None,
+                })
+        if len(paths) == 1:
+            self.result_path = paths[0]
+            self.name.setText(roi_catalog.load(paths[0]).get("name") or "manual_roi")
+        self._refresh_pending_list(select=0 if self.pending else None)
+        if self.pending:
+            self.status.setText(
+                f"Loaded {len(self.pending)} saved ROI features from {len(paths)} catalog(s).")
 
     def _ensure_source(self):
         if self.source is None:
@@ -368,8 +405,7 @@ class ROIShapeWindow(QMainWindow):
                 rect.set_color("#f0a030", "#f0a030", 0.2)
         self.roi_label.setText(", ".join(str(v) for v in self.roi))
         if entry.get("feature"):
-            self.features = [("Saved", entry["feature"])]
-            self.feature_index = 0
+            self.preview_feature = entry["feature"]
             self._render_feature()
         self._load_detector_image()
 
@@ -384,20 +420,23 @@ class ROIShapeWindow(QMainWindow):
             process.kill()
             process.deleteLater()
         feature = entry.get("feature") if entry.get("status") == "saved" else None
-        if feature is not None and self.result_path and self.result_path.exists():
+        catalog_path = entry.get("catalog_path") or self.result_path
+        if feature is not None and catalog_path and Path(catalog_path).exists():
             try:
                 from ..core import roi_catalog
-                roi_catalog.remove_feature(self.result_path, feature.get("manual_roi"))
+                roi_catalog.remove_feature(catalog_path, feature.get("manual_roi"))
             except Exception as exc:
                 QMessageBox.warning(self, "Could not remove saved feature", str(exc))
                 return
         rect = entry.get("rect")
         if rect is not None:
             rect.remove()
-        try:
-            entry.get("preview_path").unlink(missing_ok=True)
-        except OSError:
-            pass
+        preview_path = entry.get("preview_path")
+        if preview_path is not None:
+            try:
+                preview_path.unlink(missing_ok=True)
+            except OSError:
+                pass
         self.pending.pop(row)
         self.roi = None
         self.roi_label.setText("not selected")
@@ -480,6 +519,7 @@ class ROIShapeWindow(QMainWindow):
         self.result_path = self.dm.roi_map_json(tag, self.bin_size, self.scan)
         for entry in active:
             entry["status"] = "saved"
+            entry["catalog_path"] = self.result_path
             rect = entry.get("rect")
             if rect is not None:
                 rect.set_color("lime", "lime", 0.18)
@@ -487,18 +527,11 @@ class ROIShapeWindow(QMainWindow):
         self.status.setText(
             f"Saved {len(active)} features to ROI > Shape catalog {self.result_path.name}.")
 
-    def _step(self, amount):
-        if not self.features:
-            return
-        self.feature_index = (self.feature_index + amount) % len(self.features)
-        self._render_feature()
-
     def _render_feature(self):
-        if not self.features:
-            self.feature_label.setText("No feature preview")
+        feature = self.preview_feature
+        if feature is None:
             self.heatmap.img.clear(); self.heatmap._grid_data = None
             return
-        category, feature = self.features[self.feature_index]
         profile = feature.get("intensity_profile") or {}
         metric = "integrated"
         result = {"profile": profile, "n_bin_rows": 0, "n_bin_cols": 0,
@@ -528,10 +561,8 @@ class ROIShapeWindow(QMainWindow):
             center_rc = None
         self.heatmap.set_markers(center_rc, None)
         self.heatmap.plot.setTitle(
-            f"{category}: ROI feature "
-            f"{feature.get('feature_id', self.feature_index + 1)} - total ROI counts",
+            f"ROI feature {feature.get('feature_id', '?')} - total ROI counts",
             color="w", size="10pt")
-        self.feature_label.setText(f"{self.feature_index + 1}/{len(self.features)} {category}")
 
     def _heatmap_clicked(self, row, col):
         key = f"{row}_{col}"
