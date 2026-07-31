@@ -12,10 +12,10 @@ TAB_META = {
     "scan_dependent": True,
     "general": (
         "Select one reflection feature on the fully summed detector image (or a "
-        "single spatial-bin image). The selected detector rectangle and reflection "
-        "constrain standard per-bin peak finding; the normal Union-Find shape stage "
-        "then links detections across spatial bins. Saved outputs are ordinary peaks "
-        "and shapes catalogs and can be reviewed feature-by-feature in Shape/Verify."
+        "single spatial-bin image). Each detector rectangle becomes one pending "
+        "manual feature; its fixed ROI intensity is measured across every spatial "
+        "bin to make the heatmap. Saved outputs are ordinary shapes catalogs and "
+        "can be reviewed feature-by-feature in Shape/Verify."
     ),
 }
 

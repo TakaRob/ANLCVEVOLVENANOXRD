@@ -59,6 +59,43 @@ def test_sample_roi_can_normalize_each_bin_by_frame_count():
     assert result["normalize_frames"] is True
 
 
+def test_to_shape_feature_creates_one_complete_manual_feature():
+    sampled = roi_map.sample_roi(
+        _FakeSource(), (2, 1, 5, 3), metric="integrated",
+        grid_mapping={"n_bin_rows": 2, "n_bin_cols": 2,
+                      "bins": {"0_0": [0], "0_1": [1, 2]}},
+    )
+    feature = roi_map.to_shape_feature(sampled, "(001)", feature_id=7)
+
+    assert feature["feature_id"] == 7
+    assert feature["reflection"] == "(001)"
+    assert feature["manual_roi"] == {"x0": 2, "y0": 1, "x1": 5, "y1": 3}
+    assert feature["n_bins"] == 2
+    assert feature["spatial_extent"] == ["0_0", "0_1"]
+    assert set(feature["intensity_profile"]) == {"0_0", "0_1"}
+    assert "manual fixed detector ROI" in feature["reason"]
+
+
+def test_fixed_roi_matches_known_spatial_maximum():
+    class Source:
+        def keys(self):
+            return ["0_0", "0_1", "1_0"]
+
+        def region(self, key, y0, y1, x0, x1):
+            levels = {"0_0": 2.0, "0_1": 11.0, "1_0": 4.0}
+            return np.full((y1 - y0, x1 - x0), levels[key])
+
+    sampled = roi_map.sample_roi(
+        Source(), (20, 30, 25, 36), metric="integrated",
+        grid_mapping={"n_bin_rows": 2, "n_bin_cols": 2},
+    )
+    feature = roi_map.to_shape_feature(sampled, "(011)")
+
+    assert sampled["center_bin"] == "0_1"
+    assert feature["center_bin"] == "0_1"
+    assert feature["intensity_profile"]["0_1"]["integrated"] == 330.0
+
+
 def test_roi_validation_and_metric_validation():
     assert roi_map.normalize_roi((5, 4, 2, 1)) == (2, 1, 5, 4)
     with pytest.raises(ValueError):

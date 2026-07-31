@@ -1,4 +1,4 @@
-"""Manual detector-ROI search followed by the standard peak/shape pipeline."""
+"""Manual detector ROIs mapped as spatial features across scan bins."""
 
 from __future__ import annotations
 
@@ -11,9 +11,9 @@ import numpy as np
 import pyqtgraph as pg
 from PyQt5.QtCore import QProcess, QRectF, Qt
 from PyQt5.QtWidgets import (
-    QComboBox, QDoubleSpinBox, QFormLayout, QGraphicsRectItem, QHBoxLayout, QLabel,
-    QLineEdit, QMainWindow, QMessageBox, QPlainTextEdit, QProgressBar, QPushButton,
-    QSpinBox, QSplitter, QVBoxLayout, QWidget,
+    QComboBox, QFormLayout, QGraphicsRectItem, QHBoxLayout, QLabel, QLineEdit,
+    QListWidget, QListWidgetItem, QMainWindow, QMessageBox, QPlainTextEdit,
+    QProgressBar, QPushButton, QSplitter, QVBoxLayout, QWidget,
 )
 
 from ..config import DataManager
@@ -42,6 +42,9 @@ class ROIShapeWindow(QMainWindow):
         self.result_path = None
         self.features = []
         self.feature_index = 0
+        self.pending = []
+        self.spatial_keys = []
+        self.spatial_index = 0
         self._proc = None
 
         self.setWindowTitle("ROI > Shape")
@@ -68,9 +71,14 @@ class ROIShapeWindow(QMainWindow):
         self.image_mode.addItems(["Fully summed scan", "Selected spatial bin"])
         self.image_mode.currentIndexChanged.connect(self._load_detector_image)
         h.addWidget(self.image_mode)
-        self.spatial_bin = QComboBox()
-        self.spatial_bin.currentTextChanged.connect(self._load_detector_image)
-        h.addWidget(self.spatial_bin)
+        self.prev_bin_btn = QPushButton("< Bin")
+        self.prev_bin_btn.clicked.connect(lambda: self._step_spatial_bin(-1))
+        h.addWidget(self.prev_bin_btn)
+        self.spatial_label = QLabel("bin -/-")
+        h.addWidget(self.spatial_label)
+        self.next_bin_btn = QPushButton("Bin >")
+        self.next_bin_btn.clicked.connect(lambda: self._step_spatial_bin(1))
+        h.addWidget(self.next_bin_btn)
         h.addStretch()
         if not self.embedded:
             root.addWidget(self._header)
@@ -96,28 +104,28 @@ class ROIShapeWindow(QMainWindow):
         form = QFormLayout(controls)
         self.reflection_combo = QComboBox()
         form.addRow("Reflection", self.reflection_combo)
-        self.peak_combo = QComboBox()
-        form.addRow("Peak detector", self.peak_combo)
-        self.shape_combo = QComboBox()
-        form.addRow("Shape algorithm", self.shape_combo)
-        self.snr = QDoubleSpinBox()
-        self.snr.setRange(0.1, 100.0); self.snr.setValue(4.0); self.snr.setDecimals(2)
-        form.addRow("SNR", self.snr)
-        self.link_tolerance = QSpinBox()
-        self.link_tolerance.setRange(1, 50); self.link_tolerance.setValue(5)
-        form.addRow("Link tolerance (px)", self.link_tolerance)
+        self.metric_combo = QComboBox()
+        self.metric_combo.addItem("Integrated ROI counts", "integrated")
+        self.metric_combo.addItem("Brightest ROI pixel", "intensity")
+        self.metric_combo.addItem("Mean ROI counts", "mean")
+        form.addRow("Heatmap value", self.metric_combo)
         self.name = QLineEdit("manual_roi")
         form.addRow("Catalog tag", self.name)
         self.roi_label = QLabel("not selected")
         form.addRow("Detector ROI", self.roi_label)
 
-        run_row = QWidget(); rl = QHBoxLayout(run_row); rl.setContentsMargins(0, 0, 0, 0)
-        self.run_btn = QPushButton("Find peaks + shapes")
+        self.pending_list = QListWidget()
+        self.pending_list.currentRowChanged.connect(self._pending_selected)
+        form.addRow("Pending features", self.pending_list)
+        pending_row = QWidget(); pl = QHBoxLayout(pending_row); pl.setContentsMargins(0, 0, 0, 0)
+        self.run_btn = QPushButton("Save selected")
         self.run_btn.clicked.connect(self._run)
-        self.cancel_btn = QPushButton("Cancel")
+        self.remove_btn = QPushButton("Remove")
+        self.remove_btn.clicked.connect(self._remove_pending)
+        self.cancel_btn = QPushButton("Cancel job")
         self.cancel_btn.setEnabled(False); self.cancel_btn.clicked.connect(self._cancel)
-        rl.addWidget(self.run_btn); rl.addWidget(self.cancel_btn)
-        form.addRow(run_row)
+        pl.addWidget(self.run_btn); pl.addWidget(self.remove_btn); pl.addWidget(self.cancel_btn)
+        form.addRow(pending_row)
         self.progress = QProgressBar(); self.progress.setVisible(False)
         form.addRow(self.progress)
         self.status = QLabel("Ready")
@@ -146,19 +154,6 @@ class ROIShapeWindow(QMainWindow):
             self.reflection_combo.addItems(labels)
         except Exception as exc:
             self.status.setText(f"Could not load reflections: {exc}")
-        compatible = {"5x5_tophat_band_adaptive_snr"}
-        for entry in self.dm.list_detectors(self.bin_size):
-            if entry.get("name") in compatible:
-                self.peak_combo.addItem(entry["name"], entry["name"])
-        if not self.peak_combo.count():
-            path = self.dm.detector_script(bin_size=self.bin_size)
-            self.peak_combo.addItem(Path(path).stem, str(path))
-        for entry in self.dm.list_shapes():
-            if self.bin_size != 1 and entry.get("name") == "territory":
-                continue
-            self.shape_combo.addItem(entry["name"], entry["name"])
-        if self.shape_combo.findData("gaussian") >= 0:
-            self.shape_combo.setCurrentIndex(self.shape_combo.findData("gaussian"))
 
     def _bin_changed(self, text):
         try:
@@ -168,17 +163,38 @@ class ROIShapeWindow(QMainWindow):
         if self.source is not None:
             self.source.close()
             self.source = None
-        self.spatial_bin.clear()
+        self.spatial_keys = []
+        self.spatial_index = 0
         self._load_detector_image()
 
     def _ensure_source(self):
         if self.source is None:
             self.source = io.open_bin_source(self.dm, self.bin_size, self.scan)
-        if not self.spatial_bin.count():
-            self.spatial_bin.blockSignals(True)
-            self.spatial_bin.addItems(self.source.keys())
-            self.spatial_bin.blockSignals(False)
+        if not self.spatial_keys:
+            self.spatial_keys = list(self.source.keys())
+            self.spatial_index = min(self.spatial_index, max(0, len(self.spatial_keys) - 1))
+            self._update_spatial_label()
         return self.source
+
+    def _current_spatial_key(self):
+        if not self.spatial_keys:
+            return ""
+        return self.spatial_keys[self.spatial_index]
+
+    def _update_spatial_label(self):
+        key = self._current_spatial_key()
+        total = len(self.spatial_keys)
+        self.spatial_label.setText(
+            f"{self.spatial_index + 1}/{total}: {key}" if total else "bin -/-")
+
+    def _step_spatial_bin(self, amount):
+        source = self._ensure_source()
+        if not self.spatial_keys:
+            return
+        self.spatial_index = (self.spatial_index + amount) % len(self.spatial_keys)
+        self._update_spatial_label()
+        self.image_mode.setCurrentIndex(1)
+        self._load_detector_image()
 
     def _load_detector_image(self, *_):
         try:
@@ -194,7 +210,7 @@ class ROIShapeWindow(QMainWindow):
                 title = "Fully summed detector image"
             else:
                 source = self._ensure_source()
-                key = self.spatial_bin.currentText() or (source.keys()[0] if source.keys() else "")
+                key = self._current_spatial_key()
                 image = source.image(key)
                 title = f"Spatial bin {key} ({self.bin_size}x{self.bin_size})"
             if image is None:
@@ -215,10 +231,68 @@ class ROIShapeWindow(QMainWindow):
             self.roi_item.remove()
         self.roi_item = rect
         self.roi = roi_map.normalize_roi((x0, y0, x1, y1))
-        self.roi_label.setText(", ".join(str(v) for v in self.roi))
+        entry = {
+            "roi": self.roi,
+            "reflection": self.reflection_combo.currentText(),
+            "status": "pending",
+        }
+        self.pending.append(entry)
+        self._refresh_pending_list(select=len(self.pending) - 1)
         self.detector_status.setText(
-            f"Selected x={self.roi[0]}:{self.roi[2]}, y={self.roi[1]}:{self.roi[3]}. "
-            "Choose the reflection, then run peak + shape finding.")
+            f"Added {entry['reflection']} ROI {self.roi} to Pending features. "
+            "Select it in the list to preview, save, or remove.")
+
+    def _refresh_pending_list(self, select=None):
+        self.pending_list.blockSignals(True)
+        self.pending_list.clear()
+        for i, entry in enumerate(self.pending, 1):
+            roi = entry["roi"]
+            item = QListWidgetItem(
+                f"{i}. {entry['reflection']}  x={roi[0]}:{roi[2]} "
+                f"y={roi[1]}:{roi[3]}  [{entry['status']}]")
+            self.pending_list.addItem(item)
+        self.pending_list.blockSignals(False)
+        if select is not None and self.pending:
+            self.pending_list.setCurrentRow(min(select, len(self.pending) - 1))
+
+    def _pending_selected(self, row):
+        if not (0 <= row < len(self.pending)):
+            return
+        entry = self.pending[row]
+        self.roi = entry["roi"]
+        self.roi_label.setText(", ".join(str(v) for v in self.roi))
+        self.reflection_combo.setCurrentText(entry["reflection"])
+        if entry.get("feature"):
+            self.features = [("Saved", entry["feature"])]
+            self.feature_index = 0
+            self._render_feature()
+        self._load_detector_image()
+
+    def _remove_pending(self):
+        row = self.pending_list.currentRow()
+        if not (0 <= row < len(self.pending)):
+            return
+        entry = self.pending[row]
+        feature = entry.get("feature")
+        if feature is not None and self.result_path and self.result_path.exists():
+            try:
+                with open(self.result_path) as handle:
+                    data = json.load(handle)
+                roi = feature.get("manual_roi")
+                kept = [item for item in data.get("kept", [])
+                        if item.get("manual_roi") != roi]
+                for index, item in enumerate(kept, 1):
+                    item["feature_id"] = index
+                data["kept"] = kept
+                data["n_kept"] = len(kept)
+                io.atomic_write_json(self.result_path, data)
+            except Exception as exc:
+                QMessageBox.warning(self, "Could not remove saved feature", str(exc))
+                return
+        self.pending.pop(row)
+        self.roi = None
+        self.roi_label.setText("not selected")
+        self._refresh_pending_list(select=max(0, row - 1))
 
     def _draw_roi(self):
         x0, y0, x1, y1 = self.roi
@@ -228,9 +302,11 @@ class ROIShapeWindow(QMainWindow):
         self.roi_item = None
 
     def _run(self):
-        if self.roi is None:
-            QMessageBox.information(self, "Select detector ROI", "Drag a rectangle on the detector image first.")
+        pending_row = self.pending_list.currentRow()
+        if not (0 <= pending_row < len(self.pending)):
+            QMessageBox.information(self, "Pending feature", "Select a pending feature to save.")
             return
+        self.roi = self.pending[pending_row]["roi"]
         tag = self.name.text().strip()
         if not tag:
             QMessageBox.information(self, "Catalog tag", "Enter a catalog tag before running.")
@@ -238,16 +314,14 @@ class ROIShapeWindow(QMainWindow):
         args = ["roi-shapes", "--root", self.project_root, "--bin-size", str(self.bin_size),
                 "--reflection", self.reflection_combo.currentText(),
                 "--roi", ",".join(str(v) for v in self.roi), "--name", tag,
-                "--snr", str(self.snr.value()), "--link-tolerance", str(self.link_tolerance.value()),
-                "--peak-algorithm", str(self.peak_combo.currentData()),
-                "--shape-algorithm", str(self.shape_combo.currentData())]
+                "--metric", str(self.metric_combo.currentData())]
         if self.scan:
             args += ["--scan", str(self.scan)]
         cmd = [sys.executable, "-m", "xrd_app.cli", *args]
         self.log.clear(); self.log.appendPlainText("$ " + " ".join(cmd))
         self.progress.setVisible(True); self.progress.setValue(0)
         self.run_btn.setEnabled(False); self.cancel_btn.setEnabled(True)
-        self.status.setText("Running detector across all spatial bins...")
+        self.status.setText("Integrating the selected detector ROI across all spatial bins...")
         self._proc = QProcess(self)
         self._proc.setProcessChannelMode(QProcess.MergedChannels)
         self._proc.readyReadStandardOutput.connect(self._on_output)
@@ -273,9 +347,15 @@ class ROIShapeWindow(QMainWindow):
             return
         self.progress.setValue(100)
         tag = re.sub(r'[^A-Za-z0-9_.-]+', '_', self.name.text().strip()).strip('_.-')
-        shape_algo = Path(str(self.shape_combo.currentData())).stem
-        self.result_path = self.dm.shapes_json(shape_algo, self.bin_size, self.scan, variant=tag)
+        self.result_path = self.dm.shapes_json("manual_roi", self.bin_size, self.scan,
+                                               variant=tag)
         self._load_result()
+        row = self.pending_list.currentRow()
+        if 0 <= row < len(self.pending) and self.features:
+            saved_feature = self.features[-1][1]
+            self.pending[row]["status"] = "saved"
+            self.pending[row]["feature"] = saved_feature
+            self._refresh_pending_list(select=row)
 
     def _load_result(self):
         try:
@@ -335,8 +415,14 @@ class ROIShapeWindow(QMainWindow):
         self.feature_label.setText(f"{self.feature_index + 1}/{len(self.features)} {category}")
 
     def _heatmap_clicked(self, row, col):
+        key = f"{row}_{col}"
+        source = self._ensure_source()
+        if key not in self.spatial_keys:
+            return
+        self.spatial_index = self.spatial_keys.index(key)
+        self._update_spatial_label()
         self.image_mode.setCurrentIndex(1)
-        self.spatial_bin.setCurrentText(f"{row}_{col}")
+        self._load_detector_image()
 
     def _cancel(self):
         if self._proc is not None and self._proc.state() != QProcess.NotRunning:

@@ -98,6 +98,69 @@ def sample_roi(
     }
 
 
+def to_shape_feature(result: dict, reflection: str, *, feature_id: int = 1,
+                     tth_map=None, beam_center=None) -> dict:
+    """Represent one fixed detector ROI as one Shape/Verify-compatible feature.
+
+    Every sampled spatial bin is retained in ``intensity_profile``. This is a
+    manual ROI feature, not a Gaussian-verified linked peak, so its provenance is
+    explicit in ``reason`` and ``manual_roi``.
+    """
+    profile = result.get("profile") or {}
+    if not profile:
+        raise ValueError("ROI map has no sampled spatial bins")
+    metric = result.get("metric", "integrated")
+    center_bin = result.get("center_bin") or max(
+        profile, key=lambda key: profile[key][metric])
+    try:
+        center_row, center_col = (int(v) for v in center_bin.split("_", 1))
+    except (AttributeError, ValueError) as exc:
+        raise ValueError(f"Invalid center bin {center_bin!r}") from exc
+    roi = result["roi"]
+    det_x = int(round((roi["x0"] + roi["x1"] - 1) / 2))
+    det_y = int(round((roi["y0"] + roi["y1"] - 1) / 2))
+
+    intensity_profile = {}
+    for key, entry in profile.items():
+        item = {
+            "intensity": round(float(entry["intensity"]), 1),
+            "integrated": round(float(entry["integrated"]), 1),
+            "det_x": det_x,
+            "det_y": det_y,
+        }
+        if tth_map is not None and 0 <= det_y < tth_map.shape[0] and 0 <= det_x < tth_map.shape[1]:
+            item["tth"] = round(float(tth_map[det_y, det_x]), 5)
+        if beam_center is not None:
+            by, bx = beam_center
+            item["chi"] = round(float(np.degrees(np.arctan2(det_y - by, det_x - bx))), 2)
+        intensity_profile[key] = item
+
+    center_entry = profile[center_bin]
+    feature = {
+        "feature_id": int(feature_id),
+        "reflection": reflection,
+        "detector_x": det_x,
+        "detector_y": det_y,
+        "peak_intensity": float(center_entry["intensity"]),
+        "mean_snr": None,
+        "n_bins": len(profile),
+        "spatial_extent": sorted(profile, key=lambda key: _parse_key(key) or (0, 0)),
+        "center_bin": center_bin,
+        "center_row": center_row,
+        "center_col": center_col,
+        "intensity_profile": intensity_profile,
+        "reason": "manual fixed detector ROI integrated across all spatial bins",
+        "manual_roi": dict(roi),
+        "roi_metric": metric,
+    }
+    if tth_map is not None and 0 <= det_y < tth_map.shape[0] and 0 <= det_x < tth_map.shape[1]:
+        feature["ref_tth"] = round(float(tth_map[det_y, det_x]), 5)
+    if beam_center is not None:
+        by, bx = beam_center
+        feature["chi_deg"] = round(float(np.degrees(np.arctan2(det_y - by, det_x - bx))), 1)
+    return feature
+
+
 def grid_array(result: dict, metric: Optional[str] = None) -> np.ndarray:
     """Convert a sampled result to a row-major array with NaN for missing bins."""
     metric = metric or result.get("metric", "integrated")
