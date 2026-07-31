@@ -48,6 +48,70 @@ def test_sample_roi_uses_detector_xy_and_leaves_missing_bins_empty():
     assert np.isnan(grid[1, 1])
 
 
+def test_batch_rois_read_each_spatial_bin_once_and_match_individual_results():
+    source = _FakeSource()
+    rois = [(0, 0, 2, 2), (2, 1, 5, 3)]
+    batch = roi_map.sample_rois(
+        source, rois, grid_mapping={"n_bin_rows": 2, "n_bin_cols": 2})
+
+    assert len(source.requests) == len(source.keys())
+    assert source.requests[0] == ("0_0", 0, 3, 0, 5)
+    for index, roi in enumerate(rois):
+        individual = roi_map.sample_roi(
+            _FakeSource(), roi, grid_mapping={"n_bin_rows": 2, "n_bin_cols": 2})
+        assert batch[index]["profile"] == individual["profile"]
+
+
+def test_batch_distant_rois_uses_small_separate_reads():
+    class Source:
+        def __init__(self):
+            self.requests = []
+
+        def keys(self):
+            return ["0_0"]
+
+        def region(self, key, y0, y1, x0, x1):
+            self.requests.append((key, y0, y1, x0, x1))
+            return np.ones((y1 - y0, x1 - x0))
+
+    source = Source()
+    results = roi_map.sample_rois(source, [(0, 0, 10, 10), (1000, 1000, 1010, 1010)])
+
+    assert source.requests == [
+        ("0_0", 0, 10, 0, 10),
+        ("0_0", 1000, 1010, 1000, 1010),
+    ]
+    assert [result["profile"]["0_0"]["n_pixels"] for result in results] == [100, 100]
+
+
+def test_fast_preview_uses_fewer_reads_and_marks_coarse_fill():
+    class GridSource:
+        def __init__(self):
+            self.requests = []
+
+        def keys(self):
+            return [f"{row}_{col}" for row in range(12) for col in range(12)]
+
+        def region(self, key, y0, y1, x0, x1):
+            self.requests.append(key)
+            row, col = (int(v) for v in key.split("_"))
+            level = 100.0 if (row, col) == (6, 6) else 1.0
+            return np.full((y1 - y0, x1 - x0), level)
+
+    source = GridSource()
+    logs = []
+    result = roi_map.sample_rois(
+        source, [(0, 0, 3, 3)],
+        grid_mapping={"n_bin_rows": 12, "n_bin_cols": 12},
+        fast=True, stride=3, log=logs.append)[0]
+
+    assert result["approximate"] is True
+    assert len(source.requests) < 144
+    assert any("FAST PREVIEW" in line for line in logs)
+    assert any(entry.get("coarse_fill") for entry in result["profile"].values())
+    assert result["center_bin"] == "6_6"
+
+
 def test_sample_roi_can_normalize_each_bin_by_frame_count():
     result = roi_map.sample_roi(
         _FakeSource(), (0, 0, 2, 2), metric="integrated",

@@ -113,11 +113,8 @@ def discover_algorithms(project_root, dm=None):
     # Bundled peak-detector library (PeakAlgorithms/catalog.json).
     if dm is not None:
         try:
-            ddir = dm.detectors_dir()
             for d in dm.list_detectors():
-                if d.get("pipeline") == "perframe":
-                    continue
-                algo_file = ddir / d["file"]
+                algo_file = Path(d["_path"])
                 if not algo_file.exists():
                     continue
                 f1 = d.get("holdout_f1")
@@ -127,7 +124,7 @@ def discover_algorithms(project_root, dm=None):
                     "source": d.get("source", "bundled"),
                     "func_type": "module",
                     "file": str(algo_file),
-                    "data_dir": str(ddir),
+                    "data_dir": str(algo_file.parent),
                     "holdout_f1": f1,
                 })
         except Exception:
@@ -580,8 +577,16 @@ class LabelCanvas(FigureCanvasQTAgg):
 
     def show_arcs(self, tth_map, degs, deg_labels, line_tol=0.3):
         self.clear_arcs()
+        # Merge entries that share a label into one band (a whole-frame
+        # "(no reflections)" set is ~130 tiles of one label → one imshow, not 130).
+        merged = {}  # label -> (order_idx, OR-ed mask)
         for idx, (lab, d) in enumerate(zip(deg_labels, degs)):
             mask = np.abs(tth_map - d) < line_tol
+            if lab in merged:
+                merged[lab] = (merged[lab][0], merged[lab][1] | mask)
+            else:
+                merged[lab] = (idx, mask)
+        for lab, (idx, mask) in merged.items():
             overlay = np.where(mask, 1.0, np.nan)
             color = ARC_COLORS[idx % len(ARC_COLORS)]
             cmap = mcolors.ListedColormap([color])
@@ -2142,6 +2147,10 @@ class LabelingTool(QMainWindow):
             elif reply == QMessageBox.Cancel:
                 event.ignore()
                 return
+        source = getattr(self, "_bin_source", None)
+        if source is not None:
+            source.close()
+            self._bin_source = None
         event.accept()
 
 

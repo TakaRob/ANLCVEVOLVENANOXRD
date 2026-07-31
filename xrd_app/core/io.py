@@ -18,6 +18,7 @@ Both are de-hardcoded ports of the original ``generate_grid_mapping.py`` and
 from __future__ import annotations
 
 import csv
+import hashlib
 import importlib.util
 import json
 import os
@@ -91,7 +92,13 @@ def load_module(path: Union[str, Path]):
     ``from noise_reduction_algorithms import ...``.
     """
     import sys
-    path = Path(path)
+    path = Path(path).resolve()
+    # Use path and current file state for identity. This prevents equal stems in
+    # different libraries, or a rewritten candidate in a long-running process,
+    # from sharing import/pickle identity.
+    source = path.read_bytes()
+    identity = str(path).encode() + b"\0" + source
+    module_name = f"_xrd_dynamic_{path.stem}_{hashlib.sha256(identity).hexdigest()[:16]}"
     # Shared library dirs so a detector can import sibling/library modules no
     # matter where it lives: its own dir, the flat PeakAlgorithms/ root (so an
     # automated algo in its own sub-folder can import a base detector), and the
@@ -106,9 +113,12 @@ def load_module(path: Union[str, Path]):
     for d in added:
         sys.path.insert(0, d)
     try:
-        spec = importlib.util.spec_from_file_location(path.stem, str(path))
+        spec = importlib.util.spec_from_file_location(module_name, str(path))
         mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)
+        # Execute the bytes used for identity directly. SourceFileLoader's pyc
+        # cache is timestamp/size based and can return stale code after a rapid
+        # same-size rewrite (common during candidate evolution).
+        exec(compile(source, str(path), "exec"), mod.__dict__)
         return mod
     finally:
         for d in added:
@@ -1222,7 +1232,9 @@ def build_bins(
     out.attrs["n_bins"] = n_bins
     if frame_store.is_archive:
         out.attrs["pixel_source"] = "xrd_unbinned_archive.h5"
-    out.attrs["detector_shape"] = list(DETECTOR_SHAPE)
+    first_frame = next((gi for indices in bins.values() for gi in indices), None)
+    if first_frame is not None:
+        out.attrs["detector_shape"] = list(frame_store.frame(first_frame).shape)
 
     t0 = time.time()
     try:
@@ -1233,8 +1245,7 @@ def build_bins(
                 summed = frame if summed is None else summed + frame
 
             if summed is not None:
-                summed[summed < 0] = 0
-                summed[summed > 1e9] = 0
+                np.clip(summed, 0, 1e9, out=summed)
                 out.create_dataset(bin_key, data=summed.astype(np.float32), **comp_kwargs)
 
             if (i + 1) % 100 == 0 or (i + 1) == n_bins:
@@ -1294,8 +1305,7 @@ def sum_raw_frames(xrd_files, frame_map, frame_indices) -> Optional[np.ndarray]:
                 frame = ds[fj].astype(np.float64)
                 summed = frame if summed is None else summed + frame
     if summed is not None:
-        summed[summed < 0] = 0
-        summed[summed > 1e9] = 0
+        np.clip(summed, 0, 1e9, out=summed)
     return summed
 
 
@@ -1406,7 +1416,7 @@ class _ArchiveSource(BinImageSource):
         gm = load_grid_mapping(grid_mapping)
         self._bins = gm["bins"]
         self._store = FrameStore(archive=archive)
-        self._cache = {}
+        self._cache = OrderedDict()
 
     def keys(self) -> list:
         return sorted(self._bins.keys(), key=_bin_sort_key)
@@ -1426,16 +1436,18 @@ class _ArchiveSource(BinImageSource):
             frame = frame.astype(np.float64)
             summed = frame if summed is None else summed + frame
         if summed is not None:
-            summed[summed < 0] = 0
-            summed[summed > 1e9] = 0
+            np.clip(summed, 0, 1e9, out=summed)
         return summed
 
     def image(self, key: str) -> Optional[np.ndarray]:
         if key in self._cache:
+            self._cache.move_to_end(key)
             return self._cache[key]
         image = self._sum(key)
-        if len(self._cache) < 64 and image is not None:
+        if image is not None:
             self._cache[key] = image
+            if len(self._cache) > 8:
+                self._cache.popitem(last=False)
         return image
 
     def region(self, key, y0, y1, x0, x1):
@@ -1455,6 +1467,7 @@ class _ArchiveSource(BinImageSource):
         return acc if acc is not None else np.zeros((1, 1))
 
     def close(self):
+        self._cache.clear()
         self._store.close()
 
 
@@ -1525,7 +1538,7 @@ class _RawSource(BinImageSource):
                     (int(grid_row[gi]), int(grid_col[gi])), []).append(gi)
             self._bins, _, _ = build_bin_mapping(
                 n_rows, n_cols2, bin_size, grid_to_frames)
-        self._cache = {}
+        self._cache = OrderedDict()
 
     def keys(self) -> list:
         return sorted(self._bins.keys(), key=_bin_sort_key)
@@ -1537,11 +1550,13 @@ class _RawSource(BinImageSource):
         if key not in self._bins:
             return None
         if key in self._cache:
+            self._cache.move_to_end(key)
             return self._cache[key]
         img = sum_raw_frames(self._xrd_files, self._frame_map, self._bins[key])
-        # Bounded cache so panning across many bins doesn't grow without limit.
-        if len(self._cache) < 64 and img is not None:
+        if img is not None:
             self._cache[key] = img
+            if len(self._cache) > 8:
+                self._cache.popitem(last=False)
         return img
 
     def sum_all(self, max_bins=None, progress=None) -> np.ndarray:
@@ -1557,6 +1572,9 @@ class _RawSource(BinImageSource):
             if progress is not None:
                 progress(i + 1, n)
         return acc if acc is not None else np.zeros((1, 1))
+
+    def close(self):
+        self._cache.clear()
 
 
 def open_bin_source(dm, bin_size, scan=None, n_cols=None, grid_mapping=None,

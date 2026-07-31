@@ -238,6 +238,14 @@ class ReflectionDialog(QDialog):
         del_btn = QPushButton("Delete selected")
         del_btn.clicked.connect(self._delete_rows)
         srow.addWidget(del_btn)
+        whole_btn = QPushButton("No regular reflections")
+        whole_btn.setToolTip(
+            "Fill the table with a whole-detector set (one repeated "
+            f"'{refl_io.WHOLE_FRAME_LABEL}' label) so peak/shape/territory search "
+            "the entire frame. Slower — for datasets with no known Bragg "
+            "reflections (consider ROI → Shape). Save to apply.")
+        whole_btn.clicked.connect(self._fill_whole_frame)
+        srow.addWidget(whole_btn)
         lay.addLayout(srow)
 
         # ---- editable table --------------------------------------------
@@ -778,6 +786,7 @@ class ReflectionDialog(QDialog):
         """Translucent colored 2θ bands + labels on the detector image."""
         tth = self._tth
         rgba = np.zeros((tth.shape[0], tth.shape[1], 4), dtype=np.ubyte)
+        seen = set()  # draw each distinct label once (whole-frame sets repeat one)
         for idx, r in enumerate(self.reflections):
             t = float(r["two_theta"])
             w = float(r.get("width", refl_io.DEFAULT_WIDTH)) or _LINE_TOL
@@ -789,6 +798,9 @@ class ReflectionDialog(QDialog):
             rgba[mask, 1] = cg
             rgba[mask, 2] = cb
             rgba[mask, 3] = _OVERLAY_ALPHA
+            if str(r["name"]) in seen:
+                continue
+            seen.add(str(r["name"]))
             ys, xs = np.where(mask)
             mid = len(ys) // 2
             label = pg.TextItem(str(r["name"]), color=_arc_color(idx), anchor=(0, 1),
@@ -809,6 +821,7 @@ class ReflectionDialog(QDialog):
                            pen=pg.mkPen("#1f6fdc", width=1))
         if not self._show_overlay:
             return
+        seen = set()  # one labeled center line per distinct label (bands still union)
         for idx, r in enumerate(self.reflections):
             t = float(r["two_theta"])
             w = float(r.get("width", refl_io.DEFAULT_WIDTH))
@@ -817,6 +830,9 @@ class ReflectionDialog(QDialog):
                                          brush=pg.mkBrush(cr, cg, cb, 50))
             region.setZValue(-10)
             self.hist.addItem(region)
+            if str(r["name"]) in seen:
+                continue
+            seen.add(str(r["name"]))
             line = pg.InfiniteLine(pos=t, angle=90,
                                    pen=pg.mkPen(cr, cg, cb, width=1),
                                    label=str(r["name"]), labelOpts={"position": 0.9})
@@ -916,6 +932,15 @@ class ReflectionDialog(QDialog):
             self._load_current()
         else:
             self._fill_table([])
+
+    def _fill_whole_frame(self):
+        """Fill the table with a whole-detector set (clamped to the tth map when
+        loaded); it's an ordinary set — the user Saves to apply it."""
+        tth_map = self._tth if getattr(self, "_tth", None) is not None else None
+        self._fill_table(refl_io.whole_frame_reflections(tth_map))
+        self.status.setText(
+            f"filled {len(self.reflections)} whole-detector tiles "
+            f"('{refl_io.WHOLE_FRAME_LABEL}') — Save to apply")
 
     def _on_cmap_changed(self, name):
         self._cmap_name = name

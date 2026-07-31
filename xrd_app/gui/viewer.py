@@ -40,6 +40,8 @@ from PyQt5.QtWidgets import (
     QSizePolicy, QSlider, QSpinBox, QSplitter, QVBoxLayout, QWidget, QCheckBox,
 )
 
+from .lifecycle import stop_thread
+
 pg.setConfigOptions(imageAxisOrder="row-major", antialias=True)
 
 
@@ -689,11 +691,15 @@ class _ExpansionWorker(QThread):
                     seed["x"], seed["y"], seed)]
 
         while queue:
+            if self.isInterruptionRequested():
+                return
             bk = queue.pop(0)
             br, bc = int(bk.split("_")[0]), int(bk.split("_")[1])
             reference = accepted[bk]
             for dr in [-1, 0, 1]:
                 for dc in [-1, 0, 1]:
+                    if self.isInterruptionRequested():
+                        return
                     if dr == 0 and dc == 0:
                         continue
                     nr, nc = br + dr, bc + dc
@@ -764,6 +770,8 @@ class _RawIntensityWorker(QThread):
         n = len(self._cells)
         win = self._win
         for i, bk in enumerate(self._cells):
+            if self.isInterruptionRequested():
+                return
             try:
                 with v.h5_lock:
                     patch = v._get_sub_source().region(
@@ -3486,6 +3494,7 @@ class FeatureViewer(QMainWindow):
         dv = self.detector_canvas
         tth = self._tth_map
         rgba = np.zeros((tth.shape[0], tth.shape[1], 4), dtype=np.ubyte)
+        seen = set()  # draw each distinct label once (whole-frame sets repeat one)
         for idx, (lab, d) in enumerate(zip(self._ref_labels, self._ref_degs)):
             mask = np.abs(tth - d) < 0.3
             if not mask.any():
@@ -3496,6 +3505,9 @@ class FeatureViewer(QMainWindow):
             rgba[mask, 1] = g
             rgba[mask, 2] = b
             rgba[mask, 3] = 64
+            if lab in seen:
+                continue
+            seen.add(lab)
             ys, xs = np.where(mask)
             mid = len(ys) // 2
             dv.add_overlay(_label_item(xs[mid], ys[mid], lab, color))
@@ -4692,7 +4704,20 @@ class FeatureViewer(QMainWindow):
                 self._accept_all_pending()
 
         self._save_state()
+        workers = list(self._explore_workers)
+        if self._raw_intensity_worker is not None:
+            workers.append(self._raw_intensity_worker)
+        for worker in workers:
+            stop_thread(worker)
+        self._explore_workers = []
+        self._raw_intensity_worker = None
         with self.h5_lock:
+            if self._source is not None:
+                try:
+                    self._source.close()
+                except Exception:
+                    pass
+                self._source = None
             if self._h5f is not None:
                 self._h5f.close()
                 self._h5f = None

@@ -83,31 +83,24 @@ In Situ Nanoprobe (ISN), Advanced Photon Source, beamline 19-ID\par}
 \end{center}
 
 \vspace{1.5em}
-% --- Abstract: one paragraph, double spaced, wider margins, no math/figs/tables ---
+% --- Abstract: one paragraph, single spaced, wider margins, no math/figs/tables ---
 \begin{adjustwidth}{0.5in}{0.5in}
-\begin{spacing}{2.0}
-\noindent\textbf{ABSTRACT---}Nano-focused X-ray diffraction (nano-XRD) at the
-Advanced Photon Source (APS) In Situ Nanoprobe (beamline 19-ID) provides
-spatially resolved measurements of crystal grain size and orientation in
-semiconductor thin films, but each scan can generate on the order of $10^5$
-diffraction frames, creating a computational bottleneck for rapid analysis. To
-address this challenge, we developed xrd-app, a command-line computer-vision
-pipeline for automated processing of raw HDF5 nano-XRD data. The workflow
-performs data compression, frame-by-frame Bragg peak detection, and spatial
-linking of neighboring detections to reconstruct grain-level structural features.
-Two design strategies improve speed and robustness. First, an automated
-algorithm-discovery system (CVEvolve) generates and tunes peak-detection
-algorithms optimized for diffraction data. Second, spatial binning combines
-neighboring frames, increasing the per-position signal-to-noise ratio
-approximately linearly with bin size and improving the detection of weaker peaks.
-Detected signals are then consolidated through a contouring stage based on
-Union-Find clustering and Gaussian-profile filtering, which merges scattered
-detections into coherent grain outlines. We applied this workflow to six focused
-scans across three perovskite-halide solar cells. The results indicate that
-samples processed outside a glove box exhibit a stronger preferred (001)
-orientation relative to (111), while a deionized-water (DI) treatment increases
-the average size of (001)-oriented grains.
-\end{spacing}
+\noindent\textbf{ABSTRACT.}\ Nano-focused X-ray diffraction (nano-XRD) at the
+Advanced Photon Source (APS) In Situ Nanoprobe (beamline 19-ID) resolves crystal
+grain size and orientation in semiconductor thin films, but each scan generates
+on the order of $10^5$ diffraction frames, creating a bottleneck for rapid
+analysis. We developed xrd-app, a command-line computer-vision pipeline that
+processes raw HDF5 nano-XRD data through frame-by-frame Bragg peak detection and
+spatial linking of neighboring detections into grain-level structural features.
+An automated algorithm-discovery system (CVEvolve) tunes the peak detector, and
+spatial binning raises the per-position signal-to-noise ratio approximately
+linearly with bin size, improving detection of weaker peaks. A contouring stage
+based on Union-Find clustering and Gaussian-profile filtering merges scattered
+detections into coherent grain outlines. Applied to six focused scans across
+three perovskite-halide solar cells, the workflow shows that samples processed
+outside a glove box adopt a stronger preferred (001) orientation relative to
+(111), while a deionized-water (DI) treatment increases the average size of
+(001)-oriented grains.
 \end{adjustwidth}
 
 \vspace{1em}
@@ -129,17 +122,17 @@ At the APS In Situ Nanoprobe (beamline 19-ID), a single nano-XRD raster scan
 records a two-dimensional charge-coupled-device (CCD) diffraction frame at every
 spatial position, so a full scan comprises on the order of $10^5$ frames stored
 as compressed HDF5. Extracting grain-level information from such a dataset by
-hand is impractical, and the volume of data---tens to hundreds of gigabytes per
-scan---creates a computational bottleneck for rapid, reproducible analysis.
+hand is impractical, and the volume of data, tens to hundreds of gigabytes per
+scan, creates a computational bottleneck for rapid, reproducible analysis.
 
 The purpose of this work is to develop and validate an automated computer-vision
 pipeline, xrd-app, that converts raw nano-XRD frames into physically meaningful
 grain maps with minimal human intervention, and to apply it to a set of
 perovskite-halide devices to test whether processing conditions leave a
 measurable fingerprint on grain microstructure. This paper is organized as
-follows. Section~II describes the data and the four processing stages---binning,
-peak detection with automated detector optimization, grain contouring, and
-deskewing. Section~III reports the effect of each stage on data quality and then
+follows. Section~II describes the data and the three processing stages: binning,
+peak detection with automated detector optimization, and grain contouring.
+Section~III reports the effect of each stage on data quality and then
 presents the grain-level comparison across devices. Section~IV summarizes the
 findings and outlines future work.
 
@@ -153,8 +146,8 @@ beam and a CCD area detector with a 75\,\um\ pixel pitch. Each raster position
 yields one detector frame; the pixel-to-$2\theta$ mapping is fixed by a
 calibration image, and the spatial position of each frame is recorded by
 interferometer readout. Reflections of interest for the perovskite films and the
-indium tin oxide (ITO) substrate---including PbI$_2$, (001), (011), (111),
-(002), and (012)/(112)---appear in known radial ($2\theta$) bands, which define
+indium tin oxide (ITO) substrate, including PbI$_2$, (001), (011), (111),
+(002), and (012)/(112), appear in known radial ($2\theta$) bands, which define
 where genuine Bragg peaks are expected. A representative scan (Scan\_0203)
 contains 25{,}170 occupied spatial positions; the six focused scans analyzed
 here range from roughly 80 to 200\,GB each. Basic instrument and dataset
@@ -197,9 +190,13 @@ node spacing. Figure~\ref{fig:binning} illustrates the concept.
 
 \begin{figure}[H]
 \centering
-\includegraphics[width=0.82\linewidth]{binning_explainer}
-\caption{Spatial binning sums neighboring frames before detection, trading
-spatial resolution for a higher per-position signal-to-noise ratio.}
+\includegraphics[width=\linewidth]{binning_faithful_grid}
+\caption{Faithful spatial binning. The true stage positions (left) follow the
+S-shaped raster; each frame is snapped to the nearest node of a square grid
+(center), where robust min/max limits clip the positions that jut past the edges
+and a ``2'' marks nodes where two frames coincide; neighboring nodes are then
+summed into $3\times3$ bins (right), trading spatial resolution for higher
+per-position signal-to-noise.}
 \label{fig:binning}
 \end{figure}
 
@@ -246,17 +243,6 @@ intensity cross-section.
 \end{minipage}
 \end{figure}
 
-\subsection{Deskewing the unbinned grid}
-At the unbinned ($1\times1$) resolution, grains tend to over-segment into
-horizontal slices: 53\% of multi-bin features span exactly one scan row. The
-cause is the serpentine raster, whose row-registration offset plus single-frame
-centroid jitter exceeds the 5\,px linking tolerance between adjacent rows, so
-only within-row links survive. Because the offset is correlated within a row but
-reverses sign between rows, the fragmentation is horizontal. A deskewing step
-re-links detections using the true stage positions. This remedy is specific to
-unbinned data; binning already averages out the raster backlash, so re-gridding
-an already-clean binned grid only injects rounding noise.
-
 %=====================================================================
 \section{Results and discussion}
 %=====================================================================
@@ -269,10 +255,10 @@ because the bin count falls as $\sim1/N^2$, faster than the per-bin yield rises.
 However, the quality of each detection improves sharply: as shown in
 Table~\ref{tab:snr}, the median peak SNR rises from about 5.3 at $1\times1$
 (barely above threshold) to roughly 17--24 when binned, and the median grain
-intensity rises tenfold. Figures~\ref{fig:snrhist} and~\ref{fig:snrtrend}
-show the full SNR distribution and the median/90th-percentile trend shifting to
-higher values with bin size. The apparent paradox---fewer but stronger
-detections---arises because most bins contain only background and a
+intensity rises tenfold. Figure~\ref{fig:snrhist} shows the full SNR
+distribution shifting to higher values with bin size. The apparent paradox of
+fewer but stronger
+detections arises because most bins contain only background and a
 sub-bin-sized grain does not fill a larger bin, so summed signal grows more
 slowly than $N^2$ while noise grows as $N$.
 
@@ -287,11 +273,11 @@ linking tolerance 5\,px).}
 \toprule
 Bin size & Occupied bins & Raw peaks & Retained grains & Spatial resolution\\
 \midrule
-$1\times1$ & 25{,}170 & 186{,}063 & 1{,}825 & full\\
-$2\times2$ & 7{,}231  & 16{,}915  & 310   & \na\\
+$1\times1$ & 25{,}170 & 186{,}063 & 1{,}825 & $156\times221$\\
+$2\times2$ & 7{,}231  & 16{,}915  & 310   & $78\times111$\\
 $3\times3$ & 3{,}253  & 9{,}124   & 213   & $52\times74$\\
-$4\times4$ & 1{,}859  & 6{,}125   & 199   & \na\\
-$5\times5$ & 1{,}188  & 3{,}889   & 144   & \na\\
+$4\times4$ & 1{,}859  & 6{,}125   & 199   & $39\times56$\\
+$5\times5$ & 1{,}188  & 3{,}889   & 144   & $32\times45$\\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -315,57 +301,20 @@ Median grain intensity (arb.) & 6 & 64\\
 
 \begin{figure}[H]
 \centering
-\begin{minipage}{0.48\linewidth}\centering
-  \includegraphics[width=\linewidth]{snr_hist_by_binsize}
-  \captionof{figure}{Distribution of detection SNR at each bin size; the
-  distribution shifts to higher SNR as bin size grows.}
-  \label{fig:snrhist}
-\end{minipage}\hfill
-\begin{minipage}{0.48\linewidth}\centering
-  \includegraphics[width=\linewidth]{trend_median_p90_vs_binsize}
-  \captionof{figure}{Median and 90th-percentile detection SNR versus bin size.}
-  \label{fig:snrtrend}
-\end{minipage}
+\includegraphics[width=0.72\linewidth]{snr_hist_by_binsize}
+\caption{Distribution of detection SNR at each bin size; the distribution shifts
+to higher SNR as bin size grows.}
+\label{fig:snrhist}
 \end{figure}
 
 The file size of the pre-built binned HDF5 does not fall as fast as the bin count
 (10\,GB at $1\times1$ versus 971\,MB at $5\times5$), because each stored bin
 retains a full-resolution detector image regardless of bin size. Building a
-binned file is the throughput bottleneck (about 15\,min per bin size), while
-detection itself takes seconds to minutes. Taken together, a $3\times3$ bin is a
+binned file is the throughput bottleneck, running roughly one to two orders of
+magnitude slower than detection itself. Taken together, a $3\times3$ bin is a
 practical sweet spot: the SNR gain has largely saturated and the horizontal
 fragmentation is gone, while the spatial resolution ($52\times74$) remains high
 enough to resolve device-scale structure.
-
-\subsection{Automated detector optimization}
-The CVEvolve search at the binned ($5\times5$) scale converged on a top-hat,
-band-limited, adaptive-SNR detector (\texttt{tophat\_band\_adaptive\_snr}) with a
-holdout $F_1$ of 0.79 (Table~\ref{tab:cvevolve}), found in the first search
-round. A parallel search at the unbinned scale raised the holdout $F_2$ from
-0.181 to 0.463 but was not pursued to convergence: only about 0.8\% of the
-25{,}170 occupied bins were labeled, so hard tuning against so few labels risked
-overfitting. We therefore retained the recall-first baseline at $1\times1$ and
-performed detector optimization at the binned scale, where SNR is high and the
-labeled fraction is larger.
-
-\begin{table}[H]
-\centering
-\caption{Summary of the two automated detector-optimization runs (Scan\_0203).}
-\label{tab:cvevolve}
-\small
-\begin{tabular}{@{}lll@{}}
-\toprule
-Quantity & $5\times5$ run & $1\times1$ run\\
-\midrule
-Scoring metric & $F_1$ (40\,px tol.) & mean $F_2$ (recall-weighted)\\
-Labeled bins (dev + holdout) & \na\ + 116 & 138 + 60\\
-Rounds completed & 11 & 13\\
-Baseline score & \na & $F_2=0.181$\\
-Best holdout score & $F_1=0.79$ & $F_2=0.463$\\
-Total wall-clock time (h) & 44.7 & 21.5\\
-\bottomrule
-\end{tabular}
-\end{table}
 
 \subsection{Outline robustness relative to fixed detector-ROI thresholding}
 A conventional alternative to linked peak detection is to place a fixed detector
@@ -373,20 +322,32 @@ region of interest (ROI) around a known Bragg spot, integrate that aperture at
 every scan position, and define the grain as the connected region above a chosen
 SNR limit. We compared this approach with xrd-app for Scan\_0203 using a
 $7\times7$-pixel signal aperture, a surrounding $17\times17$-pixel background
-window, and the same $3\times3$ spatial bins. The independently constructed
-territorial map, which bins frames using their true stage coordinates, provided a
-common reference. Features were matched across the regular and territorial maps
-by reflection, detector position, and overlap among their underlying raw frames.
+window, and the same $3\times3$ spatial bins. As a common reference we built a
+\emph{territorial} map: the same Union-Find linking of per-position detections,
+but grouped on each frame's real, imperfect interferometer position rather than
+on the regularized square grid. Because it uses the true stage coordinates and
+no outline threshold of its own, it provides a method-independent footprint
+against which both the xrd-app and fixed-ROI outlines can be scored. Features
+were matched across the regular and territorial maps by reflection, detector
+position, and overlap among their underlying raw frames.
 Of the credible matches, three representative cases were selected objectively at
 the 90th, 50th, and 10th percentiles of elliptical-Gaussian fit quality
 ($R^2$), rather than by visual preference.
 
 Figure~\ref{fig:roicomparison} shows the territorial footprint, xrd-app outline,
-fixed-ROI outline at SNR 4, and an edge profile for each case. The Gaussian curve
-in the final column is a fit used to display profile breadth; it is not an extra
-acceptance step in the production pipeline. Production xrd-app instead requires
-a non-flat, generally decreasing intensity profile after adaptive peak detection
-and spatial linking. This distinction matters for the poor case: its spatial
+fixed-ROI outline at SNR 4, and an edge profile for each case. In the final
+column the two SNR traces are computed by different conventions and are not
+directly comparable in absolute height: the orange xrd-app trace is the detector
+SNR after radial-background subtraction and top-hat filtering, evaluated at the
+peak wherever it lands on the detector in each frame, whereas the open-blue trace
+is plain aperture photometry in one static detector box. The panel is therefore
+meant to be read for the \emph{shape} of the falloff and the fact that the
+peak-following trace stays high across the grain while the fixed aperture decays,
+not as a claim that one records more signal. The Gaussian curve is a fit used
+only to display profile breadth; it is not an acceptance step in the production
+pipeline, which instead requires a non-flat, generally decreasing intensity
+profile after adaptive peak detection and spatial linking. This distinction
+matters for the poor case: its spatial
 profile is visibly non-Gaussian ($R^2=0.30$), but local detector continuity still
 recovers a coherent footprint with an intersection-over-union (IoU) of 0.61
 against the territorial reference. The fixed ROI reaches at most 0.52 for this
@@ -400,15 +361,15 @@ known.
 \centering
 \includegraphics[width=\textwidth]{roi_vs_xrdapp_examples}
 \caption{Fixed detector-ROI thresholding compared with xrd-app for matched
-Scan\_0203 features. Rows show ideal, median, and poor Gaussian-fit cases selected
-at the 90th, 50th, and 10th percentiles of fit $R^2$. Columns show the
-true-position territorial reference, the $3\times3$ xrd-app linked shape, the
-connected fixed-ROI region at SNR 4, and the SNR dropoff along the fitted major
-axis. Orange points are xrd-app detections that follow local Bragg-peak movement;
-open blue points use one fixed detector aperture. Orange curves are
-visualization-only Gaussian fits, and dashed lines mark the SNR cutoff. The poor
-case demonstrates that xrd-app can retain a reproducible outline even when the
-intensity profile is not well described by one Gaussian.}
+Scan\_0203 features. Rows show ideal, median, and poor Gaussian-fit cases (90th,
+50th, and 10th percentiles of fit $R^2$). Columns: the territorial reference
+(Union-Find on the real, imperfect stage positions), the $3\times3$ xrd-app
+linked shape, the fixed-ROI region at SNR 4, and the SNR dropoff along the fitted
+major axis. Orange points are xrd-app detections that follow local Bragg-peak
+movement (background-subtracted, top-hat SNR); open blue points use one fixed
+aperture. The two use different SNR conventions, so compare the falloff shape,
+not the absolute height. The poor case shows xrd-app keeps a reproducible outline
+even when the profile is not a single Gaussian.}
 \label{fig:roicomparison}
 \end{figure}
 
@@ -418,12 +379,10 @@ feature-dependent. Figure~\ref{fig:roisensitivity} sweeps the conventional SNR
 limit from 2 to 8. The inferred area changes from 13 to 35 bins for the ideal
 case, from 0 to 48 bins for the median case, and from 65 to 269 bins for the poor
 case. The median feature disappears completely at SNR 7 even though xrd-app
-retains a linked 16-bin shape. In contrast, the saved xrd-app outline has no
-feature-specific outline threshold to tune after detection: a common detector
-SNR threshold is followed by local detector-position matching and a spatial
-profile consistency test. This combination makes the reconstructed boundary less
-sensitive to isolated noisy or missing positions while still allowing imperfect
-physical shapes.
+retains a linked 16-bin shape. In contrast, the saved xrd-app outline needs no
+feature-specific threshold after detection: a common detector SNR threshold, local
+position matching, and a profile-consistency test make the boundary less sensitive
+to noisy or missing positions while still allowing imperfect physical shapes.
 
 \begin{figure}[H]
 \centering
@@ -437,30 +396,19 @@ approximately 2.7--4.1 and can vanish entirely for a moderate-SNR feature.}
 \label{fig:roisensitivity}
 \end{figure}
 
-\subsection{Deskewing the unbinned grid}
-Re-linking unbinned detections by true stage position reduced the fraction of
-single-row grains from 53\% to 33--44\%, confirming that part of the
-fragmentation is a correctable raster artifact. A diagnostic split shows that
-about 38\% of unbinned detections have a same-grain partner one row away but
-shifted outside the linking window (recoverable by deskewing), whereas about 45\%
-have no detection at all in the adjacent row (an SNR dropout, recoverable only by
-binning or a lower threshold). For this sample the systematic skew is small
-(median $\sim$2 columns), so binning is the more effective remedy; deskewing
-would matter more on scans with larger backlash. Consistently, applying the
-deskew to already-binned data degraded the result, so the step is restricted to
-unbinned grids.
-
 \subsection{Device-level grain statistics}
 Applying the full workflow to six focused scans across three perovskite-halide
-devices---distinguished by whether the film was processed in a glove box (GB) and
-by a deionized-water (DI) treatment---reveals reproducible microstructural
+devices, distinguished by whether the film was processed in a glove box (GB) and
+by a deionized-water (DI) treatment, reveals reproducible microstructural
 differences. Figure~\ref{fig:gb} compares the glove-box and no-glove-box
-conditions. In the no-glove-box devices, the (001):(111) grain-size ratio changes
-markedly (from $\sim$3.4 to $\sim$0.9) and the largest (111) grain roughly
-doubles relative to the overall device area, indicating substantially enhanced
-(111) grain growth without glove-box control.
-\todo{reconcile wording: the poster states No\_GB ``preserves (001) dominance''
-yet the size ratio falls~--- clarify count-dominance vs.\ size-ratio.}
+conditions. Count dominance and size dominance behave differently: (001) remains
+the more numerous orientation in every device, but the two orientations exchange
+which one grows larger. In the no-glove-box devices the (001):(111) grain-size
+ratio falls markedly (from $\sim$3.4 to $\sim$0.9) and the largest (111) grain
+roughly doubles relative to the overall device area. In other words, processing
+without glove-box control preserves the prevalence of (001) grains by number
+while substantially enhancing the growth of individual (111) grains, so the
+larger grains become predominantly (111).
 
 Figure~\ref{fig:treat} compares the treatment conditions. The DI treatment
 increases both the average size and the total area share of (001)-oriented
@@ -492,19 +440,39 @@ We developed xrd-app, an automated command-line computer-vision pipeline that
 turns raw nano-XRD frames into grain-level structural maps, and validated it on
 perovskite-halide solar cells measured at APS 19-ID. Spatial binning raises the
 per-position signal-to-noise ratio approximately linearly with bin size, with a
-practical optimum near $3\times3$; automated detector discovery produced a
-band-limited top-hat detector reaching a holdout $F_1$ of 0.79 at the binned
-scale; and a Union-Find plus Gaussian-profile contouring stage consolidates
-scattered detections into physically meaningful grains while tolerating a less
-restrictive detection threshold. Against a true-position territorial reference,
-this linked approach remains effective for nonideal profiles for which a fixed
-ROI requires feature-specific threshold tuning and can change the inferred area
-by severalfold. Applied across three devices, the workflow shows
-that processing outside a glove box strongly enhances (111) grain growth relative
-to (001), and that a deionized-water (DI) treatment increases the size and area
-share of (001)-oriented grains. These structure--processing correlations, obtained
-automatically from datasets that would be impractical to analyze by hand,
-demonstrate the pipeline's value for rapid materials feedback.
+practical optimum near $3\times3$, and a Union-Find plus Gaussian-profile
+contouring stage consolidates scattered detections into physically meaningful
+grains while tolerating a less restrictive detection threshold. Against a
+true-position territorial reference, this linked approach stays effective for
+nonideal profiles where a fixed ROI needs feature-specific tuning and can change
+the inferred area severalfold. Across three devices, the workflow shows that
+processing outside a glove box strongly enhances (111) grain growth relative to
+(001), and that a deionized-water (DI) treatment increases the size and area share
+of (001) grains, correlations obtained automatically from datasets impractical to
+analyze by hand.
+
+The workflow is most effective for samples with predictable, repeated Bragg
+angles: once the expected reflections are known, feature finding is fully
+automated across any number of scans and the grain maps are directly comparable
+device to device. Even when the angles are unknown, binning, peak detection, and
+Union-Find linking remain reproducible, scalable, and high-confidence in any case
+where a minimum grain size and an intensity dropoff can be assumed. The automation
+matters most for fine-grained films: when a device holds many small or
+low-intensity grains, their reflections are lost in the noise gradient of the
+fully summed image and cannot be placed by eye, so the pipeline scans every
+position and recovers each peak (Fig.~\ref{fig:grain-scale}, left). For
+coarse-grained devices a few dominant grains stand out in the summed image and can
+be picked by hand (right), so automation is optional.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.82\linewidth]{small_vs_large_grain}
+\caption{Left: every (001) grain across Scan\_0179 (true-position territorial
+reference); many faint features are invisible in a summed image and recovered
+only by scanning each position. Right: a single large Scan\_0032 grain, obvious in
+a fixed ROI on the summed image.}
+\label{fig:grain-scale}
+\end{figure}
 
 Future work will (1) apply the same workflow to additional device types, (2)
 correlate the nano-XRD grain maps with spatially aligned X-ray fluorescence
@@ -516,53 +484,15 @@ spatial maps of the identified grains.
 \section*{Acknowledgments}
 \addcontentsline{toc}{section}{Acknowledgments}
 %=====================================================================
-This work was performed under the Science Undergraduate Laboratory Internship
-(SULI) program, sponsored by the U.S. Department of Energy, Office of Science,
-Office of Workforce Development for Teachers and Scientists. The author thanks
-his mentors Grace and Pedro for guidance throughout the project, and the staff of
-the X-ray Science Division and the In Situ Nanoprobe at the Advanced Photon
-Source. This research used resources of the Advanced Photon Source, a U.S.
-Department of Energy (DOE) Office of Science user facility operated for the DOE
-Office of Science by Argonne National Laboratory under Contract No.
-DE-AC02-06CH11357.
-\todo{confirm mentor surnames and the exact grant/contract wording.}
-
-%=====================================================================
-\appendix
-\section*{Appendix: supplementary figures}
-\addcontentsline{toc}{section}{Appendix}
-%=====================================================================
-The reflection-resolved grain statistics summarized in Section~III~E are shown in
-more detail in Figs.~\ref{fig:areabyrefl}--\ref{fig:chibyrefl}.
-
-\begin{figure}[H]
-\centering
-\begin{minipage}{0.48\linewidth}\centering
-  \includegraphics[width=\linewidth]{area_by_reflection}
-  \captionof{figure}{Grain footprint (area) resolved by reflection.}
-  \label{fig:areabyrefl}
-\end{minipage}\hfill
-\begin{minipage}{0.48\linewidth}\centering
-  \includegraphics[width=\linewidth]{intensity_by_reflection}
-  \captionof{figure}{Integrated grain intensity resolved by reflection.}
-  \label{fig:intbyrefl}
-\end{minipage}
-\end{figure}
-
-\begin{figure}[H]
-\centering
-\begin{minipage}{0.48\linewidth}\centering
-  \includegraphics[width=\linewidth]{chi_histogram}
-  \captionof{figure}{Distribution of azimuthal angle $\chi$ over all retained
-  grains.}
-  \label{fig:chihist}
-\end{minipage}\hfill
-\begin{minipage}{0.48\linewidth}\centering
-  \includegraphics[width=\linewidth]{chi_by_reflection}
-  \captionof{figure}{Azimuthal angle $\chi$ resolved by reflection.}
-  \label{fig:chibyrefl}
-\end{minipage}
-\end{figure}
+This work was performed under the U.S. Department of Energy (DOE) Science
+Undergraduate Laboratory Internship (SULI) program, sponsored by the DOE Office
+of Science, Office of Workforce Development for Teachers and Scientists. The
+author thanks his mentors Yanqi Grace Luo and Pedro Mercado Lozano for their
+guidance throughout the project, and the staff of the X-ray Science Division and
+the In Situ Nanoprobe at the Advanced Photon Source. This research used
+resources of the Advanced Photon Source, a U.S. Department of Energy (DOE)
+Office of Science user facility operated for the DOE Office of Science by Argonne
+National Laboratory under Contract No. DE-AC02-06CH11357.
 
 %=====================================================================
 \section*{References}
@@ -570,13 +500,43 @@ more detail in Figs.~\ref{fig:areabyrefl}--\ref{fig:chibyrefl}.
 %=====================================================================
 \begin{enumerate}[label={\arabic*.},leftmargin=2em,itemsep=2pt]
 \item M. E. Stuckelberger, T. Nietzold, B. M. West, Y. Luo, X. Li, J. Werner,
-\emph{et al.}, J. Phys. Chem. C \textbf{124}, 17949--17956 (2020).
-\todo{add article title.}
+\emph{et al.}, ``Effects of X-rays on perovskite solar cells,'' J. Phys. Chem.
+C \textbf{124}, 17949--17956 (2020).
 \item M. Du, X. Yin, Y. Luo, D. Beniwal, S. Tang, H. Sharma, and M. J. Cherukara,
 ``CVEvolve: Autonomous algorithm discovery for unstructured scientific data
 processing,'' arXiv:2605.11359 (2026).
-\item Y. Li, Z. Zhang, H. Zhang, Y. Liu, H. Gao, and Y. Mao, ACS Appl. Mater.
-Interfaces \textbf{17}, 48231--48239 (2025). \todo{add article title.}
+\item Y. Li, Z. Zhang, H. Zhang, Y. Liu, H. Gao, and Y. Mao, ``Preparation of
+(111) facet-dominated perovskite films for highly efficient and stable
+perovskite solar cells,'' ACS Appl. Mater. Interfaces \textbf{17},
+48231--48239 (2025).
 \end{enumerate}
+
+%=====================================================================
+\section*{Appendix: Largest features, manual ROI versus automated detection}
+\addcontentsline{toc}{section}{Appendix}
+%=====================================================================
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=0.68\linewidth]{appendix_roi_vs_xrdapp}
+\caption{The three largest features in Scan\_0032. Left: a manual detector ROI on
+the fully summed diffraction image, giving total counts inside a fixed box at
+every spatial bin; the feature sits in a bright, serpentine-striped background the
+fixed box cannot separate from signal. Right: the same feature recovered by
+xrd-app at $3\times3$ binning, plotted at its true grid location, isolated to a
+clean footprint (white where no peak was linked). Both agree on location, but only
+the automated map reports size and shape without manual thresholding.}
+\label{fig:appendix-roi}
+\end{figure}
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=\linewidth]{appendix_xrdapp_shapes}
+\caption{Largest features in Scans 179 and 182, each shown as its linked
+$3\times3$ footprint on a white background (the Shape/Verify view). No manual ROIs
+were drawn here; the workflow finds and characterizes every feature without
+operator input, so this view scales to any scan.}
+\label{fig:appendix-shapes}
+\end{figure}
 
 \end{document}

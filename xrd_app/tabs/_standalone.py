@@ -14,6 +14,33 @@ import sys
 from PyQt5.QtWidgets import QApplication
 
 
+def launch_tab(name, project=None, scan=None, bin_size=3):
+    """Open a focused ``Setup`` + ``<name>`` two-tab window; return the exit code.
+
+    Shared by :func:`run_standalone` (``python -m xrd_app.tabs.<name>``) and the
+    thin ``xrd-app`` launcher commands (e.g. ``xrd-app roi``) so both routes get
+    the same env hardening, high-DPI setup and project/scan switching.
+    """
+    # Every focused standalone window includes Setup (project/scan switching)
+    # and Programs (run the pipeline), plus the requested tab. Deduped so
+    # launching Setup or Programs on their own doesn't double up.
+    base = ["setup", "programs"]
+    tabs = base + ([name] if name not in base else [])
+
+    from ..app import _harden_env_for_remote_x  # before QApplication reads env
+    _harden_env_for_remote_x()
+    from PyQt5.QtCore import Qt
+    QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)
+    QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
+    app = QApplication.instance() or QApplication(sys.argv)
+    app.setStyle("Fusion")
+
+    from ..app import MainWindow  # local import avoids an import cycle
+    win = MainWindow(project, scan=scan, bin_size=bin_size, tabs=tabs)
+    win.show()
+    return app.exec_()
+
+
 def run_standalone(make_tab, title):
     parser = argparse.ArgumentParser(description=f"xrd-app tab: {title}")
     parser.add_argument("--project", default=None,
@@ -31,20 +58,8 @@ def run_standalone(make_tab, title):
         if spec is not None:
             mod_name = spec.name
     name = mod_name.rsplit(".", 1)[-1]
-    tabs = ["setup"] if name == "setup" else ["setup", name]
-
-    from ..app import _harden_env_for_remote_x  # before QApplication reads env
-    _harden_env_for_remote_x()
-    from PyQt5.QtCore import Qt
-    QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)
-    QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
-    app = QApplication.instance() or QApplication(sys.argv)
-    app.setStyle("Fusion")
-
-    from ..app import MainWindow  # local import avoids an import cycle
-    win = MainWindow(args.project, scan=args.scan, bin_size=args.bin_size, tabs=tabs)
-    win.show()
-    sys.exit(app.exec_())
+    sys.exit(launch_tab(name, project=args.project, scan=args.scan,
+                        bin_size=args.bin_size))
 
 
 def run_dialog_standalone(open_dialog, title):

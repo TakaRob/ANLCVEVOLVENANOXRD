@@ -16,12 +16,13 @@ from pathlib import Path
 
 from PyQt5.QtCore import QTimer
 from PyQt5.QtWidgets import (
-    QAction, QApplication, QCheckBox, QComboBox, QFileDialog, QHBoxLayout,
-    QLabel, QMainWindow, QScrollArea, QTabWidget, QVBoxLayout, QWidget,
+    QAction, QApplication, QCheckBox, QComboBox, QHBoxLayout,
+    QLabel, QMainWindow, QPushButton, QScrollArea, QTabWidget, QVBoxLayout, QWidget,
 )
 
 from . import __version__, workspace
 from .config import DataManager
+from .gui.lifecycle import dispose_widget
 from .tabs._embed import placeholder
 
 # Built-in tab modules (module path under xrd_app.tabs).
@@ -222,6 +223,7 @@ class MainWindow(QMainWindow):
         Setup-tab button handler (the Setup widget itself is rebuilt).
         """
         def _do():
+            self._dispose_tabs()
             self._load_project(project_root, bin_size=self.bin_size)
             for idx in range(len(self._defs)):
                 self._built[idx] = False
@@ -244,7 +246,6 @@ class MainWindow(QMainWindow):
             self.scan_combo.setCurrentText(current)
         elif scans:
             self.scan = scans[0]
-        self._populate_reflections()
         self._refresh_context()
 
     # ----- header -----------------------------------------------------
@@ -255,18 +256,27 @@ class MainWindow(QMainWindow):
         self.scan_combo.setMinimumWidth(160)
         self.scan_combo.currentTextChanged.connect(self._on_scan_changed)
         row.addWidget(self.scan_combo)
+        scan_steps = QVBoxLayout()
+        scan_steps.setContentsMargins(0, 0, 0, 0)
+        scan_steps.setSpacing(0)
+        self.scan_prev_btn = QPushButton("▲")
+        self.scan_next_btn = QPushButton("▼")
+        for button in (self.scan_prev_btn, self.scan_next_btn):
+            button.setFixedSize(20, 13)
+            button.setStyleSheet("QPushButton { padding:0; font-size:8px; }")
+        self.scan_prev_btn.setToolTip("Previous scan")
+        self.scan_next_btn.setToolTip("Next scan")
+        self.scan_prev_btn.clicked.connect(lambda: self._step_scan(-1))
+        self.scan_next_btn.clicked.connect(lambda: self._step_scan(1))
+        scan_steps.addWidget(self.scan_prev_btn)
+        scan_steps.addWidget(self.scan_next_btn)
+        row.addLayout(scan_steps)
         # Bin size is chosen per-tab (each bin-dependent tab has its own Bin
         # selector); there is intentionally no global bin selector here.
 
-        # Reflection-set selector (per scan): which reflections.py every tab
-        # overlays. Defaults to Auto (per-scan/project/bundled); the user can
-        # point it at a set made in Manual reflections, or Browse for one.
-        row.addSpacing(12)
-        row.addWidget(QLabel("<b>Reflections:</b>"))
-        self.refl_combo = QComboBox()
-        self.refl_combo.setMinimumWidth(200)
-        self.refl_combo.activated.connect(self._on_reflection_changed)
-        row.addWidget(self.refl_combo)
+        # No reflection-set selector here: reflections always resolve per-scan →
+        # per-project → bundled default (see DataManager.reflections). Author a
+        # set in Setup → Manual reflections; it writes the per-scan/project file.
 
         # Slot for the active tab's own header controls (e.g. Shape/Verify lifts
         # its Bin + Scan/Feature Catalog + Load bar up here, so the whole top row
@@ -290,6 +300,7 @@ class MainWindow(QMainWindow):
         if self.dm is None:
             self.scan_combo.addItems(["(no project — create one in Setup)"])
             self.scan_combo.blockSignals(False)
+            self._update_scan_step_buttons(0)
             return
         self.scan_combo.addItems(scans or ["(no scans — load in Setup)"])
         if self.scan and self.scan in scans:
@@ -297,66 +308,55 @@ class MainWindow(QMainWindow):
         elif scans:
             self.scan = scans[0]
         self.scan_combo.blockSignals(False)
-        self._populate_reflections()
+        self._update_scan_step_buttons(len(scans))
 
-    # ----- reflection-set selector ------------------------------------
-    _REFL_BROWSE = "__browse__"
+    def _update_scan_step_buttons(self, n_scans):
+        enabled = n_scans > 1
+        for button in (getattr(self, "scan_prev_btn", None),
+                       getattr(self, "scan_next_btn", None)):
+            if button is not None:
+                button.setEnabled(enabled)
 
-    def _populate_reflections(self):
-        """Fill the Reflections combo for the active scan."""
-        combo = getattr(self, "refl_combo", None)
-        if combo is None:
+    def _step_scan(self, amount):
+        """Select the previous/next valid scan, wrapping at either end."""
+        valid = [i for i in range(self.scan_combo.count())
+                 if not self.scan_combo.itemText(i).startswith("(")]
+        if len(valid) < 2:
             return
-        combo.blockSignals(True)
-        combo.clear()
-        if self.dm is None:
-            combo.addItem("Auto (default)", None)
-            combo.blockSignals(False)
-            return
-        combo.addItem("Auto (default)", None)
-        seen = set()
-        per_scan = self.dm.metadata_scan_dir(self.scan) / "reflections.py"
-        if per_scan.exists():
-            combo.addItem(f"Per-scan ({per_scan.name})", str(per_scan))
-            seen.add(str(per_scan))
-        proj = self.dm.metadata_dir / "reflections.py"
-        if proj.exists() and str(proj) not in seen:
-            combo.addItem("Project default", str(proj))
-            seen.add(str(proj))
-        current = self.dm.reflection_source(self.scan)
-        if current is not None and str(current) not in seen:
-            combo.addItem(f"Selected ({Path(current).name})", str(current))
-            seen.add(str(current))
-        combo.addItem("Browse…", self._REFL_BROWSE)
-        # Reflect the saved per-scan choice.
-        if current is not None:
-            i = combo.findData(str(current))
-            if i >= 0:
-                combo.setCurrentIndex(i)
-        combo.blockSignals(False)
-
-    def _on_reflection_changed(self, _idx):
-        if self.dm is None:
-            return
-        data = self.refl_combo.currentData()
-        if data == self._REFL_BROWSE:
-            path, _ = QFileDialog.getOpenFileName(
-                self, "Select a reflections file", str(self.dm.metadata_dir),
-                "Reflections (reflections.py reflections.json *.py *.json)")
-            if not path:
-                self._populate_reflections()  # revert selection
-                return
-            if path.endswith(".json"):
-                path = str(Path(path).with_suffix(".py"))
-            self.dm.set_reflection_source(path, self.scan)
-        elif data is None:
-            self.dm.clear_reflection_source(self.scan)
-        else:
-            self.dm.set_reflection_source(data, self.scan)
-        self._populate_reflections()
-        self._refresh_context()
+        current = self.scan_combo.currentIndex()
+        try:
+            position = valid.index(current)
+        except ValueError:
+            position = 0
+        self.scan_combo.setCurrentIndex(valid[(position + amount) % len(valid)])
 
     # ----- tab lifecycle ----------------------------------------------
+    def _dispose_tab(self, idx):
+        """Close tab resources now, then schedule their Qt objects for deletion."""
+        if idx == self.tabs.currentIndex() and self._cur_extra is not None:
+            try:
+                self.header_extra.removeWidget(self._cur_extra)
+                self._cur_extra.deleteLater()
+            except RuntimeError:
+                pass
+            self._cur_extra = None
+        content = self._content.pop(idx, None)
+        if content is not None:
+            dispose_widget(content)
+        host = self._hosts[idx]
+        lay = host.layout()
+        while lay.count():
+            item = lay.takeAt(0)
+            wrapper = item.widget()
+            if wrapper is not None:
+                dispose_widget(wrapper)
+        self._built[idx] = False
+
+    def _dispose_tabs(self, scan_dependent_only=False):
+        for idx, (_mod, meta) in enumerate(self._defs):
+            if not scan_dependent_only or meta.get("scan_dependent", True):
+                self._dispose_tab(idx)
+
     def _ensure_built(self, idx):
         if idx < 0 or idx >= len(self._hosts) or self._built.get(idx):
             return
@@ -367,7 +367,7 @@ class MainWindow(QMainWindow):
             item = lay.takeAt(0)
             w = item.widget()
             if w:
-                w.setParent(None)
+                dispose_widget(w)
         # Without a project, only Setup is usable; others explain why.
         if self.project_root is None and not getattr(mod, "WORKS_WITHOUT_PROJECT", False):
             content = placeholder(
@@ -441,11 +441,11 @@ class MainWindow(QMainWindow):
         if not text or text.startswith("("):
             return
         self.scan = text
-        self._populate_reflections()
         self._refresh_context()
 
     def _refresh_context(self):
         """Rebuild scan-dependent tabs; push context to persistent ones."""
+        self._dispose_tabs(scan_dependent_only=True)
         for idx, (mod, meta) in enumerate(self._defs):
             if meta.get("scan_dependent", True):
                 self._built[idx] = False  # lazy rebuild on next view
@@ -491,6 +491,7 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):  # noqa: N802 (Qt signature)
         self._save_state()
+        self._dispose_tabs()
         super().closeEvent(event)
 
     def resizeEvent(self, event):  # noqa: N802 (Qt signature)

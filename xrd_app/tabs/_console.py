@@ -17,6 +17,8 @@ from PyQt5.QtWidgets import (
     QVBoxLayout, QWidget,
 )
 
+from ..gui.lifecycle import stop_process
+
 _PROGRESS_RE = re.compile(r"PROGRESS\s+(\d+)\s*/\s*(\d+)")
 
 
@@ -136,6 +138,7 @@ class JobConsole(QWidget):
         self._proc.setProcessChannelMode(QProcess.MergedChannels)
         self._proc.readyReadStandardOutput.connect(self._on_output)
         self._proc.finished.connect(self._on_finished)
+        self._proc.errorOccurred.connect(self._on_error)
         self._proc.start(cmd[0], cmd[1:])
         if self._queue is None:
             self.status.setText("running")
@@ -145,7 +148,7 @@ class JobConsole(QWidget):
     def cancel(self):
         if self.is_running():
             self._queue = None  # drop any remaining queued jobs
-            self._proc.kill()
+            stop_process(self._proc)
             self._append("\n[cancelled]\n")
             self.state_changed.emit()
 
@@ -155,6 +158,8 @@ class JobConsole(QWidget):
 
     # ----- internals ---------------------------------------------------
     def _on_output(self):
+        if self._proc is None:
+            return
         data = bytes(self._proc.readAllStandardOutput()).decode("utf-8", "replace")
         for line in data.splitlines():
             m = _PROGRESS_RE.search(line)
@@ -167,6 +172,11 @@ class JobConsole(QWidget):
             self._append(line + "\n")
 
     def _on_finished(self, code, _status):
+        process = self._proc
+        if process is None:
+            return
+        self._proc = None
+        process.deleteLater()
         self.progress.setValue(100 if code == 0 else self.progress.value())
         self._append(f"\n[exit {code}]\n")
         # Batch mode: tally, then advance the queue (a cancel sets _queue=None).
@@ -185,6 +195,12 @@ class JobConsole(QWidget):
                 cb(code)
             except Exception:
                 pass
+
+    def _on_error(self, error):
+        if error != QProcess.FailedToStart or self._proc is None:
+            return
+        self._append(f"\n[failed to start: {self._proc.errorString()}]\n")
+        self._on_finished(-1, QProcess.CrashExit)
 
     def _append(self, text):
         self.log.moveCursor(self.log.textCursor().End)

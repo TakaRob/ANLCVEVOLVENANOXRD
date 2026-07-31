@@ -15,13 +15,19 @@ pip install -e '.[poni]'    # + pyFAI for .poni → tth conversion
 ## Quick start
 
 ```bash
-xrd-app init --name MyProject              # create the project tree
-xrd-app scan-detect --scans-dir <Scans/>   # discover + register scans (fast)
-xrd-app link --tth tth.tiff --reflections reflections.json
-xrd-app peaks  --scan 203 --bin-size 3     # Phase 1: per-bin detection
-xrd-app shapes --scan 203 --bin-size 3 --peak-algo <name>   # Phase 2: link + gaussian filter
-xrd-app gui                                # the single-window app
+xrd-app init --name MyProject --root /path/to/project
+xrd-app scan-detect --root /path/to/project --scans-dir /path/to/Scans
+xrd-app link --root /path/to/project --tth tth.tiff --reflections reflections.json
+xrd-app make-bins --root /path/to/project --scan 203 --bin-size 3
+xrd-app run-pipeline --root /path/to/project --scan 203 --bin-size 3
+xrd-app gui --root /path/to/project
 ```
+
+Every command supports `--help`, and defaults are shown there. Commands return a
+nonzero exit status for usage errors and failed work, making them suitable for
+shell scripts and schedulers. Paths supplied as command options are interpreted
+relative to the current working directory unless the option explicitly says
+otherwise.
 
 ## Pipeline
 
@@ -34,10 +40,24 @@ xrd-app gui                                # the single-window app
 
 ## Commands
 
-`init · link · status · scan-detect · grid · bin · peaks · shapes · batch ·
-detectors · save-algorithm · convert-poni · build-holdout · run-cvevolve · gui`
+Prefer the composite commands for routine work; the individual stages remain
+available for inspection and recovery.
 
-Run any with `--help`. The GUI's per-tab "General" panels mirror this help.
+| Area | Commands |
+|---|---|
+| Project setup | `init`, `link`, `status`, `scan-detect`, `convert-poni` |
+| Binning | `create-positions`, `grid`, `territory-grid`, `archive-unbinned`, `bin`, `make-bins`, `territory-build` |
+| Peak and shape analysis | `detectors`, `peaks`, `shapes`, `run-combined`, `run-pipeline`, `batch`, `reflection-sum` |
+| Manual ROI analysis | `roi-detect`, `roi-shapes`, `roi-save`, `roi-cvevolve-init` |
+| Cross-scan studies | `aggregate`, `track`, `rocking`, `predict`, `scan-table`, `register-study`, `list-studies`, `run-study` |
+| Derived maps | `hd-device-map`, `combined-device`, `qspace`, `rsm`, `xrf` |
+| Optimization | `build-holdout`, `cvevolve-init`, `run-cvevolve`, `save-algorithm` |
+| Interfaces | `gui`, `roi`, `roifeature` |
+| Provenance | `lineage` |
+
+Run `xrd-app --help` for the complete installed command list and
+`xrd-app COMMAND --help` for options and defaults. The GUI's per-tab General
+panels mirror the relevant command help.
 
 ## Project layout
 
@@ -54,10 +74,11 @@ Run any with `--help`. The GUI's per-tab "General" panels mirror this help.
 ## Layout of this repo
 
 ```
-xrd_app/            the package (cli, app, config, core/, gui/, tabs/, PeakAlgorithms/ …)
-cvevolve_*/         CVEvolve configs / prompts / holdout sets per bin size
-docs/               PLAN.md, IMPLEMENTATION.md, original design notes
+xrd_app/            the package (CLI, app, core/, gui/, tabs/, algorithms)
+cvevolve_*/         CVEvolve configs, prompts, and holdout sets per bin size
+docs/               research and deployment reference material
 ```
 
-Design + build details: [docs/PLAN.md](docs/PLAN.md),
-[docs/IMPLEMENTATION.md](docs/IMPLEMENTATION.md).
+Workflow details: [PIPELINE_WALKTHROUGH.md](PIPELINE_WALKTHROUGH.md) and
+[xrd_app/PATHWAYS.md](xrd_app/PATHWAYS.md). Domain vocabulary is defined in
+[TERMINOLOGY.md](TERMINOLOGY.md).

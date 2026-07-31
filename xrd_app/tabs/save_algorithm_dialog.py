@@ -136,7 +136,7 @@ class SaveAlgorithmDialog(QDialog):
                 noise_strength=strength, noise_shift=shift,
                 log_scale=log_scale, clip_lo_pct=clip_lo, clip_hi_pct=clip_hi,
                 name=self.name.text().strip() or None, kind=self.kind,
-                source="manual")
+                source="manual", project_root=self.project_root)
         except Exception as e:
             QMessageBox.warning(self, "Save failed", str(e))
             return

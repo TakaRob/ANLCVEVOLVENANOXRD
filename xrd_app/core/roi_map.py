@@ -87,46 +87,19 @@ def auto_roi_from_click(image, x: int, y: int, *, search_radius: int = 25,
             min(h, fy0 + int(ys.max()) + margin + 1))
 
 
-def sample_roi(
-    source,
-    roi,
-    *,
-    grid_mapping: Optional[dict] = None,
-    metric: str = "integrated",
-    normalize_frames: bool = False,
-    progress: Optional[Callable[[int, int], None]] = None,
-) -> dict:
-    """Reduce one detector rectangle over every spatial bin in ``source``.
+def _reduction(values, n_frames, normalize_frames):
+    values = np.asarray(values, dtype=np.float64)
+    scale = float(n_frames) if normalize_frames else 1.0
+    return {
+        "intensity": float(np.nanmax(values)) / scale,
+        "integrated": float(np.nansum(values)) / scale,
+        "mean": float(np.nanmean(values)) / scale,
+        "n_pixels": int(values.size),
+        "n_frames": int(n_frames),
+    }
 
-    Detector coordinates are supplied as ``(x0, y0, x1, y1)`` and read from the
-    source as ``[y0:y1, x0:x1]``. Missing bins remain absent from ``profile`` so
-    they render as holes rather than false zero intensity. When
-    ``normalize_frames`` is true, each metric is divided by the number of raw
-    frames represented by that spatial bin.
-    """
-    if metric not in METRICS:
-        raise ValueError(f"Unknown metric {metric!r}; choose from {METRICS}")
-    x0, y0, x1, y1 = normalize_roi(roi)
-    mapping_bins = (grid_mapping or {}).get("bins") or {}
-    keys = list(source.keys())
-    profile = {}
 
-    for i, key in enumerate(keys):
-        patch = source.region(key, y0, y1, x0, x1)
-        if patch is not None and patch.size:
-            values = np.asarray(patch, dtype=np.float64)
-            n_frames = len(mapping_bins.get(key) or []) or 1
-            scale = float(n_frames) if normalize_frames else 1.0
-            profile[key] = {
-                "intensity": float(np.nanmax(values)) / scale,
-                "integrated": float(np.nansum(values)) / scale,
-                "mean": float(np.nanmean(values)) / scale,
-                "n_pixels": int(values.size),
-                "n_frames": int(n_frames),
-            }
-        if progress is not None:
-            progress(i + 1, len(keys))
-
+def _result(roi, profile, grid_mapping, metric, normalize_frames, **extra):
     parsed = [(key, _parse_key(key)) for key in profile]
     parsed = [(key, rc) for key, rc in parsed if rc is not None]
     n_rows = int((grid_mapping or {}).get("n_bin_rows") or
@@ -136,7 +109,7 @@ def sample_roi(
                  (grid_mapping or {}).get("n_cols") or
                  (max((rc[1] for _, rc in parsed), default=-1) + 1))
     center_bin = max(profile, key=lambda key: profile[key][metric]) if profile else None
-
+    x0, y0, x1, y1 = roi
     return {
         "roi": {"x0": x0, "y0": y0, "x1": x1, "y1": y1},
         "metric": metric,
@@ -145,7 +118,150 @@ def sample_roi(
         "n_bin_cols": n_cols,
         "center_bin": center_bin,
         "profile": profile,
+        **extra,
     }
+
+
+def _roi_groups(rois):
+    """Group nearby ROIs without making sparse unions much larger than their data."""
+    groups = []
+    for roi_index, roi in enumerate(rois):
+        best = None
+        roi_area = (roi[2] - roi[0]) * (roi[3] - roi[1])
+        for group in groups:
+            x0 = min(group["bounds"][0], roi[0]); y0 = min(group["bounds"][1], roi[1])
+            x1 = max(group["bounds"][2], roi[2]); y1 = max(group["bounds"][3], roi[3])
+            union_area = (x1 - x0) * (y1 - y0)
+            if union_area <= 4 * (group["area"] + roi_area):
+                best = (group, (x0, y0, x1, y1))
+                break
+        if best is None:
+            groups.append({"bounds": roi, "area": roi_area,
+                           "members": [(roi_index, roi)]})
+        else:
+            group, bounds = best
+            group["bounds"] = bounds
+            group["area"] += roi_area
+            group["members"].append((roi_index, roi))
+    return groups
+
+
+def _sample_keys(source, keys, rois, mapping_bins, normalize_frames, profiles,
+                 progress=None, progress_offset=0, progress_total=None):
+    groups = _roi_groups(rois)
+    total = progress_total or len(keys)
+    for index, key in enumerate(keys):
+        for group in groups:
+            ux0, uy0, ux1, uy1 = group["bounds"]
+            union = source.region(key, uy0, uy1, ux0, ux1)
+            if union is None or not union.size:
+                continue
+            for roi_index, (x0, y0, x1, y1) in group["members"]:
+                patch = union[y0 - uy0:y1 - uy0, x0 - ux0:x1 - ux0]
+                if patch.size:
+                    n_frames = len(mapping_bins.get(key) or []) or 1
+                    profiles[roi_index][key] = _reduction(
+                        patch, n_frames, normalize_frames)
+        if progress is not None:
+            progress(progress_offset + index + 1, total)
+
+
+def sample_rois(
+    source,
+    rois,
+    *,
+    grid_mapping: Optional[dict] = None,
+    metric: str = "integrated",
+    normalize_frames: bool = False,
+    fast: bool = False,
+    stride: int = 3,
+    progress: Optional[Callable[[int, int], None]] = None,
+    log: Callable[[str], None] = print,
+) -> list[dict]:
+    """Reduce multiple detector ROIs in one spatial-bin pass.
+
+    Each bin's union detector bounding box is read once and all ROIs are sliced
+    from that in-memory patch. ``fast`` is an approximate preview: sample a
+    guarded spatial stride, identify bright coarse cells, then densely reread
+    their neighborhoods. Unsampled cells receive the coarse median floor and are
+    marked ``coarse_fill``. Exact analysis remains the default.
+    """
+    if metric not in METRICS:
+        raise ValueError(f"Unknown metric {metric!r}; choose from {METRICS}")
+    normalized = [normalize_roi(roi) for roi in rois]
+    if not normalized:
+        return []
+    keys = list(source.keys())
+    mapping_bins = (grid_mapping or {}).get("bins") or {}
+    profiles = [{} for _ in normalized]
+    stride = max(2, int(stride))
+    parsed = {key: _parse_key(key) for key in keys}
+    regular = [key for key in keys if parsed[key] is not None]
+
+    if not fast or stride <= 1 or len(regular) < stride * stride * 2:
+        if fast:
+            log("[roi-map] fast preview guard: grid too small/irregular; using exact sweep")
+        _sample_keys(source, keys, normalized, mapping_bins, normalize_frames,
+                     profiles, progress=progress)
+        return [_result(roi, profile, grid_mapping, metric, normalize_frames,
+                        approximate=False) for roi, profile in zip(normalized, profiles)]
+
+    coarse = [key for key in regular
+              if parsed[key][0] % stride == 0 and parsed[key][1] % stride == 0]
+    if not coarse:
+        log("[roi-map] fast preview guard: no stride samples; using exact sweep")
+        _sample_keys(source, keys, normalized, mapping_bins, normalize_frames,
+                     profiles, progress=progress)
+        return [_result(roi, profile, grid_mapping, metric, normalize_frames,
+                        approximate=False) for roi, profile in zip(normalized, profiles)]
+
+    log(f"[roi-map] FAST PREVIEW: stride={stride}, coarse {len(coarse)}/{len(keys)} bins; "
+        "small features between sampled cells may be missed")
+    _sample_keys(source, coarse, normalized, mapping_bins, normalize_frames, profiles)
+    refine = set()
+    for profile in profiles:
+        values = np.asarray([entry[metric] for entry in profile.values()], dtype=float)
+        if not values.size:
+            continue
+        median = float(np.nanmedian(values))
+        mad = float(np.nanmedian(np.abs(values - median))) * 1.4826
+        threshold = max(median + 3.0 * mad, median + 0.15 * (float(np.nanmax(values)) - median))
+        seeds = [key for key, entry in profile.items() if entry[metric] >= threshold]
+        if not seeds and profile:
+            seeds = [max(profile, key=lambda key: profile[key][metric])]
+        for seed in seeds:
+            row, col = parsed[seed]
+            margin = stride + 1
+            for key, rc in parsed.items():
+                if rc is not None and abs(rc[0] - row) <= margin and abs(rc[1] - col) <= margin:
+                    refine.add(key)
+    refine.difference_update(coarse)
+    total_reads = len(coarse) + len(refine)
+    log(f"[roi-map] FAST PREVIEW: densely refining {len(refine)} bins around coarse signal")
+    if progress is not None:
+        progress(len(coarse), max(total_reads, 1))
+    _sample_keys(source, sorted(refine, key=lambda key: parsed[key]), normalized,
+                 mapping_bins, normalize_frames, profiles, progress=progress,
+                 progress_offset=len(coarse), progress_total=max(total_reads, 1))
+
+    for profile in profiles:
+        measured = [entry[metric] for entry in profile.values()]
+        floor = float(np.nanmedian(measured)) if measured else 0.0
+        for key in keys:
+            if key not in profile:
+                n_frames = len(mapping_bins.get(key) or []) or 1
+                profile[key] = {"intensity": floor, "integrated": floor,
+                                "mean": floor, "n_pixels": 0,
+                                "n_frames": int(n_frames), "coarse_fill": True}
+    return [_result(roi, profile, grid_mapping, metric, normalize_frames,
+                    approximate=True, stride=stride,
+                    sampled_bins=total_reads, total_bins=len(keys))
+            for roi, profile in zip(normalized, profiles)]
+
+
+def sample_roi(source, roi, **kwargs) -> dict:
+    """Backward-compatible one-ROI wrapper over :func:`sample_rois`."""
+    return sample_rois(source, [roi], **kwargs)[0]
 
 
 def to_shape_feature(result: dict, reflection: str = "manual ROI", *,

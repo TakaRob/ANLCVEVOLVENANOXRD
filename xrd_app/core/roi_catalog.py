@@ -65,10 +65,20 @@ def save_previews(path, preview_features, *, scan, bin_size, name) -> dict:
 
 
 def remove_feature(path, roi) -> dict:
-    """Remove one feature by its exact detector ROI and renumber the remainder."""
+    """Remove exactly one feature matching ``roi`` and renumber the remainder.
+
+    Raises ``KeyError`` instead of silently succeeding when the selected feature
+    is not present, so the GUI never removes its row while leaving the saved JSON
+    unchanged.
+    """
     data = load(path)
-    features = [feature for feature in data.get("features", [])
-                if feature.get("manual_roi") != roi]
+    features = list(data.get("features") or [])
+    for index, feature in enumerate(features):
+        if feature.get("manual_roi") == roi:
+            features.pop(index)
+            break
+    else:
+        raise KeyError(f"Saved ROI feature not found in {Path(path).name}: {roi}")
     for index, feature in enumerate(features, 1):
         feature["feature_id"] = index
     data["features"] = features

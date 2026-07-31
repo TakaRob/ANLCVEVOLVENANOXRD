@@ -1,0 +1,102 @@
+import json
+import tomllib
+from pathlib import Path
+
+import pytest
+
+from xrd_app.config import DataManager, format_detector_label
+from xrd_app.core import io, save_algorithm
+from xrd_app.core.processing import REQUIRED_DETECTOR_API
+
+
+_VALID_DETECTOR = "\n".join(f"def {name}(*args, **kwargs): pass" for name in REQUIRED_DETECTOR_API)
+
+
+def _write_project_detector(root, name, *, f1, f2):
+    library = root / "Algorithms" / "PeakAlgorithms"
+    library.mkdir(parents=True, exist_ok=True)
+    (library / f"{name}.py").write_text(_VALID_DETECTOR)
+    catalog = library / "catalog.json"
+    data = json.loads(catalog.read_text()) if catalog.exists() else {"detectors": []}
+    data["detectors"].append({
+        "name": name, "file": f"{name}.py", "role": "detector",
+        "bin_size": None, "holdout_f1": f1, "holdout_f2": f2,
+    })
+    catalog.write_text(json.dumps(data))
+
+
+def test_catalog_offers_only_production_detector_contract(tmp_path):
+    dm = DataManager(tmp_path)
+
+    detectors = dm.list_detectors()
+
+    assert detectors
+    assert "5x5_tophat_dual_snr_detector" not in {d["name"] for d in detectors}
+    for entry in detectors:
+        module = io.load_module(entry["_path"])
+        assert all(callable(getattr(module, name, None)) for name in REQUIRED_DETECTOR_API)
+
+
+def test_best_detector_and_label_are_f2_first(tmp_path):
+    _write_project_detector(tmp_path, "f1_winner", f1=0.99, f2=0.40)
+    _write_project_detector(tmp_path, "f2_winner", f1=0.70, f2=0.80)
+    dm = DataManager(tmp_path)
+
+    assert dm.best_detector(3).stem == "f2_winner"
+    assert format_detector_label({
+        "name": "ranked", "holdout_f1": 0.99, "holdout_f2": 0.80,
+    }) == "ranked (F2 0.80)"
+
+
+def test_save_algorithm_uses_project_storage_and_is_discoverable(tmp_path):
+    out = save_algorithm.save_algorithm(
+        "5x5_tophat_band_adaptive_snr", sensitivity=5.0, bin_size=3,
+        name="user_detector", project_root=tmp_path,
+    )
+
+    assert out == tmp_path / "Algorithms" / "PeakAlgorithms" / "user_detector.py"
+    dm = DataManager(tmp_path)
+    assert dm.resolve_detector_name("user_detector") == out
+    assert (out.parent / "catalog.json").is_file()
+
+
+def test_save_algorithm_rejects_incompatible_base(tmp_path):
+    incompatible = tmp_path / "research.py"
+    incompatible.write_text("def detect_peaks(): pass\n")
+
+    with pytest.raises(TypeError, match="missing:"):
+        save_algorithm.save_algorithm(
+            str(incompatible), sensitivity=5.0, bin_size=3,
+            project_root=tmp_path,
+        )
+
+
+def test_dynamic_import_identity_tracks_path_and_content(tmp_path):
+    first = tmp_path / "one" / "detector.py"
+    second = tmp_path / "two" / "detector.py"
+    first.parent.mkdir()
+    second.parent.mkdir()
+    first.write_text("VALUE = 1\n")
+    second.write_text("VALUE = 2\n")
+
+    mod1 = io.load_module(first)
+    mod2 = io.load_module(second)
+    first.write_text("VALUE = 3\n")
+    mod3 = io.load_module(first)
+
+    assert len({mod1.__name__, mod2.__name__, mod3.__name__}) == 3
+    assert (mod1.VALUE, mod2.VALUE, mod3.VALUE) == (1, 2, 3)
+
+
+def test_packaging_excludes_development_trees_and_keeps_runtime_assets():
+    config = tomllib.loads(Path("pyproject.toml").read_text())
+    discovery = config["tool"]["setuptools"]["packages"]["find"]
+    package_data = config["tool"]["setuptools"]["package-data"]["xrd_app"]
+
+    assert "xrd_app.tests*" in discovery["exclude"]
+    assert "xrd_app.notebooks*" in discovery["exclude"]
+    assert discovery["namespaces"] is False
+    assert "PeakAlgorithms/catalog.json" in package_data
+    assert "PeakAlgorithms/*.py" in package_data
+    assert not any("test" in pattern.lower() or "notebook" in pattern.lower()
+                   or "pyc" in pattern.lower() for pattern in package_data)

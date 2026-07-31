@@ -15,6 +15,12 @@ from typing import List
 
 DEFAULT_WIDTH = 0.4  # ± degrees; the manual `width` drives the detection band
 
+# Label shared by every tile of a whole-detector reflection set. A set whose
+# entries all carry this one label OR-merges (in build_tth_band_masks) into a
+# single band that spans the detector — the "no known reflections" workflow,
+# expressed as an ordinary reflection set with no special-case code anywhere.
+WHOLE_FRAME_LABEL = "(no reflections)"
+
 # Perovskite default reflection set used to seed a new project's reflections.json
 # (and the bundled assets/reflections.py fallback). The first 8 are the labeled
 # Bragg peaks / phase markers; the last 3 had no label historically, so they are
@@ -37,6 +43,49 @@ DEFAULT_REFLECTIONS = [
 def default_reflections() -> List[dict]:
     """A fresh copy of the default perovskite reflection set."""
     return [dict(r) for r in DEFAULT_REFLECTIONS]
+
+
+def whole_frame_reflections(
+    tth_map=None,
+    *,
+    label: str = WHOLE_FRAME_LABEL,
+    spacing: float = 0.3,
+    margin: float = 1.0,
+    tth_min: float = 0.0,
+    tth_max: float = 40.0,
+) -> List[dict]:
+    """Tile the 2θ range with entries that all share ``label``.
+
+    Every entry uses the same ``label`` so ``build_tth_band_masks`` OR-merges them
+    into one band covering the whole detector — an ordinary reflection set that
+    lets the band-restricted detector search everything (for datasets with no
+    known Bragg reflections). ``spacing`` 0.3° < the detector tolerance (0.4°) so
+    the merged band is contiguous with no gaps.
+
+    When a ``tth_map`` is given the range is clamped to its observed span (padded
+    by ``margin``) to keep the tile count small; otherwise the fixed ``tth_min``…
+    ``tth_max`` default is used (tiles off the detector just contribute empty
+    masks, so it stays correct across recalibration).
+    """
+    lo, hi = float(tth_min), float(tth_max)
+    if tth_map is not None:
+        import numpy as np
+
+        finite = np.asarray(tth_map, dtype=float)
+        finite = finite[np.isfinite(finite)]
+        if finite.size:
+            lo = max(0.0, float(finite.min()) - margin)
+            hi = float(finite.max()) + margin
+    step = float(spacing)
+    if step <= 0:
+        raise ValueError("spacing must be > 0")
+    reflections = []
+    deg = lo
+    # inclusive of hi (fp-safe) so the top of the range is covered
+    while deg <= hi + step / 2:
+        reflections.append({"name": label, "two_theta": round(deg, 5), "width": DEFAULT_WIDTH})
+        deg += step
+    return reflections
 
 
 def read_json(path) -> List[dict]:

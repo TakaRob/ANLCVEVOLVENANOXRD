@@ -21,7 +21,8 @@ import json
 from pathlib import Path
 from typing import Optional
 
-from .config import CONFIG_FILENAME, ProjectConfig, default_config
+from .config import (CONFIG_FILENAME, DataManager, ProjectConfig, default_config,
+                     safe_component)
 
 SETTINGS_DIR = Path.home() / ".xrd-app"
 SETTINGS_PATH = SETTINGS_DIR / "settings.json"
@@ -89,7 +90,15 @@ def list_projects(workspace: Optional[Path] = None) -> list[str]:
 
 def project_root(name: str, workspace: Optional[Path] = None) -> Path:
     ws = workspace or get_workspace()
-    return Path(ws) / name
+    if not ws:
+        raise ValueError("No workspace set - choose an XRD-APP Directory first.")
+    ws = Path(ws).resolve()
+    root = (ws / safe_component(name, label="project name")).resolve()
+    try:
+        root.relative_to(ws)
+    except ValueError:
+        raise ValueError("Invalid project name: path escapes workspace") from None
+    return root
 
 
 def create_project(name: str, workspace: Optional[Path] = None,
@@ -100,8 +109,12 @@ def create_project(name: str, workspace: Optional[Path] = None,
     """
     ws = workspace or get_workspace()
     if not ws:
-        raise ValueError("No workspace set — choose an XRD-APP Directory first.")
-    root = Path(ws) / name
+        raise ValueError("No workspace set - choose an XRD-APP Directory first.")
+    name = safe_component(name, label="project name")
+    root = project_root(name, ws)
+    config_path = root / CONFIG_FILENAME
+    if config_path.exists():
+        raise FileExistsError(f"Project already exists; refusing to overwrite {config_path}")
     root.mkdir(parents=True, exist_ok=True)
     cfg = ProjectConfig(root, data=default_config(name, root, scan_number))
     cfg.create_tree()
@@ -115,7 +128,7 @@ def create_project(name: str, workspace: Optional[Path] = None,
     # project creation.
     try:
         from .core import reflections as refl_io
-        mdir = cfg.root / cfg.get("paths", "metadata_dir", default="Metadata")
+        mdir = DataManager(config=cfg).metadata_dir
         refl_io.save(refl_io.default_reflections(),
                      mdir / "reflections.json", mdir / "reflections.py")
     except Exception:

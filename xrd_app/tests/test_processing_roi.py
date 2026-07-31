@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import numpy as np
 
+from xrd_app.core import processing
 from xrd_app.core.processing import detect_peaks_with_intensity
 
 
@@ -22,6 +23,13 @@ class _Detector:
         ys, xs = np.nonzero(mask)
         return [{"x": int(xs[0]), "y": int(ys[0]), "snr": 10.0,
                  "label": label}] if len(xs) else []
+
+
+def test_default_worker_count_is_capped(monkeypatch):
+    monkeypatch.setattr(processing.os, "cpu_count", lambda: 64)
+    assert processing.default_worker_count() == 4
+    monkeypatch.setattr(processing.os, "cpu_count", lambda: 2)
+    assert processing.default_worker_count() == 1
 
 
 def test_detector_roi_is_intersected_with_reflection_band():

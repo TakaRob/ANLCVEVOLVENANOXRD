@@ -17,6 +17,7 @@ from PyQt5.QtWidgets import (
 from .. import workspace
 from ..config import DataManager
 from ..core import io, roi_map
+from .lifecycle import stop_thread
 from .roi_shape import ROIShapeWindow
 from .viewer import DetectorView
 
@@ -44,9 +45,13 @@ class _RawSumWorker(QThread):
             image = None
             total = len(files)
             for i, path in enumerate(files):
+                if self.isInterruptionRequested():
+                    return
                 with h5py.File(path, "r") as handle:
                     dataset = handle[io.H5_DATASET]
                     for frame in dataset:
+                        if self.isInterruptionRequested():
+                            return
                         values = np.asarray(frame, dtype=np.float64)
                         image = values if image is None else image + values
                 self.progress.emit(i + 1, total)
@@ -211,9 +216,16 @@ class RawScanWindow(QMainWindow):
         self.status.setText("Summing raw detector frames...")
         self.worker = _RawSumWorker(self.scan_folder)
         self.worker.progress.connect(lambda i, n: self.progress.setValue(int(100 * i / n) if n else 0))
-        self.worker.failed.connect(self._sum_failed)
-        self.worker.complete.connect(self._sum_complete)
-        self.worker.start()
+        worker = self.worker
+        worker.failed.connect(self._sum_failed)
+        worker.complete.connect(self._sum_complete)
+        worker.finished.connect(lambda worker=worker: self._worker_finished(worker))
+        worker.start()
+
+    def _worker_finished(self, worker):
+        if self.worker is worker:
+            self.worker = None
+        worker.deleteLater()
 
     def _sum_failed(self, message):
         self.compute.setEnabled(True)
@@ -268,6 +280,11 @@ class RawScanWindow(QMainWindow):
         self._next_window = window
         window.show()
         self.close()
+
+    def closeEvent(self, event):  # noqa: N802 (Qt signature)
+        stop_thread(self.worker)
+        self.worker = None
+        super().closeEvent(event)
 
 
 def launch(source=None, bin_size=3):

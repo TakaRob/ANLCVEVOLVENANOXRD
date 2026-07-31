@@ -1,8 +1,8 @@
 """xrd-app command-line interface.
 
 The CLI is the engine: every "big button" in the GUI shells out to one of these
-commands, and everything is usable headless. Commands are added phase by phase
-(see ``PackageDraft2/IMPLEMENTATION.md``).
+commands, and everything is usable headless. See ``README.md`` and
+``xrd_app/PATHWAYS.md`` for the supported workflows.
 """
 
 import os
@@ -12,13 +12,18 @@ from pathlib import Path
 import click
 
 from . import __version__
-from .config import ProjectConfig, DataManager, default_config
+from .config import ProjectConfig, DataManager, default_config, safe_component
 
 
-@click.group()
+@click.group(context_settings={"show_default": True})
 @click.version_option(__version__, prog_name="xrd-app")
 def main():
-    """XRD App — peak/shape finding, labeling, and CVEvolve over one workflow."""
+    """XRD App: reproducible nano-XRD analysis from setup through studies.
+
+    Run ``xrd-app COMMAND --help`` for command-specific options. The usual
+    single-scan workflow is ``init``, ``scan-detect``, ``link``, ``make-bins``,
+    then ``run-pipeline``. See README.md for categorized workflows.
+    """
     pass
 
 
@@ -26,11 +31,22 @@ def main():
 # init
 # ─────────────────────────────────────────────────────────────────────
 @main.command()
-@click.option('--name', 'project_name', prompt='Project Name', help='Name of the project')
-@click.option('--scan-number', type=int, default=None, help='Scan number (e.g. 203 → Scan_0203)')
-@click.option('--root', default='.', help='Root directory for the project')
+@click.option('--name', 'project_name', required=True, help='Name of the project')
+@click.option('--scan-number', type=click.IntRange(min=0), default=None,
+              help='Scan number (e.g. 203 -> Scan_0203)')
+@click.option('--root', type=click.Path(path_type=Path), default=Path('.'),
+              help='Root directory for the project')
 def init(project_name, scan_number, root):
-    """Initialize a new XRD project (creates the standard directory tree)."""
+    """Initialize a new XRD project and its standard directory tree.
+
+    ROOT may be an existing empty directory, but this command never overwrites
+    an existing config.yaml. This makes it safe to use in scripts.
+    """
+    root = root.resolve()
+    config_path = root / "config.yaml"
+    if config_path.exists():
+        raise click.ClickException(
+            f"Project already exists at {root}; refusing to overwrite {config_path}.")
     cfg = ProjectConfig(root, data=default_config(project_name, root, scan_number))
     cfg.create_tree()
     cfg.save()
@@ -38,7 +54,7 @@ def init(project_name, scan_number, root):
     # Seed an editable default reflection set so the project resolves reflections
     # from its own Metadata/ (not the hidden bundled fallback) out of the box.
     from .core import reflections as refl_io
-    mdir = cfg.root / cfg.get('paths', 'metadata_dir', default='Metadata')
+    mdir = DataManager(config=cfg).metadata_dir
     refl_io.save(refl_io.default_reflections(),
                  mdir / "reflections.json", mdir / "reflections.py")
 
@@ -50,6 +66,39 @@ def init(project_name, scan_number, root):
     click.echo(f"  Config: {cfg.config_path}")
     click.echo("  Next: 'xrd-app scan-detect --scans-dir <dir>' to register your scans,")
     click.echo("        then 'xrd-app link --tth <tiff> --reflections <json>'.")
+
+
+@main.command(name='whole-frame-reflections')
+@click.option('--scan', default=None, help='Scan number/name (defaults to config scan)')
+@click.option('--project', is_flag=True, default=False,
+              help='Write the project-wide default (Metadata/) instead of per-scan.')
+@click.option('--spacing', type=float, default=0.3, show_default=True,
+              help='2θ tile spacing in degrees (< the 0.4° detection tolerance).')
+@click.option('--use-tth/--no-use-tth', 'use_tth', default=False,
+              help='Clamp the tiled 2θ range to the resolved tth map span.')
+@click.option('--root', default='.', help='Project root directory')
+def whole_frame_reflections(scan, project, spacing, use_tth, root):
+    """Write a whole-detector "(no reflections)" set as the resolved default.
+
+    Produces an ordinary ``reflections.{json,py}`` whose entries all share one
+    label, so ``build_tth_band_masks`` merges them into a single detector-spanning
+    band — peaks/shape/territory then search the whole frame. For datasets with no
+    known Bragg reflections. Consider ROI → Shape for that workflow too.
+    """
+    from .core import reflections as refl_io
+    dm = DataManager(root, scan=scan)
+    tth_map = None
+    if use_tth:
+        from .core import io
+        tth_path = dm.tth_map()
+        if Path(tth_path).exists():
+            tth_map = io.load_tth_map(tth_path)
+    refls = refl_io.whole_frame_reflections(tth_map, spacing=spacing)
+    mdir = dm.metadata_dir if project else dm.metadata_scan_dir(scan)
+    out = refl_io.save(refls, mdir / "reflections.json", mdir / "reflections.py")
+    scope = "project default" if project else f"scan {dm.scan_name}"
+    click.echo(f"[whole-frame-reflections] wrote {len(refls)} tiles ({scope}) → {out}")
+    click.echo(f"  label: {refl_io.WHOLE_FRAME_LABEL} — detector will search the whole frame")
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -88,11 +137,9 @@ def link(tth, reflections, detector, raw_root, position_root, position_csv,
     """
     cfg = ProjectConfig.load(root)
     if not cfg.exists():
-        click.echo("Error: no config.yaml found. Run 'xrd-app init' first.")
-        raise SystemExit(1)
+        raise click.ClickException("No config.yaml found. Run 'xrd-app init' first.")
     cfg.data.setdefault('data_sources', {})
-
-    metadata_dir = cfg.root / cfg.get('paths', 'metadata_dir', default='Metadata')
+    metadata_dir = DataManager(config=cfg).metadata_dir
 
     for opt, key in (('raw_root', raw_root), ('position_root', position_root)):
         if key:
@@ -148,7 +195,7 @@ def link(tth, reflections, detector, raw_root, position_root, position_csv,
             cfg.data['data_sources'][config_key] = str(source)
             click.echo(f"  {config_key}: {source}")
             continue
-        dest_dir = cfg.root / sub_dir
+        dest_dir = metadata_dir if sub_dir == 'Metadata' else cfg.root / sub_dir
         dest_dir.mkdir(parents=True, exist_ok=True)
         stored = _place(source, dest_dir / source.name, copy)
         cfg.data['data_sources'][config_key] = str(stored)
@@ -218,7 +265,10 @@ def detectors(bin_size, kind, root):
     click.echo(f"Detectors ({lib_dir}):\n")
     click.echo(f"  {'bin':>4}  {'f1':>7}  {'f2':>7}  {'src':>8}  name")
     click.echo(f"  {'-'*4}  {'-'*7}  {'-'*7}  {'-'*8}  {'-'*30}")
-    for d in sorted(entries, key=lambda d: (d.get('bin_size') or '', -(d.get('holdout_f1') or -1))):
+    for d in sorted(entries, key=lambda d: (
+            d.get('bin_size') or '',
+            -(d.get('holdout_f2') if d.get('holdout_f2') is not None else -1),
+            -(d.get('holdout_f1') if d.get('holdout_f1') is not None else -1))):
         f1 = f"{d['holdout_f1']:.4f}" if d.get('holdout_f1') is not None else "—"
         f2 = f"{d['holdout_f2']:.4f}" if d.get('holdout_f2') is not None else "—"
         bin_lbl = d.get('bin_size') or 'any'
@@ -242,7 +292,8 @@ def save_algorithm_cmd(base, sensitivity, bin_size, noise_reduction, name, kind,
     from .core import save_algorithm
     out = save_algorithm.save_algorithm(
         base, sensitivity=sensitivity, bin_size=bin_size,
-        noise_reduction=noise_reduction, name=name, kind=kind, source="manual")
+        noise_reduction=noise_reduction, name=name, kind=kind, source="manual",
+        project_root=root)
     click.echo(f"Saved algorithm -> {out}")
     click.echo(f"Run it with: xrd-app peaks --bin-size {bin_size} --algorithm {out.stem}")
 
@@ -253,8 +304,9 @@ def save_algorithm_cmd(base, sensitivity, bin_size, noise_reduction, name, kind,
 @main.command(name='convert-poni')
 @click.option('--poni', required=True, help='Path to a pyFAI .poni calibration file')
 @click.option('--shape', default=None, help='ROWSxCOLS (default: config detector.shape, else from .poni)')
-@click.option('--output', default=None, help='Output tth.tiff (default: Metadata/tth.tiff)')
-@click.option('--scan', default=None, help='Scan number/name (for a per-scan tth)')
+@click.option('--output', default=None,
+              help='Output tth.tiff (default: Metadata[/<scan>]/tth.tiff)')
+@click.option('--scan', default=None, help='Scan number/name for a per-scan tth map')
 @click.option('--root', default='.', help='Project root directory')
 def convert_poni(poni, shape, output, scan, root):
     """Convert a pyFAI .poni calibration into a 2θ-per-pixel tth.tiff."""
@@ -271,13 +323,14 @@ def convert_poni(poni, shape, output, scan, root):
     elif cfg.get('detector', 'shape'):
         sh = tuple(cfg.get('detector', 'shape'))
 
-    out = Path(output) if output else (dm.metadata_dir / "tth.tiff")
+    out = Path(output) if output else (
+        dm.metadata_scan_dir(scan) / "tth.tiff" if scan else dm.metadata_dir / "tth.tiff")
     try:
         geometry.convert_poni_file(poni, out, sh)
     except ImportError as e:
-        click.echo(f"Error: {e}")
-        raise SystemExit(1)
-    cfg.data.setdefault('data_sources', {})['tth_map'] = str(out.resolve())
+        raise click.ClickException(str(e))
+    if not scan:
+        cfg.data.setdefault('data_sources', {})['tth_map'] = str(out.resolve())
     cfg.data.setdefault('data_sources', {})['poni'] = str(Path(poni).resolve())
     cfg.save()
     click.echo(f"Wrote tth map -> {out}  (shape={sh or 'from .poni'})")
@@ -556,19 +609,19 @@ def scan_detect(scans_dir, scan_file, scans, deep, root):
     """
     from .core import io
     if not scans_dir and not scan_file:
-        click.echo("Provide --scans-dir <dir> or --scan-file <hdf5>.")
-        raise SystemExit(1)
+        raise click.UsageError("Provide --scans-dir <dir> or --scan-file <hdf5>.")
+    if scans_dir and scan_file:
+        raise click.UsageError("Use only one of --scans-dir or --scan-file.")
 
     cfg = ProjectConfig.load(root)
     if not cfg.exists():
-        click.echo("Error: no config.yaml found. Run 'xrd-app init' first.")
-        raise SystemExit(1)
+        raise click.ClickException("No config.yaml found. Run 'xrd-app init' first.")
     dm = DataManager(root, cfg)
 
     target = scan_file or scans_dir
     if not Path(target).exists():
-        click.echo(f"Error: {target} does not exist.")
-        raise SystemExit(1)
+        raise click.BadParameter(f"path does not exist: {target}",
+                                 param_hint='--scan-file/--scans-dir')
 
     found = io.discover_scans(target, deep=deep)
     if scans:
@@ -589,32 +642,37 @@ def scan_detect(scans_dir, scan_file, scans, deep, root):
                 break
 
     registry = dm.scans_registry()
-    n_ok = 0
+    valid = []
     click.echo(f"{len(found)} scan(s) detected under {target}:\n")
     for s in found:
         problems = io.validate_scan(s, expected_shape=proj_shape)
         mark = "✓" if not problems else "⚠"
         if not problems:
-            n_ok += 1
+            valid.append(s)
         approx = "~" if s.get('frames_estimated') else ""
         click.echo(f"  [{mark}] {s['name']}  ({s['n_files']} files / "
                    f"{approx}{s['n_frames']} frames, shape={s['shape']})")
         for p in problems:
-            click.echo(f"         - {p}")
+            click.echo(f"         - {p}", err=True)
+    for s in valid:
         registry[s['name']] = {k: s[k] for k in
                                ('dir', 'frames_dir', 'n_files', 'n_frames', 'shape')}
 
     dm.write_scans_registry(registry)
     cfg.data.setdefault('detector', {})['shape'] = proj_shape
     cfg.data['scans'] = registry
-    # If the project has no configured scan and exactly one was found, adopt it.
-    if not cfg.get('scan', 'name') and len(found) == 1:
-        name = found[0]['name']
+    # If the project has no configured scan and exactly one valid scan was found,
+    # adopt it. Invalid scans are reported but never become processing inputs.
+    if not cfg.get('scan', 'name') and len(valid) == 1:
+        name = valid[0]['name']
         cfg.data['scan'] = {'number': DataManager.scan_number_of(name), 'name': name}
     cfg.save()
 
-    click.echo(f"\n{n_ok}/{len(found)} OK. Frame shape: {proj_shape}.")
+    click.echo(f"\n{len(valid)}/{len(found)} OK. Frame shape: {proj_shape}.")
     click.echo(f"Registry: {dm.scans_registry_path()}")
+    if len(valid) != len(found):
+        raise click.ClickException(
+            f"Rejected {len(found) - len(valid)} invalid scan(s); valid scans were registered.")
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -655,7 +713,7 @@ def grid(bin_size, scan, shape, xrd_dir, positions, rawgrid, deskew_method, vari
     CSV nor a SOCKETSERVER stream is available this command **hard-fails** rather
     than silently reconstructing the grid from the one-file-per-row layout (that
     silent fallback is what skewed rocking 203-214). The chosen ``deskew_method``
-    (default ``faithful``) and the positions provenance (``positions_csv`` /
+    (default ``auto``) and the positions provenance (``positions_csv`` /
     ``positions_real``) are recorded in the output JSON, and ``bin`` refuses any
     mapping whose ``positions_real`` is not true.
 
@@ -969,6 +1027,8 @@ def bin(bin_size, scan, grid_mapping, variant, output, compression, root):
 @click.option('--scan', default=None, help='Scan number/name (defaults to config scan)')
 @click.option('--algorithm', default=None, help='Detector path OR bundled name (see status)')
 @click.option('--snr', type=float, default=4.0, help='SNR threshold for detection')
+@click.option('--workers', type=click.IntRange(min=1), default=None,
+              help='Detector worker processes (default: up to 4)')
 @click.option('--name', 'out_name', default=None, help='Algorithm name for the output file (default: detector stem)')
 @click.option('--variant', default=None,
               help='Coordinate variant tag (e.g. "faithful") — reads the tagged bins '
@@ -977,7 +1037,7 @@ def bin(bin_size, scan, grid_mapping, variant, output, compression, root):
 @click.option('--tth-path', help='2θ TIFF map (defaults to resolved)')
 @click.option('--reflections', 'reflections_path', help='reflections.py (defaults to resolved)')
 @click.option('--root', default='.', help='Project root directory')
-def peaks(bin_size, scan, algorithm, snr, out_name, variant, h5_path, tth_path,
+def peaks(bin_size, scan, algorithm, snr, workers, out_name, variant, h5_path, tth_path,
           reflections_path, root):
     """Phase 1: run a detector over every bin → per-bin peaks (Labels/<scan>/)."""
     from .core import processing
@@ -993,7 +1053,7 @@ def peaks(bin_size, scan, algorithm, snr, out_name, variant, h5_path, tth_path,
     click.echo(f"[peaks] detector: {det}\n[peaks] bins: {h5}\n")
     result = processing.run_peaks(
         bins_h5=h5, tth_path=tth, detector_path=det, reflections_path=refl,
-        bin_size=bin_size, snr_threshold=snr,
+        bin_size=bin_size, snr_threshold=snr, n_workers=workers,
         progress=_make_progress("peaks"), log=click.echo)
     result["scan"] = dm.scan_name
     result["algorithm"] = algo
@@ -1049,18 +1109,21 @@ def shapes(bin_size, scan, algorithm, from_peaks, peak_algo, link_tolerance, var
     from .core import processing
     dm = DataManager(root, scan=scan)
 
-    # Gridless coordinate linking is the skew-free default at 1×1; binned sizes
-    # keep grid linking. An explicit --coordinate/--grid-link overrides.
+    # Gridless coordinate linking is the skew-free default at 1x1; binned sizes
+    # keep grid linking. An explicit --coordinate must never silently change the
+    # requested scientific method.
+    coordinate_explicit = coordinate is True
     if coordinate is None:
         coordinate = (bin_size == 1)
 
-    # Coordinate linking needs positions; degrade to grid linking if absent so
-    # position-less projects still run (with a clear note).
     pos = None
     if coordinate:
         pos = Path(positions) if positions else dm.position_csv(scan=scan)
         if not Path(pos).exists():
-            click.echo(f"Note: no position CSV ({pos}) — falling back to grid linking.")
+            if coordinate_explicit:
+                raise click.ClickException(
+                    f"Coordinate linking requires a position CSV; not found: {pos}")
+            click.echo(f"Warning: no position CSV ({pos}); using grid linking.", err=True)
             coordinate = False
     if coordinate and algorithm in (None, 'gaussian'):
         # Coordinate linking needs a neighbor-graph-capable linker. 'gaussian'
@@ -1071,8 +1134,7 @@ def shapes(bin_size, scan, algorithm, from_peaks, peak_algo, link_tolerance, var
     peaks_path = Path(from_peaks) if from_peaks else (
         dm.peaks_json(peak_algo, bin_size, scan, variant=variant) if peak_algo else None)
     if not peaks_path:
-        click.echo("Error: provide --from-peaks <json> or --peak-algo <name>.")
-        raise SystemExit(1)
+        raise click.UsageError("Provide --from-peaks <json> or --peak-algo <name>.")
     _require(peaks_path, "peaks JSON (run 'xrd-app peaks' first)")
     with open(peaks_path) as f:
         peaks_data = json.load(f)
@@ -1137,31 +1199,111 @@ def shapes(bin_size, scan, algorithm, from_peaks, peak_algo, link_tolerance, var
                f"{result['n_filtered']} filtered -> {out}")
 
 
+@main.command(name='roi')
+@click.option('--root', default=None,
+              help='Project root (default: last-opened project)')
+@click.option('--scan', default=None, help='Initial scan (defaults to config/last-used)')
+@click.option('--bin-size', type=int, default=3, help='Initial bin size')
+def roi(root, scan, bin_size):
+    """Open the ROI > Shape window on its own (Setup + ROI > Shape tabs).
+
+    Shortcut for ``python -m xrd_app.tabs.roi_shape``: a focused two-tab window
+    (Setup + ROI > Shape) with the same project/scan switching as the full app.
+    """
+    from .tabs._standalone import launch_tab
+    raise SystemExit(launch_tab("roi_shape", project=root, scan=scan,
+                                bin_size=bin_size))
+
+
+@main.command(name='roi-cvevolve-init')
+@click.option('--dest', default=None, help='Session directory (default: CVEvolve/roi_summed_detection)')
+@click.option('--holdout-pct', type=float, default=20.0, help='Percentage of labeled scans held out')
+@click.option('--seed', type=int, default=42, help='Seeded scan split')
+@click.option('--root', default='.', help='Project root directory')
+def roi_cvevolve_init(dest, holdout_pct, seed, root):
+    """Create a summed-image ROI detector CVEvolve session from manual catalogs."""
+    from .core import roi_cvevolve
+    dm = DataManager(root)
+    try:
+        result = roi_cvevolve.create_session(
+            dm, dest=dest, holdout_pct=holdout_pct, seed=seed)
+    except ValueError as exc:
+        raise click.ClickException(str(exc))
+    click.echo(f"Created ROI CVEvolve session at {result['dest']} from "
+               f"{result['examples']} labeled scans")
+    click.echo(f"Dev: {result['splits']['test_data']}")
+    click.echo(f"Holdout: {result['splits']['holdout_data']}")
+
+
+# ─────────────────────────────────────────────────────────────────────
+# roi-detect — propose ROIs on a fully summed detector image
+# ─────────────────────────────────────────────────────────────────────
+@main.command(name='roi-detect')
+@click.option('--scan', default=None, help='Scan number/name')
+@click.option('--algorithm', default=None, help='ROI detector script (default: baseline)')
+@click.option('--sensitivity', type=float, default=None,
+              help='Detection threshold override (default: algorithm setting)')
+@click.option('--max-rois', type=int, default=None,
+              help='Maximum proposals override (default: algorithm setting)')
+@click.option('--output', required=True, help='Output candidate JSON')
+@click.option('--root', default='.', help='Project root directory')
+def roi_detect(scan, algorithm, sensitivity, max_rois, output, root):
+    """Detect candidate feature ROIs on the scan's fully summed image."""
+    from .core import reflection_sum, roi_detection
+
+    dm = DataManager(root, scan=scan)
+    sum_path = reflection_sum.sum_path(dm, scan)
+    _require(sum_path, "reflection_sum.npz (compute the full scan sum first)")
+    import numpy as np
+    with np.load(sum_path) as saved:
+        image = saved["image"].astype(np.float64)
+    algorithm_path = Path(algorithm) if algorithm else roi_detection.default_algorithm()
+    _require(algorithm_path, "ROI detector")
+    overrides = {}
+    if sensitivity is not None:
+        overrides["sensitivity"] = sensitivity
+    if max_rois is not None:
+        overrides["max_rois"] = max_rois
+    candidates = roi_detection.detect(image, algorithm_path, **overrides)
+    result = {"kind": "roi_candidates", "scan": dm.scan_name,
+              "algorithm": algorithm_path.stem, "n_candidates": len(candidates),
+              "candidates": candidates}
+    _write_json(output, result)
+    click.echo(f"Detected {len(candidates)} candidate ROIs -> {output}")
+
+
 # ─────────────────────────────────────────────────────────────────────
 # roi-shapes — detector ROI intensity preview for the manual ROI catalog
 # ─────────────────────────────────────────────────────────────────────
 @main.command(name='roi-shapes')
 @click.option('--bin-size', type=int, default=3, help='Spatial bin size to process')
 @click.option('--scan', default=None, help='Scan number/name (defaults to config scan)')
-@click.option('--roi', required=True, help='Detector rectangle X0,Y0,X1,Y1 (half-open pixels)')
+@click.option('--roi', 'rois', multiple=True, required=True,
+              help='Detector rectangle X0,Y0,X1,Y1; repeat to batch multiple ROIs')
 @click.option('--name', required=True, help='Manual ROI catalog name')
 @click.option('--preview-output', default=None,
-              help='Write one unsaved preview result here instead of updating a catalog')
+              help='Write one unsaved batch preview here instead of updating a catalog')
+@click.option('--fast', is_flag=True, help='Approximate coarse-to-fine preview (never use for save)')
+@click.option('--stride', type=click.IntRange(2, 10), default=3,
+              help='Spatial stride for --fast preview')
 @click.option('--root', default='.', help='Project root directory')
-def roi_shapes(bin_size, scan, roi, name, preview_output, root):
-    """Integrate one detector ROI over all spatial bins for ROI > Shape."""
-    import re
+def roi_shapes(bin_size, scan, rois, name, preview_output, fast, stride, root):
+    """Batch detector ROIs into spatial maps with one pass over scan bins."""
     from .core import io, processing, roi_map
 
+    detector_rois = []
+    for roi in rois:
+        try:
+            detector_roi = tuple(int(v.strip()) for v in roi.split(','))
+            if len(detector_roi) != 4:
+                raise ValueError
+            detector_rois.append(detector_roi)
+        except ValueError:
+            raise click.BadParameter('expected X0,Y0,X1,Y1', param_hint='--roi')
     try:
-        detector_roi = tuple(int(v.strip()) for v in roi.split(','))
-        if len(detector_roi) != 4:
-            raise ValueError
-    except ValueError:
-        raise click.BadParameter('expected X0,Y0,X1,Y1', param_hint='--roi')
-    tag = re.sub(r'[^A-Za-z0-9_.-]+', '_', name.strip()).strip('_.-')
-    if not tag:
-        raise click.BadParameter('must contain letters or numbers', param_hint='--name')
+        tag = safe_component(name, normalize=True, label="catalog name")
+    except ValueError as exc:
+        raise click.BadParameter(str(exc), param_hint='--name')
 
     dm = DataManager(root, scan=scan)
     h5 = dm.binned_h5(bin_size, scan=scan)
@@ -1179,66 +1321,71 @@ def roi_shapes(bin_size, scan, roi, name, preview_output, root):
 
     source = io.open_bin_source(dm, bin_size, scan)
     try:
-        sampled = roi_map.sample_roi(
-            source, detector_roi, grid_mapping=gm, metric="integrated",
-            progress=_make_progress("ROI intensity map"))
+        sampled = roi_map.sample_rois(
+            source, detector_rois, grid_mapping=gm, metric="integrated",
+            fast=fast, stride=stride,
+            progress=_make_progress("ROI intensity maps"), log=click.echo)
     finally:
         source.close()
     tth_map = io.load_tth_map(tth)
     beam_center = processing.estimate_beam_center(tth_map)
-    feature = roi_map.to_shape_feature(
-        sampled, "manual ROI", feature_id=1,
+    features = [roi_map.to_shape_feature(
+        result, "manual ROI", feature_id=index,
         tth_map=tth_map, beam_center=beam_center)
+        for index, result in enumerate(sampled, 1)]
     preview_result = {
         "kind": "manual_roi_preview",
         "scan": dm.scan_name,
         "bin_size": bin_size,
+        "approximate": bool(fast and any(r.get("approximate") for r in sampled)),
+        "stride": stride if fast else 1,
         "intensity_definition": "total detector counts inside ROI per spatial bin",
-        "features": [feature],
+        "features": features,
     }
     output = Path(preview_output) if preview_output else dm.roi_map_json(tag, bin_size, scan)
     if preview_output:
         _write_json(output, preview_result)
     else:
         from .core import roi_catalog
-        roi_catalog.save_previews(output, [feature], scan=dm.scan_name,
+        roi_catalog.save_previews(output, features, scan=dm.scan_name,
                                   bin_size=bin_size, name=tag)
-    click.echo(f"\nDone: manual ROI feature #{feature['feature_id']} sampled across "
-               f"{feature['n_bins']} spatial bins -> {output}")
+    click.echo(f"\nDone: {len(features)} ROI feature(s) sampled in one pass -> {output}")
 
 
 @main.command(name='roi-save')
-@click.option('--preview', 'previews', multiple=True, required=True,
-              help='Completed ROI preview JSON; repeat for every ready feature')
+@click.option('--roi', 'rois', multiple=True, required=True,
+              help='ROI X0,Y0,X1,Y1; repeat for every ready feature')
 @click.option('--name', required=True, help='Manual ROI catalog name')
 @click.option('--bin-size', type=int, default=3, help='Spatial bin size')
 @click.option('--scan', default=None, help='Scan number/name')
 @click.option('--root', default='.', help='Project root directory')
-def roi_save(previews, name, bin_size, scan, root):
-    """Save all completed previews to a dedicated ROI > Shape catalog."""
-    import json
-    import re
-    from .core import roi_catalog
-
-    tag = re.sub(r'[^A-Za-z0-9_.-]+', '_', name.strip()).strip('_.-')
-    if not tag:
-        raise click.BadParameter('must contain letters or numbers', param_hint='--name')
-    features = []
-    for preview in previews:
-        path = Path(preview)
-        _require(path, "ROI preview")
-        with open(path) as handle:
-            data = json.load(handle)
-        found = data.get("features", []) if isinstance(data, dict) else []
-        if len(found) != 1:
-            raise click.ClickException(
-                f"Expected one feature in ROI preview {path}; found {len(found)}")
-        features.append(found[0])
-    dm = DataManager(root, scan=scan)
-    output = dm.roi_map_json(tag, bin_size, scan)
-    result = roi_catalog.save_previews(
-        output, features, scan=dm.scan_name, bin_size=bin_size, name=tag)
-    click.echo(f"Saved {len(features)} ROI features ({result['n_features']} total) -> {output}")
+@click.pass_context
+def roi_save(ctx, rois, name, bin_size, scan, root):
+    """Recompute all ready ROIs exactly in one batch, then save the catalog."""
+    import tempfile
+    try:
+        tag = safe_component(name, normalize=True, label="catalog name")
+    except ValueError as exc:
+        raise click.BadParameter(str(exc), param_hint='--name')
+    preview = Path(tempfile.gettempdir()) / f"xrd_app_roi_exact_{os.getpid()}.json"
+    try:
+        ctx.invoke(roi_shapes, bin_size=bin_size, scan=scan, rois=rois, name=tag,
+                   preview_output=str(preview), fast=False, stride=3, root=root)
+        import json
+        from .core import roi_catalog
+        with open(preview) as handle:
+            features = json.load(handle).get("features", [])
+        dm = DataManager(root, scan=scan)
+        output = dm.roi_map_json(tag, bin_size, scan)
+        result = roi_catalog.save_previews(
+            output, features, scan=dm.scan_name, bin_size=bin_size, name=tag)
+        click.echo(f"Saved {len(features)} exact ROI features "
+                   f"({result['n_features']} total) -> {output}")
+    finally:
+        try:
+            preview.unlink()
+        except OSError:
+            pass
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -1396,8 +1543,7 @@ def reflection_sum_cmd(scan, all_scans, include_raw, max_bins, overwrite, root):
     dm = DataManager(root, scan=scan)
     scans = dm.discover_scans(usable_only=True) if all_scans else [scan]
     if not scans:
-        click.echo("No scans to process.")
-        return
+        raise click.ClickException("No scans to process.")
     done = skipped = failed = 0
     for name in scans:
         # A "bin sum" needs bins: in batch mode, skip scans with no built h5
@@ -1423,6 +1569,8 @@ def reflection_sum_cmd(scan, all_scans, include_raw, max_bins, overwrite, root):
             src = "raw" if res["is_raw"] else f"{res['bin_size']}x{res['bin_size']}"
             click.echo(f"  {res['scan']}: {res['shape']} from {src} → {res['path']}")
     click.echo(f"\nreflection-sum: {done} computed, {skipped} skipped, {failed} failed.")
+    if failed:
+        raise click.ClickException(f"{failed} scan(s) failed during reflection summation.")
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -1505,6 +1653,8 @@ def lineage(target, scan, root):
         p = Path(target)
         if not p.exists():
             p = ldir / target            # try as a name inside Labels/<scan>
+        if not p.exists():
+            raise click.ClickException(f"Result JSON not found: {p}")
         paths = [p]
     else:
         paths = (sorted(ldir.glob("*_peaks_*.json"))

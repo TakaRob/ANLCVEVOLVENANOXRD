@@ -152,6 +152,9 @@ class ProgramsTab(QWidget):
         lay.addWidget(shape_box)
 
         # ---- Combined (peak + shape in one pass) ------------------------
+        # Hidden: the peak → shape → territory chain is the supported path. The
+        # box is still built (kept off the layout) so _run_combined/combined_algo
+        # keep working if re-enabled later.
         comb_box = QGroupBox("Combined  (peak + shape in one per-frame pass · 1×1)")
         cb = QHBoxLayout(comb_box)
         self.combined_algo = self._make_algo_list(
@@ -162,7 +165,7 @@ class ProgramsTab(QWidget):
         run_combined.setMinimumHeight(40)
         run_combined.clicked.connect(self._run_combined)
         cb.addWidget(run_combined)
-        lay.addWidget(comb_box)
+        comb_box.setVisible(False)
 
         # ---- Territorial reference (skew-free source of truth) -----------
         # One button for the whole territory-grid → bin → peaks → shapes

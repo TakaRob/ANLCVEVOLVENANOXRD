@@ -1,0 +1,30 @@
+What actually costs time (per ROI you draw)
+
+1. A fresh QProcess (roi_shape.py:321) → cold import numpy/h5py, reopen source. Paid once per ROI.
+2. Serial loop over every spatial bin (roi_map.py:114), each doing source.region(...).
+3. For 1×1: each region re-reads/sums archive frames through FrameStore — the expensive backend, redone every run. (Coarser bins hit _H5Source, a single cheap slice per bin — much faster already.)
+
+The reduction math (nanmax/nansum/nanmean) is negligible. It's all I/O + decompress.
+
+Levers, ranked
+
+1. Batch all pending ROIs into one pass (biggest win, no accuracy change, fits the architecture).
+Every ROI you draw currently triggers its own full sweep over 200k bins. But all ROIs read the same bins. Read each bin's union bounding box once, slice every ROI out of that patch in memory. Draw 5 ROIs → 1 pass instead of 5. One roi-shapes call taking multiple --roi args keeps logic in the CLI (per xrd_app/CLAUDE.md). This is the cleanest large win.
+
+2. Coarse-to-fine spatial sampling (biggest multiplier, approximate).
+ROI>Shape has no expected reflection band, but a real feature is still a spatially contiguous patch of bins. Sweep on a stride (every 3rd bin → ~9× fewer reads), threshold to find the feature footprint, then densely re-read only that footprint + margin; fill the rest with the coarse floor. Risk: a feature smaller than the stride slips through — so guard it and log() what was coarsened (never silent). Best as an opt-in "Fast preview" checkbox, exact sweep on save.
+
+3. Parallelize the per-bin reads (2–4×, with a caveat).
+The loop is serial and reads release the GIL. But h5py File objects are not thread-safe — concurrent reads on one handle can crash. It has to be done right: one file handle per worker (or a process pool), not a naive ThreadPoolExecutor over the shared source. Real gain, but more care than it looks; I'd do this after #1.
+
+4. Kill the subprocess-per-ROI overhead.
+Combined with #1, a single batched call removes N cold-starts. On a 200k-bin scan the repeated imports + source reopen are non-trivial on the OneDrive filesystem.
+
+5. Understand the 1×1 archive tradeoff.
+The archive path (io.py:1584) is chosen for precision, but it's the slow backend and it re-sums every run. If for ROI>Shape you're willing to accept the plain 1×1 bins h5 (a sliceable, chunked, single-read-per-bin store), that alone is a large speedup for 1×1 — at the documented precision cost (collision sums / float). Worth an explicit "use fast bins for ROI" option rather than silently changing the default.
+
+My recommendation
+
+Do #1 (batch multi-ROI, exact) first — largest safe win, stays in the CLI engine. Then add #2 (coarse-to-fine) behind a "Fast preview" checkbox for the interactive case, with a stride guard + log. Leave #3 for after, done with per-worker handles.
+
+Want me to implement #1 + #2? I'd extend sample_roi to take a list of ROIs (union-bbox read) and add a stride/refine path, teach roi-shapes to accept multiple --roi and a --fast/--stride flag, and wire the GUI to submit all pending ROIs as one job with the checkbox. Default behavior stays byte-for-byte exact.

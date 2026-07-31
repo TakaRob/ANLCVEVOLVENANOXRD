@@ -89,6 +89,15 @@ def test_aggregate_collects_features_and_devicemap(tmp_path):
     assert dm0["reflection"] == "(001)"
 
 
+def test_aggregate_accepts_null_mean_snr():
+    feature = _feature(1, "(001)", 7.514, 30.0, {
+        "0_0": {"intensity": 1.0, "integrated": 2.0},
+    })
+    feature["mean_snr"] = None
+
+    assert agg._feature_row("Scan_0001", 1, feature)["mean_snr"] is None
+
+
 def test_aggregate_bin_size_filter(tmp_path):
     labels = _make_project(tmp_path)
     # All catalogs are 3x3; filtering to 5x5 yields nothing.

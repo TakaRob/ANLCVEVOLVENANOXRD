@@ -12,6 +12,7 @@ from __future__ import annotations
 from PyQt5.QtWidgets import QVBoxLayout, QWidget
 
 from ..gui import territory_map
+from ..gui.lifecycle import dispose_widget
 from ._embed import placeholder
 
 TAB_META = {
@@ -49,8 +50,7 @@ class TerritoryTab(QWidget):
 
     def _rebuild(self):
         if self._win is not None:
-            self._win.setParent(None)
-            self._win.deleteLater()
+            dispose_widget(self._win)
             self._win = None
         try:
             self._win = territory_map.build_window(

@@ -36,12 +36,20 @@ xrd-app = "xrd_app.cli:main"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["xrd_app*"]
+exclude = ["xrd_app.tests*", "xrd_app.notebooks*"]
+namespaces = false
 
 [tool.setuptools.package-data]
 "xrd_app" = [
     "assets/*",
     "PeakAlgorithms/catalog.json",
+    "PeakAlgorithms/*.py",
     "PeakAlgorithms/**/*.py",
-    "ShapeAlgorithms/**/*",
-    "CombinedAlgorithms/**/*",
+    "ROIAlgorithms/*.py",
+    "ShapeAlgorithms/catalog.json",
+    "ShapeAlgorithms/*.py",
+    "CombinedAlgorithms/catalog.json",
+    "CombinedAlgorithms/*.py",
+    "CombinedAlgorithms/**/*.py",
+    "NoiseReduction/*.py",
 ]

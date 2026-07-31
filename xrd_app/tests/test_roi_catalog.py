@@ -1,6 +1,8 @@
 """Dedicated ROI > Shape catalog persistence and discovery isolation."""
 from __future__ import annotations
 
+import pytest
+
 from xrd_app.core import catalogs, roi_catalog
 
 
@@ -42,3 +44,6 @@ def test_save_all_merges_by_roi_and_remove_updates_catalog(tmp_path):
     remaining = roi_catalog.remove_feature(path, _feature(10)["manual_roi"])
     assert remaining["n_features"] == 1
     assert remaining["features"][0]["feature_id"] == 1
+    assert remaining["features"][0]["manual_roi"] == _feature(30)["manual_roi"]
+    with pytest.raises(KeyError):
+        roi_catalog.remove_feature(path, _feature(10)["manual_roi"])

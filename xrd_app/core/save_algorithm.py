@@ -148,7 +148,7 @@ def save_algorithm(base: str, *, sensitivity, bin_size: int,
                    log_scale: bool = False, clip_lo_pct=None, clip_hi_pct=None,
                    name: Optional[str] = None, kind: str = "peak",
                    source: str = "manual", holdout_f1=None, holdout_f2=None,
-                   algorithms_dir=None) -> Path:
+                   project_root=".", algorithms_dir=None) -> Path:
     """Generate and register a wrapper detector. Returns the written .py path.
 
     The library is flat and bin-agnostic. A *manual* save lands as a loose
@@ -157,10 +157,23 @@ def save_algorithm(base: str, *, sensitivity, bin_size: int,
     a ``detector.py`` so it can carry support files alongside it. ``bin_size`` is
     recorded only as metadata (the same algorithm runs on any bin).
 
-    ``algorithms_dir`` defaults to the bundled ``PeakAlgorithms/`` directory.
+    ``algorithms_dir`` is an explicit test/automation override. Normal saves go
+    to the project resolved from ``project_root`` rather than package storage.
     """
+    from ..config import DataManager
+    from .processing import load_detector
+
+    dm = DataManager(project_root)
+    base_path = dm.resolve_detector_name(base, bin_size)
+    if base_path is None:
+        candidate = Path(base)
+        base_path = candidate if candidate.is_file() else None
+    if base_path is None:
+        raise ValueError(f"Unknown compatible base detector: {base}")
+    load_detector(base_path)
+
     if algorithms_dir is None:
-        algorithms_dir = Path(__file__).resolve().parent.parent / "PeakAlgorithms"
+        algorithms_dir = dm.project_algorithms_dir("peak")
     algorithms_dir = Path(algorithms_dir)
     algorithms_dir.mkdir(parents=True, exist_ok=True)
 

@@ -89,7 +89,7 @@ def _feature_row(scan: str, bin_size: Optional[int], f: dict) -> dict:
         "peak_intensity": f.get("peak_intensity"),
         "mean_intensity": round(sum(intensities) / len(intensities), 2) if intensities else None,
         "sum_integrated": round(sum(integrated), 1) if integrated else None,
-        "mean_snr": round(f["mean_snr"], 2) if "mean_snr" in f else None,
+        "mean_snr": round(f["mean_snr"], 2) if f.get("mean_snr") is not None else None,
         "n_bins": f.get("n_bins"),
         "chi_fwhm": f.get("chi_fwhm", f.get("rocking_fwhm")),  # accept legacy field
         "tth_fwhm": f.get("tth_fwhm", f.get("strain_breadth")),  # accept legacy field

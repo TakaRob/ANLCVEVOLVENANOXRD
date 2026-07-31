@@ -16,6 +16,7 @@ from PyQt5.QtWidgets import (
 
 from ..config import DataManager
 from ..core import catalogs
+from ..gui.lifecycle import dispose_widget
 
 # Standard bins offered when a scan has no catalogs yet; views otherwise show
 # whatever bins actually have data (incl. 2×2) via catalogs.available_bins.
@@ -172,8 +173,7 @@ class BinnedTab(QWidget):
 
     def _rebuild(self):
         if self._win is not None:
-            self._win.setParent(None)
-            self._win.deleteLater()
+            dispose_widget(self._win)
             self._win = None
         # A build_window that offers an in-app "build it" step (e.g. the HD
         # Device View) accepts on_built — a callback to rebuild once the artifact
@@ -359,8 +359,7 @@ class LineageCatalogTab(QWidget):
                     self._view_state = self._win.get_view_state()
                 except Exception:
                     pass
-            self._win.setParent(None)
-            self._win.deleteLater()
+            dispose_widget(self._win)
             self._win = None
         if not self._feature:
             self._win = placeholder(

@@ -119,6 +119,79 @@ def test_build_bins_uses_archive_when_raw_paths_are_gone(tmp_path):
         assert np.array_equal(f["0_0"][:], frames.sum(axis=0).astype(np.float32))
 
 
+def test_summation_clips_saturation_instead_of_zeroing(tmp_path):
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    raw_path = raw / "scan_0007_000.h5"
+    frames = np.array([[[8e8, -2]], [[8e8, 4]]], dtype=np.float64)
+    _raw_file(raw_path, frames)
+    frame_map = [[0, 0], [0, 1]]
+
+    summed = io.sum_raw_frames([str(raw_path)], frame_map, [0, 1])
+
+    assert np.array_equal(summed, [[1e9, 2]])
+
+
+def test_build_bins_records_actual_detector_shape_and_clips_saturation(tmp_path):
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    raw_path = raw / "scan_0007_000.h5"
+    frames = np.full((2, 2, 3), 8e8, dtype=np.float64)
+    _raw_file(raw_path, frames)
+    gm = {
+        "bin_size": 1, "n_bin_rows": 1, "n_bin_cols": 1,
+        "xrd_files": [str(raw_path)], "frame_map": [[0, 0], [0, 1]],
+        "bins": {"0_0": [0, 1]},
+    }
+    output = tmp_path / "bins.h5"
+
+    io.build_bins(gm, output, compression="gzip", log=lambda _: None)
+
+    with h5py.File(output, "r") as f:
+        assert tuple(f.attrs["detector_shape"]) == (2, 3)
+        assert np.all(f["0_0"][:] == np.float32(1e9))
+
+
+def test_archive_source_cache_is_lru_and_cleared_on_close(tmp_path):
+    archive = tmp_path / "archive.h5"
+    with h5py.File(archive, "w") as f:
+        f.attrs["format"] = io.ARCHIVE_FORMAT
+        f.create_dataset(io.ARCHIVE_FRAMES, data=np.arange(10).reshape(10, 1, 1))
+    gm = {"bins": {f"0_{i}": [i] for i in range(10)}}
+    source = io._ArchiveSource(archive, gm)
+    for key in source.keys():
+        source.image(key)
+
+    assert len(source._cache) == 8
+    assert "0_0" not in source._cache
+    source.image("0_2")
+    source.image("0_0")
+    assert "0_1" not in source._cache
+    source.close()
+    assert not source._cache
+
+
+def test_raw_source_cache_is_lru_and_cleared_on_close(monkeypatch):
+    source = io._RawSource.__new__(io._RawSource)
+    source._bins = {f"0_{i}": [i] for i in range(10)}
+    source._xrd_files = []
+    source._frame_map = []
+    source._cache = io.OrderedDict()
+    monkeypatch.setattr(io, "sum_raw_frames", lambda files, mapping, indices:
+                        np.array([[indices[0]]], dtype=float))
+
+    for key in source.keys():
+        source.image(key)
+
+    assert len(source._cache) == 8
+    assert "0_0" not in source._cache
+    source.image("0_2")
+    source.image("0_0")
+    assert "0_1" not in source._cache
+    source.close()
+    assert not source._cache
+
+
 def test_grid_rebuild_uses_positions_embedded_in_archive(tmp_path):
     raw = tmp_path / "raw"
     raw.mkdir()

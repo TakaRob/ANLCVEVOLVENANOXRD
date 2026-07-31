@@ -32,6 +32,30 @@ from . import io
 DEFAULT_SNR = 4.0
 DEFAULT_LINK_TOLERANCE = 5  # pixels — max distance to consider same peak across bins
 DEFAULT_MAX_PEAKS_PER_BIN = 25
+REQUIRED_DETECTOR_API = (
+    "precompute_tth", "radial_median_subtract", "fast_tophat",
+    "build_tth_band_masks", "detect_in_band",
+)
+
+
+def default_worker_count() -> int:
+    return min(4, max(1, (os.cpu_count() or 2) - 1))
+
+
+def validate_detector_module(module, source=None):
+    """Reject modules that cannot run in the production binned peak pipeline."""
+    missing = [name for name in REQUIRED_DETECTOR_API
+               if not callable(getattr(module, name, None))]
+    if missing:
+        label = source or getattr(module, "__file__", getattr(module, "__name__", "detector"))
+        raise TypeError(f"Detector {label} does not support binned peak detection; "
+                        f"missing: {', '.join(missing)}")
+    return module
+
+
+def load_detector(path):
+    """Load and validate a production binned detector module."""
+    return validate_detector_module(io.load_module(path), path)
 
 
 # ── Phase 1: per-bin detection ─────────────────────────────────────
@@ -120,7 +144,7 @@ def run_detection_all_bins(h5_path, tth_map, degs, deg_labels, det,
     """Detect peaks in every bin and return {bin_key: [peak_dicts]}.
 
     Per-bin detection is CPU-bound and independent, so it runs across cores
-    (``n_workers``, default ``cpu_count-1``). Results are consumed in sorted-key
+    (``n_workers``, default at most 4). Results are consumed in sorted-key
     order, and serial and parallel both call :func:`_detect_one_bin`, so the
     output is identical to the old serial loop. Falls back to serial on 1 worker
     or if the pool can't start.
@@ -135,7 +159,7 @@ def run_detection_all_bins(h5_path, tth_map, degs, deg_labels, det,
         bin_keys = sorted(h5f.keys(),
                           key=lambda k: (int(k.split("_")[0]), int(k.split("_")[1])))
     n_bins = len(bin_keys)
-    nw = n_workers if n_workers is not None else max(1, (os.cpu_count() or 2) - 1)
+    nw = n_workers if n_workers is not None else default_worker_count()
     log(f"  Running detector on {n_bins} bins ({nw} worker{'s' if nw != 1 else ''})...")
 
     global _DET_CTX
@@ -281,13 +305,7 @@ def run_peaks(
     Each ``peak_dict`` keeps the detector's fields (x, y, snr, label,
     cleaned_intensity, …) so it round-trips into :func:`run_shapes`.
     """
-    det = io.load_module(detector_path)
-    required = ("precompute_tth", "radial_median_subtract", "fast_tophat",
-                "build_tth_band_masks", "detect_in_band")
-    missing = [name for name in required if not hasattr(det, name)]
-    if missing:
-        raise TypeError(f"Detector {detector_path} does not support binned peak "
-                        f"detection; missing: {', '.join(missing)}")
+    det = load_detector(detector_path)
     tth_map = io.load_tth_map(tth_path)
     degs, deg_labels = io.load_reflections(reflections_path)
     if reflection is not None:

@@ -9,16 +9,18 @@ from pathlib import Path
 
 import numpy as np
 import pyqtgraph as pg
-from PyQt5.QtCore import QProcess, QRectF, Qt
+from PyQt5.QtCore import QProcess, QRectF, Qt, QTimer
 from PyQt5.QtGui import QColor
 from PyQt5.QtWidgets import (
-    QComboBox, QFormLayout, QHBoxLayout, QLabel, QLineEdit,
+    QCheckBox, QComboBox, QDoubleSpinBox, QFormLayout, QHBoxLayout, QLabel,
+    QLineEdit, QSpinBox,
     QListWidget, QListWidgetItem, QMainWindow, QMessageBox, QPlainTextEdit,
     QProgressBar, QPushButton, QSplitter, QVBoxLayout, QWidget,
 )
 
 from ..config import DataManager
-from ..core import catalogs, io, reflection_sum, roi_map
+from ..core import catalogs, io, reflection_sum, roi_detection, roi_map
+from .lifecycle import stop_process
 from .palette import _get_cmap
 from .viewer import DetectorView, HeatmapView, _RectItem, _scalar_to_rgba
 
@@ -44,6 +46,8 @@ class ROIShapeWindow(QMainWindow):
         self.pending = []
         self.spatial_keys = []
         self.spatial_index = 0
+        self.sum_process = None
+        self._sum_prompted = False
 
         self.setWindowTitle("ROI > Shape")
         self.resize(1500, 900)
@@ -68,8 +72,14 @@ class ROIShapeWindow(QMainWindow):
         h.addWidget(QLabel("<b>Detector image:</b>"))
         self.image_mode = QComboBox()
         self.image_mode.addItems(["Fully summed scan", "Selected spatial bin"])
-        self.image_mode.currentIndexChanged.connect(self._load_detector_image)
+        self.image_mode.currentIndexChanged.connect(self._image_mode_changed)
         h.addWidget(self.image_mode)
+        self.compute_sum_btn = QPushButton("Compute grand sum")
+        self.compute_sum_btn.setToolTip(
+            "Sum every frame in the scan into the fully-summed detector image.\n"
+            "Slow on a fresh project; build bins first for quick loading.")
+        self.compute_sum_btn.clicked.connect(self._on_compute_btn)
+        h.addWidget(self.compute_sum_btn)
         self.prev_bin_btn = QPushButton("< Bin")
         self.prev_bin_btn.clicked.connect(lambda: self._step_spatial_bin(-1))
         h.addWidget(self.prev_bin_btn)
@@ -108,6 +118,35 @@ class ROIShapeWindow(QMainWindow):
         metric_help.setWordWrap(True)
         metric_help.setStyleSheet("color:#888; font-size:0.9em;")
         form.addRow(metric_help)
+        self.roi_algo = QComboBox()
+        for algorithm in roi_detection.discover_algorithms(self.dm):
+            self.roi_algo.addItem(algorithm["name"], algorithm)
+        form.addRow("ROI detector", self.roi_algo)
+        detect_row = QWidget(); dr = QHBoxLayout(detect_row); dr.setContentsMargins(0, 0, 0, 0)
+        self.detect_btn = QPushButton("Detect ROIs")
+        self.detect_btn.clicked.connect(self._detect_rois)
+        self.roi_sensitivity = QDoubleSpinBox()
+        self.roi_sensitivity.setRange(0.05, 0.95)
+        self.roi_sensitivity.setSingleStep(0.05)
+        self.roi_sensitivity.setValue(0.50)
+        self.roi_sensitivity.setToolTip(
+            "Classifier threshold. Lower finds more weak peaks; higher reduces extras.")
+        self.roi_algo.currentIndexChanged.connect(self._roi_algorithm_changed)
+        self._roi_algorithm_changed()
+        self.run_shapes_btn = QPushButton("Run shape finding")
+        self.run_shapes_btn.clicked.connect(self._run_detected_shapes)
+        dr.addWidget(self.detect_btn); dr.addWidget(QLabel("threshold"))
+        dr.addWidget(self.roi_sensitivity); dr.addWidget(self.run_shapes_btn)
+        form.addRow(detect_row)
+        fast_row = QWidget(); fl = QHBoxLayout(fast_row); fl.setContentsMargins(0, 0, 0, 0)
+        self.fast_preview_cb = QCheckBox("Fast preview")
+        self.fast_preview_cb.setToolTip(
+            "Approximate coarse-to-fine spatial sampling. Save always recomputes exactly.")
+        self.fast_stride = QSpinBox()
+        self.fast_stride.setRange(2, 10); self.fast_stride.setValue(3)
+        self.fast_stride.setPrefix("stride ")
+        fl.addWidget(self.fast_preview_cb); fl.addWidget(self.fast_stride); fl.addStretch()
+        form.addRow(fast_row)
         self.name = QLineEdit("manual_roi")
         form.addRow("Catalog tag", self.name)
         self.roi_label = QLabel("not selected")
@@ -143,6 +182,15 @@ class ROIShapeWindow(QMainWindow):
 
     def _populate_controls(self):
         pass
+
+    def _roi_algorithm_changed(self, *_):
+        algorithm = self.roi_algo.currentData() or {}
+        default = float(algorithm.get("default_sensitivity", 0.5))
+        if default > self.roi_sensitivity.maximum():
+            self.roi_sensitivity.setMaximum(max(20.0, default))
+        elif self.roi_sensitivity.maximum() > 1.0 and default <= 1.0:
+            self.roi_sensitivity.setMaximum(0.95)
+        self.roi_sensitivity.setValue(default)
 
     def _bin_changed(self, text):
         try:
@@ -228,17 +276,40 @@ class ROIShapeWindow(QMainWindow):
         self.image_mode.setCurrentIndex(1)
         self._load_detector_image()
 
+    def _grand_sum_cached(self) -> bool:
+        """True when this scan's fully-summed image is already on disk."""
+        try:
+            return reflection_sum.sum_path(self.dm, self.scan).exists()
+        except Exception:
+            return False
+
+    def _update_compute_btn(self):
+        if self.sum_process is not None:
+            self.compute_sum_btn.setText("Computing grand sum...")
+            self.compute_sum_btn.setEnabled(False)
+            return
+        self.compute_sum_btn.setEnabled(True)
+        self.compute_sum_btn.setText(
+            "Recompute grand sum" if self._grand_sum_cached() else "Compute grand sum")
+
+    def _image_mode_changed(self, index):
+        # Selecting the grand-sum view while it is missing offers to build it,
+        # but never blocks: the bin browser stays usable either way.
+        if index == 0 and not self._grand_sum_cached() and self.sum_process is None:
+            self._prompt_grand_sum()
+        self._load_detector_image()
+
     def _load_detector_image(self, *_):
         try:
             if self.image_mode.currentIndex() == 0:
                 path = reflection_sum.sum_path(self.dm, self.scan)
-                if path.exists():
-                    with np.load(path) as saved:
-                        image = saved["image"].astype(np.float64)
-                else:
-                    source = self._ensure_source()
-                    image = source.sum_all()
-                    reflection_sum.save(self.dm, self.scan, image, source.is_raw)
+                if not path.exists():
+                    # Lazy: don't sum the whole scan on load. Show a placeholder
+                    # and let the user compute it (or browse single bins instead).
+                    self._show_grand_sum_placeholder()
+                    return
+                with np.load(path) as saved:
+                    image = saved["image"].astype(np.float64)
                 title = "Fully summed detector image"
             else:
                 source = self._ensure_source()
@@ -256,24 +327,128 @@ class ROIShapeWindow(QMainWindow):
         except Exception as exc:
             self.detector.clear_image()
             self.status.setText(f"Could not load detector image: {exc}")
+        finally:
+            self._update_compute_btn()
+
+    def _show_grand_sum_placeholder(self):
+        """Render nothing but explain how to get the grand sum, without blocking."""
+        self.image = None
+        self.detector.clear_image()
+        self.detector.set_title("Grand sum not loaded")
+        self.detector_status.setText(
+            "Grand sum not loaded. Click 'Compute grand sum', or switch "
+            "'Detector image' to 'Selected spatial bin' to browse individual bins.")
+        self._update_compute_btn()
+        # Prompt once per session so opening the tab explains the situation, but
+        # re-opening or re-rendering doesn't nag. Deferred so it shows after the
+        # window is up (safe during embedded tab construction).
+        if not self._sum_prompted:
+            self._sum_prompted = True
+            QTimer.singleShot(0, self._prompt_grand_sum)
+
+    def _prompt_grand_sum(self):
+        if self._grand_sum_cached() or self.sum_process is not None:
+            return
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Information)
+        box.setWindowTitle("Grand sum not loaded")
+        box.setText("The fully summed detector image has not been computed for this scan.")
+        box.setInformativeText(
+            "Computing it reads every frame in the scan, which is slow on a fresh "
+            "project.\n\n"
+            "Tip: build bins first for quick loading, e.g.\n"
+            f"    xrd-app bin --scan {self.scan or '<N>'} --bin-size 3\n\n"
+            "If no bins are built, the sum is computed from raw frames using the "
+            "scan's real positions where available.\n\n"
+            "You can also switch 'Detector image' to 'Selected spatial bin' to "
+            "browse individual bins without computing the sum.")
+        compute = box.addButton("Compute now", QMessageBox.AcceptRole)
+        box.addButton("Not now", QMessageBox.RejectRole)
+        box.exec_()
+        if box.clickedButton() is compute:
+            self._compute_grand_sum(prompt=False)
+
+    def _on_compute_btn(self):
+        # When the sum already exists the button recomputes it (e.g. after bins
+        # were built); otherwise it computes it for the first time.
+        self._compute_grand_sum(prompt=False, force=self._grand_sum_cached())
+
+    def _compute_grand_sum(self, prompt=True, force=False):
+        """Run 'xrd-app reflection-sum' as a non-blocking job, then display it."""
+        if self.sum_process is not None:
+            return
+        if self._grand_sum_cached() and not force:
+            self.image_mode.setCurrentIndex(0)
+            self._load_detector_image()
+            return
+        if prompt and not force:
+            self._prompt_grand_sum()
+            return
+        args = ["reflection-sum", "--root", self.project_root]
+        if force:
+            args += ["--overwrite"]
+        if self.scan:
+            args += ["--scan", str(self.scan)]
+        cmd = [sys.executable, "-m", "xrd_app.cli", *args]
+        self.log.appendPlainText("$ " + " ".join(cmd))
+        process = QProcess(self)
+        process.setProcessChannelMode(QProcess.MergedChannels)
+        process.readyReadStandardOutput.connect(
+            lambda process=process: self._on_sum_output(process))
+        process.finished.connect(
+            lambda code, status, process=process: self._on_sum_finished(process, code))
+        self.sum_process = process
+        self.progress.setVisible(True); self.progress.setValue(0)
+        self.status.setText("Computing grand sum across all frames...")
+        self.detector_status.setText(
+            "Computing grand sum... (slow on raw data; build bins for quick loading)")
+        self._update_compute_btn()
+        process.start(cmd[0], cmd[1:])
+
+    def _on_sum_output(self, process):
+        text = bytes(process.readAllStandardOutput()).decode("utf-8", "replace")
+        for line in text.splitlines():
+            match = _PROGRESS_RE.search(line)
+            if match:
+                i, n = int(match.group(1)), int(match.group(2))
+                self.progress.setVisible(True)
+                self.progress.setValue(int(100 * i / n) if n else 0)
+                self.status.setText(f"Computing grand sum: {i}/{n} frames")
+            else:
+                self.log.appendPlainText(line)
+
+    def _on_sum_finished(self, process, code):
+        if self.sum_process is not process:
+            return
+        self.sum_process = None
+        if code != 0 or not self._grand_sum_cached():
+            self.status.setText(f"Grand sum failed (exit {code}); see log.")
+            self._update_compute_btn()
+            return
+        self.progress.setValue(100)
+        self.status.setText("Grand sum computed.")
+        self.image_mode.setCurrentIndex(0)
+        self._load_detector_image()
 
     def _roi_selected(self, x0, y0, x1, y1, rect):
         self.roi = roi_map.normalize_roi((x0, y0, x1, y1))
-        job_id = len(self.pending) + 1
-        preview_dir = self.dm.metadata_scan_dir(self.scan) / "roi_previews"
-        entry = {
-            "roi": self.roi,
-            "status": "running",
-            "rect": rect,
-            "preview_path": preview_dir / f"preview_{job_id}.json",
-            "process": None,
-        }
-        self.pending.append(entry)
-        row = len(self.pending) - 1
+        row = self._add_feature_roi(self.roi, rect, status="detected")
         self._refresh_pending_list(select=row)
         self.detector_status.setText(
-            f"Searching ROI {self.roi} across all spatial bins...")
-        self._start_search(row)
+            f"Added ROI {self.roi}. Press Run shape finding to build its spatial map.")
+
+    def _add_feature_roi(self, roi, rect, status="detected", score=None):
+        if any(entry.get("roi") == roi for entry in self.pending):
+            if rect is not None:
+                rect.remove()
+            return next(i for i, entry in enumerate(self.pending) if entry.get("roi") == roi)
+        job_id = len(self.pending) + 1
+        preview_dir = self.dm.metadata_scan_dir(self.scan) / "roi_previews"
+        entry = {"roi": roi, "status": status, "rect": rect,
+                 "preview_path": preview_dir / f"preview_{job_id}.json",
+                 "process": None, "score": score}
+        self.pending.append(entry)
+        return len(self.pending) - 1
 
     def _detector_clicked(self, x, y):
         if self.image is None:
@@ -289,83 +464,146 @@ class ROIShapeWindow(QMainWindow):
     def _auto_roi_from_click(self, x, y):
         return roi_map.auto_roi_from_click(self.image, x, y)
 
-    def _search_args(self, entry, preview=False):
-        tag = self.name.text().strip() or "manual_roi"
-        args = ["roi-shapes", "--root", self.project_root,
-                "--bin-size", str(self.bin_size),
-                "--roi", ",".join(str(v) for v in entry["roi"]),
-                "--name", tag]
-        if preview:
-            args += ["--preview-output", str(entry["preview_path"])]
+    def _detect_rois(self):
+        output = self.dm.metadata_scan_dir(self.scan) / "roi_previews" / "detected_rois.json"
+        output.parent.mkdir(parents=True, exist_ok=True)
+        algorithm = self.roi_algo.currentData() or {}
+        args = ["roi-detect", "--root", self.project_root,
+                "--algorithm", str(algorithm.get("file")),
+                "--sensitivity", str(self.roi_sensitivity.value()),
+                "--output", str(output)]
         if self.scan:
             args += ["--scan", str(self.scan)]
-        return args
-
-    def _start_search(self, row):
-        if not (0 <= row < len(self.pending)):
-            return
-        entry = self.pending[row]
-        entry["preview_path"].parent.mkdir(parents=True, exist_ok=True)
+        cmd = [sys.executable, "-m", "xrd_app.cli", *args]
+        self.detect_btn.setEnabled(False)
+        self.log.appendPlainText("$ " + " ".join(cmd))
         process = QProcess(self)
         process.setProcessChannelMode(QProcess.MergedChannels)
         process.readyReadStandardOutput.connect(
-            lambda entry=entry, process=process: self._on_search_output(entry, process))
+            lambda process=process: self.log.appendPlainText(
+                bytes(process.readAllStandardOutput()).decode("utf-8", "replace")))
         process.finished.connect(
-            lambda code, status, entry=entry, process=process:
-            self._on_search_finished(entry, process, code, status))
-        entry["process"] = process
-        entry["status"] = "running"
-        rect = entry.get("rect")
-        if rect is not None:
-            rect.set_color("#f0a030", "#f0a030", 0.2)
-        cmd = [sys.executable, "-m", "xrd_app.cli", *self._search_args(entry, preview=True)]
-        self.log.appendPlainText("$ " + " ".join(cmd))
+            lambda code, status, process=process, output=output:
+            self._on_detection_finished(process, output, code, status))
+        self._detect_process = process
         process.start(cmd[0], cmd[1:])
 
-    def _on_search_output(self, entry, process):
+    def _on_detection_finished(self, process, output, code, _status):
+        if getattr(self, "_detect_process", None) is not process:
+            return
+        self._detect_process = None
+        self.detect_btn.setEnabled(True)
+        if code != 0:
+            self.status.setText(f"ROI detection failed (exit {code}); see log.")
+            return
+        try:
+            with open(output) as handle:
+                data = json.load(handle)
+        except Exception as exc:
+            self.status.setText(f"Could not load ROI candidates: {exc}")
+            return
+        added = 0
+        for candidate in data.get("candidates", []):
+            try:
+                roi = roi_map.normalize_roi(candidate["roi"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            x0, y0, x1, y1 = roi
+            rect = _RectItem(self.detector.vb, x0, y0, x1, y1,
+                             edge="#f0a030", face="#f0a030", alpha=0.2)
+            before = len(self.pending)
+            self._add_feature_roi(roi, rect, status="detected", score=candidate.get("score"))
+            added += len(self.pending) - before
+        self._refresh_pending_list(select=0 if self.pending else None)
+        self.status.setText(
+            f"Added {added} detector candidates. Review/remove them, then press Run shape finding.")
+
+    def _run_detected_shapes(self):
+        entries = [entry for entry in self.pending if entry.get("status") == "detected"]
+        if not entries:
+            QMessageBox.information(self, "No detected features",
+                                    "Detect or select one or more ROIs first.")
+            return
+        preview = self.dm.metadata_scan_dir(self.scan) / "roi_previews" / "batch_preview.json"
+        preview.parent.mkdir(parents=True, exist_ok=True)
+        args = ["roi-shapes", "--root", self.project_root,
+                "--bin-size", str(self.bin_size),
+                "--name", self.name.text().strip() or "manual_roi",
+                "--preview-output", str(preview)]
+        for entry in entries:
+            args += ["--roi", ",".join(str(v) for v in entry["roi"])]
+        if self.fast_preview_cb.isChecked():
+            args += ["--fast", "--stride", str(self.fast_stride.value())]
+        if self.scan:
+            args += ["--scan", str(self.scan)]
+        cmd = [sys.executable, "-m", "xrd_app.cli", *args]
+        process = QProcess(self)
+        process.setProcessChannelMode(QProcess.MergedChannels)
+        process.readyReadStandardOutput.connect(
+            lambda process=process: self._on_batch_output(process))
+        process.finished.connect(
+            lambda code, status, process=process, entries=entries, preview=preview:
+            self._on_batch_finished(process, entries, preview, code, status))
+        for entry in entries:
+            entry["process"] = process
+            entry["status"] = "running"
+            entry["preview_path"] = preview
+        self._batch_process = process
+        self._refresh_pending_list(select=self.pending_list.currentRow())
+        self.log.appendPlainText("$ " + " ".join(cmd))
+        self.status.setText(f"Running one batch pass for {len(entries)} ROIs...")
+        process.start(cmd[0], cmd[1:])
+
+    def _on_batch_output(self, process):
         text = bytes(process.readAllStandardOutput()).decode("utf-8", "replace")
-        row = self.pending.index(entry) if entry in self.pending else -1
         for line in text.splitlines():
             match = _PROGRESS_RE.search(line)
-            if match and row == self.pending_list.currentRow():
+            if match:
                 i, n = int(match.group(1)), int(match.group(2))
                 self.progress.setVisible(True)
                 self.progress.setValue(int(100 * i / n) if n else 0)
-                self.status.setText(f"Searching selected ROI: {i}/{n} spatial bins")
-            elif not match:
+            else:
                 self.log.appendPlainText(line)
 
-    def _on_search_finished(self, entry, process, code, _status):
-        if entry not in self.pending:
+    def _on_batch_finished(self, process, entries, preview, code, _status):
+        if getattr(self, "_batch_process", None) is not process:
             return
-        row = self.pending.index(entry)
-        if entry.get("process") is not process:
-            return
-        entry["process"] = None
-        if code != 0 or not entry["preview_path"].exists():
-            entry["status"] = "failed"
-            self.status.setText(f"ROI search failed (exit {code}); see log.")
-            self._refresh_pending_list(select=row)
+        self._batch_process = None
+        active = [entry for entry in entries if entry in self.pending]
+        for entry in active:
+            entry["process"] = None
+        if code != 0 or not preview.exists():
+            for entry in active:
+                entry["status"] = "failed"
+            self.status.setText(f"Batch shape finding failed (exit {code}); see log.")
+            self._refresh_pending_list(select=self.pending_list.currentRow())
             return
         try:
-            kept, _ = catalogs.load_features_any(entry["preview_path"])
-            entry["feature"] = kept[0]
+            with open(preview) as handle:
+                data = json.load(handle)
+            by_roi = {tuple(feature["manual_roi"][key] for key in ("x0", "y0", "x1", "y1")): feature
+                      for feature in data.get("features", [])}
         except Exception as exc:
-            entry["status"] = "failed"
-            self.status.setText(f"Could not load ROI preview: {exc}")
-            self._refresh_pending_list(select=row)
+            self.status.setText(f"Could not load batch preview: {exc}")
             return
-        entry["status"] = "ready"
-        rect = entry.get("rect")
-        if rect is not None:
-            rect.set_color("yellow", "yellow", 0.2)
+        for entry in active:
+            feature = by_roi.get(tuple(entry["roi"]))
+            if feature is None:
+                entry["status"] = "failed"
+                continue
+            entry["feature"] = feature
+            entry["status"] = "ready"
+            rect = entry.get("rect")
+            if rect is not None:
+                rect.set_color("yellow", "yellow", 0.2)
         current = self.pending_list.currentRow()
         self._refresh_pending_list(select=current)
-        if row == current:
-            self.progress.setValue(100)
-            self._pending_selected(row)
-            self.status.setText(
-                "ROI search complete. Preview is shown at left; Save all ready commits it.")
+        if 0 <= current < len(self.pending) and self.pending[current].get("feature"):
+            self._pending_selected(current)
+        approximate = bool(data.get("approximate"))
+        self.status.setText(
+            f"Batch preview complete for {len(active)} ROIs" +
+            (" (approximate; Save recomputes exactly)." if approximate else "."))
 
     def _refresh_pending_list(self, select=None):
         self.pending_list.blockSignals(True)
@@ -377,6 +615,8 @@ class ROIShapeWindow(QMainWindow):
                 f"[{entry['status']}]")
             if entry.get("status") == "saved":
                 item.setForeground(QColor("lime"))
+            elif entry.get("status") == "detected":
+                item.setForeground(QColor("#f0a030"))
             elif entry.get("status") == "ready":
                 item.setForeground(QColor("#d4b000"))
             elif entry.get("status") == "failed":
@@ -416,7 +656,17 @@ class ROIShapeWindow(QMainWindow):
         entry = self.pending[row]
         process = entry.get("process")
         if process is not None and process.state() != QProcess.NotRunning:
-            entry["process"] = None
+            # Shape previews are batched: removing one running ROI stops the shared
+            # pass and returns its remaining members to detected for a clean rerun.
+            if getattr(self, "_batch_process", None) is process:
+                self._batch_process = None
+                for other in self.pending:
+                    if other.get("process") is process:
+                        other["process"] = None
+                        if other is not entry:
+                            other["status"] = "detected"
+            else:
+                entry["process"] = None
             process.kill()
             process.deleteLater()
         feature = entry.get("feature") if entry.get("status") == "saved" else None
@@ -483,7 +733,7 @@ class ROIShapeWindow(QMainWindow):
         args = ["roi-save", "--root", self.project_root,
                 "--bin-size", str(self.bin_size), "--name", tag]
         for entry in ready:
-            args += ["--preview", str(entry["preview_path"])]
+            args += ["--roi", ",".join(str(v) for v in entry["roi"])]
         if self.scan:
             args += ["--scan", str(self.scan)]
         cmd = [sys.executable, "-m", "xrd_app.cli", *args]
@@ -580,19 +830,33 @@ class ROIShapeWindow(QMainWindow):
             return
         process = self.pending[row].get("process")
         if process is not None and process.state() != QProcess.NotRunning:
-            self.pending[row]["process"] = None
+            if getattr(self, "_batch_process", None) is process:
+                self._batch_process = None
+                for entry in self.pending:
+                    if entry.get("process") is process:
+                        entry["process"] = None
+                        entry["status"] = "detected"
+                message = "Batch preview cancelled; detected ROIs are ready to rerun"
+            else:
+                self.pending[row]["process"] = None
+                self.pending[row]["status"] = "cancelled"
+                message = "Selected ROI job cancelled"
             process.kill()
-            self.pending[row]["status"] = "cancelled"
             self._refresh_pending_list(select=row)
-            self.status.setText("Selected ROI job cancelled")
+            self.status.setText(message)
 
     def closeEvent(self, event):  # noqa: N802
-        for entry in self.pending:
-            process = entry.get("process")
-            if process is not None and process.state() != QProcess.NotRunning:
-                process.kill()
+        processes = {entry.get("process") for entry in self.pending}
+        processes.update((getattr(self, "_detect_process", None),
+                          getattr(self, "_batch_process", None), self.sum_process))
+        for process in processes:
+            stop_process(process)
+        self._detect_process = None
+        self._batch_process = None
+        self.sum_process = None
         if self.source is not None:
             self.source.close()
+            self.source = None
         super().closeEvent(event)
 
 

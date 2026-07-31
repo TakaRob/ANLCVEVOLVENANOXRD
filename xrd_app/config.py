@@ -20,8 +20,8 @@ applies a consistent precedence:
     3. A conventional default location inside the project tree.
 
 For ``tth.tiff`` / ``reflections`` a 4th fallback is the bundled package asset.
-Algorithms live in the package's ``PeakAlgorithms/`` / ``ShapeAlgorithms/`` /
-``CombinedAlgorithms/`` libraries (not per project).
+Algorithms are discovered from the package's bundled libraries and writable
+project-owned ``Algorithms/`` libraries.
 """
 
 from __future__ import annotations
@@ -54,19 +54,27 @@ def _position_csv_listing(root_str: str) -> tuple:
 CONFIG_FILENAME = "config.yaml"
 
 
-def format_detector_label(d: dict) -> str:
-    """Dropdown label for a catalog detector: ``name (F1 0.79)``.
+def safe_component(value: object, *, normalize: bool = False, label: str = "name") -> str:
+    """Return a safe filesystem component, optionally normalizing punctuation."""
+    text = str(value).strip()
+    if normalize:
+        text = re.sub(r"[^A-Za-z0-9]+", "_", text).strip("_")
+    elif (not text or text in {".", ".."} or "/" in text or "\\" in text
+          or Path(text).is_absolute()):
+        raise ValueError(f"Invalid {label}: expected one non-empty path component")
+    if not text:
+        raise ValueError(f"Invalid {label}: must contain letters or numbers")
+    return text
 
-    Prefers the holdout F1, falls back to F2 (e.g. the recall-first 1x1
-    sessions), and marks unscored detectors. Per-frame (unbinned) detectors get
-    a trailing tag so it's clear they don't run in the binned pipeline.
-    """
+
+def format_detector_label(d: dict) -> str:
+    """Dropdown label for a catalog detector, displaying F2 when available."""
     name = d.get("name", "?")
     f1, f2 = d.get("holdout_f1"), d.get("holdout_f2")
-    if f1 is not None:
-        score = f"F1 {f1:.2f}"
-    elif f2 is not None:
+    if f2 is not None:
         score = f"F2 {f2:.2f}"
+    elif f1 is not None:
+        score = f"F1 {f1:.2f}"
     else:
         score = "unscored"
     tag = " · unbinned" if d.get("pipeline") == "perframe" else ""
@@ -80,6 +88,7 @@ PROJECT_DIRS = [
     "Labels",     # per-scan algorithm outputs + manual labels
     "Figures",    # saved PNGs
     "CVEvolve",   # CVEvolve sessions created from the GUI
+    "Algorithms", # project-owned user detector modules and catalogs
 ]
 
 
@@ -214,7 +223,19 @@ class DataManager:
         return default
 
     def _path(self, paths_key: str, default: str) -> Path:
-        return self._abs(self.config.get("paths", paths_key, default=default))
+        value = str(self.config.get("paths", paths_key, default=default)).strip()
+        if not value or "\\" in value:
+            raise ValueError(f"Invalid paths.{paths_key}: path must remain under project root")
+        path = Path(value)
+        path = path.resolve() if path.is_absolute() else (self.root / path).resolve()
+        try:
+            path.relative_to(self.root)
+        except ValueError:
+            raise ValueError(
+                f"Invalid paths.{paths_key}: path must remain under project root") from None
+        if path == self.root:
+            raise ValueError(f"Invalid paths.{paths_key}: path must name a subdirectory")
+        return path
 
     # ----- standard directories ---------------------------------------
     @property
@@ -244,15 +265,20 @@ class DataManager:
     # ----- scan identity ----------------------------------------------
     @staticmethod
     def scan_name_of(scan: object) -> Optional[str]:
-        """Normalize a scan identifier to the canonical ``Scan_NNNN`` name."""
+        """Normalize an integer/``Scan_NNNN`` identifier and reject path names."""
         if scan is None:
             return None
         if isinstance(scan, int):
+            if scan < 0:
+                raise ValueError("Invalid scan name: scan number must be non-negative")
             return f"Scan_{scan:04d}"
-        s = str(scan).strip()
-        if s.isdigit():
-            return f"Scan_{int(s):04d}"
-        return s  # already a name like "Scan_0203"
+        value = safe_component(scan, label="scan name")
+        if value.isdigit():
+            return f"Scan_{int(value):04d}"
+        match = re.fullmatch(r"Scan_(\d+)", value)
+        if match:
+            return f"Scan_{int(match.group(1)):04d}"
+        raise ValueError("Invalid scan name: expected an integer or Scan_NNNN")
 
     @staticmethod
     def scan_number_of(scan: object) -> Optional[int]:
@@ -377,12 +403,14 @@ class DataManager:
     # ----- algorithm output files -------------------------------------
     def peaks_json(self, algo: str, bin_size: int, scan: object = None,
                    variant: Optional[str] = None) -> Path:
-        tag = f"_{variant}" if variant else ""
+        algo = safe_component(algo, label="algorithm name")
+        tag = f"_{safe_component(variant, label='variant')}" if variant else ""
         return self.labels_dir(scan) / f"{algo}_peaks_{bin_size}x{bin_size}{tag}.json"
 
     def shapes_json(self, algo: str, bin_size: int, scan: object = None,
                     variant: Optional[str] = None) -> Path:
-        tag = f"_{variant}" if variant else ""
+        algo = safe_component(algo, label="algorithm name")
+        tag = f"_{safe_component(variant, label='variant')}" if variant else ""
         return self.labels_dir(scan) / f"{algo}_shapes_{bin_size}x{bin_size}{tag}.json"
 
     def hd_map_json(self, algo: str, bin_size: int, scan: object = None,
@@ -391,12 +419,14 @@ class DataManager:
 
         ``<algo>_hdmap_<NxN>[_<tag>].json`` alongside the shapes catalog it was
         built from (``bin_size`` is that source feature-map bin, e.g. 3)."""
-        tag = f"_{variant}" if variant else ""
+        algo = safe_component(algo, label="algorithm name")
+        tag = f"_{safe_component(variant, label='variant')}" if variant else ""
         return self.labels_dir(scan) / f"{algo}_hdmap_{bin_size}x{bin_size}{tag}.json"
 
     def roi_map_json(self, name: str, bin_size: int, scan: object = None) -> Path:
         """Dedicated ROI > Shape catalog, intentionally separate from shapes."""
-        return self.labels_dir(scan) / f"{name}_roimap_{bin_size}x{bin_size}.json"
+        tag = safe_component(name, normalize=True, label="catalog name")
+        return self.labels_dir(scan) / f"{tag}_roimap_{bin_size}x{bin_size}.json"
 
     def manual_labels_json(self, scan: object = None) -> Path:
         return self.labels_dir(scan) / "manual_labels.json"
@@ -607,7 +637,7 @@ class DataManager:
             if configured:
                 return self._abs(configured)
         sdir = self.metadata_scan_dir(scan)
-        tag = f"_{variant}" if variant else ""
+        tag = f"_{safe_component(variant, label='variant')}" if variant else ""
         if bin_size is not None:
             return sdir / f"grid_mapping_{bin_size}x{bin_size}{tag}.json"
         return sdir / f"grid_mapping{tag}.json"
@@ -623,7 +653,7 @@ class DataManager:
                   scan: object = None, variant: Optional[str] = None) -> Path:
         if override:
             return self._abs(override)
-        tag = f"_{variant}" if variant else ""
+        tag = f"_{safe_component(variant, label='variant')}" if variant else ""
         return self.binned_dir(scan) / f"xrd_{bin_size}x{bin_size}_bins{tag}.h5"
 
     def xrf_product(self, scan: object = None) -> Path:
@@ -664,48 +694,70 @@ class DataManager:
         return self.binned_h5(bin_size, override, scan, variant=variant)
 
     # ----- detector / algorithm libraries -----------------------------
+    @staticmethod
+    def _algorithm_subdir(kind: str) -> str:
+        return {"peak": "PeakAlgorithms", "shape": "ShapeAlgorithms",
+                "combined": "CombinedAlgorithms"}.get(kind, "PeakAlgorithms")
+
     def algorithms_dir(self, kind: str = "peak") -> Path:
         """Directory of a bundled algorithm library shipped with the package."""
-        sub = {"peak": "PeakAlgorithms", "shape": "ShapeAlgorithms",
-               "combined": "CombinedAlgorithms"}.get(kind, "PeakAlgorithms")
-        return Path(__file__).parent / sub
+        return Path(__file__).parent / self._algorithm_subdir(kind)
+
+    def project_algorithms_dir(self, kind: str = "peak") -> Path:
+        """Writable project-owned algorithm library."""
+        return self.root / "Algorithms" / self._algorithm_subdir(kind)
 
     def detectors_dir(self) -> Path:
-        """The peak-algorithm library directory (holds catalog.json)."""
+        """The bundled peak-algorithm library directory."""
         return self.algorithms_dir("peak")
 
     def combined_dir(self) -> Path:
-        """The combined-algorithm library directory (holds catalog.json)."""
+        """The bundled combined-algorithm library directory."""
         return self.algorithms_dir("combined")
 
     def shapes_dir(self) -> Path:
-        """The shape-algorithm library directory (holds catalog.json)."""
+        """The bundled shape-algorithm library directory."""
         return self.algorithms_dir("shape")
 
     def load_catalog(self, kind: str = "peak") -> dict:
-        """Read the ``catalog.json`` of an algorithm library (peak/shape/combined)."""
-        cat = self.algorithms_dir(kind) / "catalog.json"
-        if cat.exists():
+        """Merge bundled and project catalogs, with project entries taking precedence."""
+        merged = {}
+        description = None
+        for library in (self.algorithms_dir(kind), self.project_algorithms_dir(kind)):
+            cat = library / "catalog.json"
+            if not cat.exists():
+                continue
             with open(cat) as f:
-                return json.load(f)
-        return {"detectors": []}
+                data = json.load(f)
+            description = data.get("description", description)
+            for original in data.get("detectors", []):
+                entry = dict(original)
+                entry["_library_dir"] = library
+                entry["_path"] = library / entry.get("file", "")
+                merged[(entry.get("name"), entry.get("bin_size"))] = entry
+        return {"description": description, "detectors": list(merged.values())}
 
     def load_detector_catalog(self) -> dict:
         return self.load_catalog("peak")
 
     def list_detectors(self, bin_size: Optional[int] = None) -> list:
-        """List bundled *detector* entries (excludes support modules).
+        """List cataloged modules compatible with the production binned API."""
+        from .core.processing import load_detector
 
-        An entry with a null/missing ``bin_size`` applies to any bin size (the
-        flat library is bin-agnostic), so it is always included.
-        """
         size = f"{bin_size}x{bin_size}" if bin_size else None
         out = []
         for d in self.load_detector_catalog().get("detectors", []):
-            if d.get("role") != "detector":
+            if d.get("role") != "detector" or d.get("pipeline") == "perframe":
                 continue
             entry_size = d.get("bin_size")
             if size and entry_size and entry_size != size:
+                continue
+            path = d.get("_path")
+            if not path or not Path(path).is_file():
+                continue
+            try:
+                load_detector(path)
+            except Exception:
                 continue
             out.append(d)
         return out
@@ -723,10 +775,11 @@ class DataManager:
         if not candidates:
             return None
         candidates.sort(
-            key=lambda d: (d.get("holdout_f1") if d.get("holdout_f1") is not None else -1,
+            key=lambda d: (d.get("holdout_f2") if d.get("holdout_f2") is not None else -1,
+                           d.get("holdout_f1") if d.get("holdout_f1") is not None else -1,
                            d.get("name") == "5x5_tophat_band_adaptive_snr"),
             reverse=True)
-        return self.detectors_dir() / candidates[0]["file"]
+        return Path(candidates[0]["_path"])
 
     def resolve_detector_name(self, name: str, bin_size: Optional[int] = None) -> Optional[Path]:
         """Resolve a bare detector name from the library."""
@@ -736,7 +789,7 @@ class DataManager:
             sized = [d for d in matches if d.get("bin_size") == f"{bin_size}x{bin_size}"]
             matches = sized or matches
         if matches:
-            return self.detectors_dir() / matches[0]["file"]
+            return Path(matches[0]["_path"])
         return None
 
     def detector_script(self, override: Optional[str] = None,
