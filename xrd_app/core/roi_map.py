@@ -148,13 +148,12 @@ def sample_roi(
     }
 
 
-def to_shape_feature(result: dict, reflection: str, *, feature_id: int = 1,
-                     tth_map=None, beam_center=None) -> dict:
-    """Represent one fixed detector ROI as one Shape/Verify-compatible feature.
+def to_shape_feature(result: dict, reflection: str = "manual ROI", *,
+                     feature_id: int = 1, tth_map=None, beam_center=None) -> dict:
+    """Represent one fixed detector ROI as a manual ROI feature.
 
-    Every sampled spatial bin is retained in ``intensity_profile``. This is a
-    manual ROI feature, not a Gaussian-verified linked peak, so its provenance is
-    explicit in ``reason`` and ``manual_roi``.
+    Every sampled spatial bin is retained in ``intensity_profile``. This is not a
+    Gaussian-verified linked peak; it belongs only to the dedicated ROI catalog.
     """
     profile = result.get("profile") or {}
     if not profile:

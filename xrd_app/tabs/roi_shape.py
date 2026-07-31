@@ -13,9 +13,9 @@ TAB_META = {
     "general": (
         "Select one reflection feature on the fully summed detector image (or a "
         "single spatial-bin image). Each detector rectangle becomes one pending "
-        "manual feature; its fixed ROI intensity is measured across every spatial "
-        "bin to make the heatmap. Saved outputs are ordinary shapes catalogs and "
-        "can be reviewed feature-by-feature in Shape/Verify."
+        "manual feature; its total detector counts are measured across every "
+        "spatial bin to make the heatmap. Saved outputs stay in a dedicated manual "
+        "ROI catalog and are not connected to Shape/Verify."
     ),
 }
 

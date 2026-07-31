@@ -10,6 +10,7 @@ from pathlib import Path
 import numpy as np
 import pyqtgraph as pg
 from PyQt5.QtCore import QProcess, QRectF, Qt
+from PyQt5.QtGui import QColor
 from PyQt5.QtWidgets import (
     QComboBox, QFormLayout, QHBoxLayout, QLabel, QLineEdit,
     QListWidget, QListWidgetItem, QMainWindow, QMessageBox, QPlainTextEdit,
@@ -26,7 +27,7 @@ _PROGRESS_RE = re.compile(r"PROGRESS\s+(\d+)/(\d+)")
 
 
 class ROIShapeWindow(QMainWindow):
-    """Select a feature on a summed detector image and build standard shapes."""
+    """Select detector ROIs and map their total counts across spatial bins."""
 
     def __init__(self, project_root=".", scan=None, bin_size=3, embedded=False):
         super().__init__()
@@ -95,26 +96,18 @@ class ROIShapeWindow(QMainWindow):
         self.detector.set_drag_callback(self._roi_selected)
         self.detector.set_click_callback(self._detector_clicked)
         dl.addWidget(self.detector, 1)
-        self.detector_status = QLabel("Drag a rectangle around one reflection feature.")
+        self.detector_status = QLabel("Click a feature or drag a detector ROI.")
         dl.addWidget(self.detector_status)
         split.addWidget(detector_host)
 
         controls = QWidget()
         controls.setMinimumWidth(310)
         form = QFormLayout(controls)
-        self.reflection_combo = QComboBox()
-        form.addRow("Reflection", self.reflection_combo)
-        self.metric_combo = QComboBox()
-        self.metric_combo.addItem("Total counts in ROI", "integrated")
-        self.metric_combo.addItem("Brightest pixel in ROI", "intensity")
-        self.metric_combo.addItem("Average counts per ROI pixel", "mean")
-        self.metric_combo.currentIndexChanged.connect(self._metric_changed)
-        form.addRow("Heatmap value", self.metric_combo)
-        self.metric_help = QLabel()
-        self.metric_help.setWordWrap(True)
-        self.metric_help.setStyleSheet("color:#888; font-size:0.9em;")
-        form.addRow("", self.metric_help)
-        self._metric_changed()
+        metric_help = QLabel(
+            "Heatmap value: total detector counts inside the selected ROI for each spatial bin.")
+        metric_help.setWordWrap(True)
+        metric_help.setStyleSheet("color:#888; font-size:0.9em;")
+        form.addRow(metric_help)
         self.name = QLineEdit("manual_roi")
         form.addRow("Catalog tag", self.name)
         self.roi_label = QLabel("not selected")
@@ -122,9 +115,9 @@ class ROIShapeWindow(QMainWindow):
 
         self.pending_list = QListWidget()
         self.pending_list.currentRowChanged.connect(self._pending_selected)
-        form.addRow("Pending features", self.pending_list)
+        form.addRow("Features", self.pending_list)
         pending_row = QWidget(); pl = QHBoxLayout(pending_row); pl.setContentsMargins(0, 0, 0, 0)
-        self.run_btn = QPushButton("Save selected")
+        self.run_btn = QPushButton("Save all ready")
         self.run_btn.clicked.connect(self._run)
         self.remove_btn = QPushButton("Remove")
         self.remove_btn.clicked.connect(self._remove_pending)
@@ -141,9 +134,9 @@ class ROIShapeWindow(QMainWindow):
         nav = QWidget(); nl = QHBoxLayout(nav); nl.setContentsMargins(0, 0, 0, 0)
         self.prev_btn = QPushButton("Previous"); self.prev_btn.clicked.connect(lambda: self._step(-1))
         self.next_btn = QPushButton("Next"); self.next_btn.clicked.connect(lambda: self._step(1))
-        self.feature_label = QLabel("No saved shapes")
+        self.feature_label = QLabel("No feature preview")
         nl.addWidget(self.prev_btn); nl.addWidget(self.next_btn); nl.addWidget(self.feature_label)
-        form.addRow("Saved result", nav)
+        form.addRow("Feature preview", nav)
         self.log = QPlainTextEdit(); self.log.setReadOnly(True); self.log.setMaximumHeight(190)
         form.addRow(self.log)
         split.addWidget(controls)
@@ -155,29 +148,7 @@ class ROIShapeWindow(QMainWindow):
         return self._header if self.embedded else None
 
     def _populate_controls(self):
-        try:
-            _degs, labels = io.load_reflections(self.dm.reflections(scan=self.scan))
-            self.reflection_combo.addItems(labels)
-        except Exception as exc:
-            self.status.setText(f"Could not load reflections: {exc}")
-
-    def _metric_changed(self, *_):
-        explanations = {
-            "integrated": (
-                "For each spatial bin, sum every detector pixel inside the selected "
-                "ROI. Best default for total diffracted signal; larger ROIs collect "
-                "more background."),
-            "intensity": (
-                "For each spatial bin, use only the brightest detector pixel inside "
-                "the ROI. Emphasizes sharp spots but is more sensitive to hot pixels."),
-            "mean": (
-                "For each spatial bin, average all detector pixels inside the ROI. "
-                "Comparable across differently sized ROIs, but broad weak spots may "
-                "be diluted by background."),
-        }
-        self.metric_help.setText(explanations[self.metric_combo.currentData()])
-        if self.features:
-            self._render_feature()
+        pass
 
     def _bin_changed(self, text):
         try:
@@ -255,7 +226,6 @@ class ROIShapeWindow(QMainWindow):
         preview_dir = self.dm.metadata_scan_dir(self.scan) / "roi_previews"
         entry = {
             "roi": self.roi,
-            "reflection": self.reflection_combo.currentText(),
             "status": "running",
             "rect": rect,
             "preview_path": preview_dir / f"preview_{job_id}.json",
@@ -265,7 +235,7 @@ class ROIShapeWindow(QMainWindow):
         row = len(self.pending) - 1
         self._refresh_pending_list(select=row)
         self.detector_status.setText(
-            f"Searching {entry['reflection']} ROI {self.roi} across all spatial bins...")
+            f"Searching ROI {self.roi} across all spatial bins...")
         self._start_search(row)
 
     def _detector_clicked(self, x, y):
@@ -286,10 +256,8 @@ class ROIShapeWindow(QMainWindow):
         tag = self.name.text().strip() or "manual_roi"
         args = ["roi-shapes", "--root", self.project_root,
                 "--bin-size", str(self.bin_size),
-                "--reflection", entry["reflection"],
                 "--roi", ",".join(str(v) for v in entry["roi"]),
-                "--name", tag,
-                "--metric", str(self.metric_combo.currentData())]
+                "--name", tag]
         if preview:
             args += ["--preview-output", str(entry["preview_path"])]
         if self.scan:
@@ -360,7 +328,7 @@ class ROIShapeWindow(QMainWindow):
             self.progress.setValue(100)
             self._pending_selected(row)
             self.status.setText(
-                "ROI search complete. Preview is shown at left; Save selected to commit it.")
+                "ROI search complete. Preview is shown at left; Save all ready commits it.")
 
     def _refresh_pending_list(self, select=None):
         self.pending_list.blockSignals(True)
@@ -368,8 +336,14 @@ class ROIShapeWindow(QMainWindow):
         for i, entry in enumerate(self.pending, 1):
             roi = entry["roi"]
             item = QListWidgetItem(
-                f"{i}. {entry['reflection']}  x={roi[0]}:{roi[2]} "
-                f"y={roi[1]}:{roi[3]}  [{entry['status']}]")
+                f"{i}. x={roi[0]}:{roi[2]} y={roi[1]}:{roi[3]} "
+                f"[{entry['status']}]")
+            if entry.get("status") == "saved":
+                item.setForeground(QColor("lime"))
+            elif entry.get("status") == "ready":
+                item.setForeground(QColor("#d4b000"))
+            elif entry.get("status") == "failed":
+                item.setForeground(QColor("#ff6666"))
             self.pending_list.addItem(item)
         self.pending_list.blockSignals(False)
         if select is not None and self.pending:
@@ -384,16 +358,15 @@ class ROIShapeWindow(QMainWindow):
             rect = candidate.get("rect")
             if rect is None:
                 continue
-            if candidate.get("status") == "saved":
+            if index == row:
+                rect.set_color("red", "red", 0.28)
+            elif candidate.get("status") == "saved":
                 rect.set_color("lime", "lime", 0.18)
             elif candidate.get("status") == "ready":
                 rect.set_color("yellow", "yellow", 0.2)
-            elif index == row:
-                rect.set_color("cyan", "cyan", 0.25)
             else:
                 rect.set_color("#f0a030", "#f0a030", 0.2)
         self.roi_label.setText(", ".join(str(v) for v in self.roi))
-        self.reflection_combo.setCurrentText(entry["reflection"])
         if entry.get("feature"):
             self.features = [("Saved", entry["feature"])]
             self.feature_index = 0
@@ -413,16 +386,8 @@ class ROIShapeWindow(QMainWindow):
         feature = entry.get("feature") if entry.get("status") == "saved" else None
         if feature is not None and self.result_path and self.result_path.exists():
             try:
-                with open(self.result_path) as handle:
-                    data = json.load(handle)
-                roi = feature.get("manual_roi")
-                kept = [item for item in data.get("kept", [])
-                        if item.get("manual_roi") != roi]
-                for index, item in enumerate(kept, 1):
-                    item["feature_id"] = index
-                data["kept"] = kept
-                data["n_kept"] = len(kept)
-                io.atomic_write_json(self.result_path, data)
+                from ..core import roi_catalog
+                roi_catalog.remove_feature(self.result_path, feature.get("manual_roi"))
             except Exception as exc:
                 QMessageBox.warning(self, "Could not remove saved feature", str(exc))
                 return
@@ -445,12 +410,12 @@ class ROIShapeWindow(QMainWindow):
             if old is not None:
                 old.remove()
             x0, y0, x1, y1 = entry["roi"]
-            if entry.get("status") == "saved":
+            if index == selected:
+                edge, face, alpha = "red", "red", 0.28
+            elif entry.get("status") == "saved":
                 edge, face, alpha = "lime", "lime", 0.18
             elif entry.get("status") == "ready":
                 edge, face, alpha = "yellow", "yellow", 0.2
-            elif index == selected:
-                edge, face, alpha = "cyan", "cyan", 0.25
             else:
                 edge, face, alpha = "#f0a030", "#f0a030", 0.2
             entry["rect"] = _RectItem(
@@ -466,23 +431,20 @@ class ROIShapeWindow(QMainWindow):
         self._roi_selected(x0, y0, x1, y1, rect)
 
     def _run(self):
-        row = self.pending_list.currentRow()
-        if not (0 <= row < len(self.pending)):
-            QMessageBox.information(self, "Pending feature", "Select a ready feature to save.")
-            return
-        entry = self.pending[row]
-        if entry.get("status") != "ready":
+        ready = [entry for entry in self.pending if entry.get("status") == "ready"]
+        if not ready:
             QMessageBox.information(
-                self, "Feature not ready",
-                "Wait for the selected ROI search to finish (yellow outline) before saving.")
+                self, "No ready features",
+                "Wait for at least one search to finish (yellow) before saving.")
             return
         tag = self.name.text().strip()
         if not tag:
-            QMessageBox.information(self, "Catalog tag", "Enter a catalog tag before saving.")
+            QMessageBox.information(self, "Catalog name", "Enter a catalog name before saving.")
             return
         args = ["roi-save", "--root", self.project_root,
-                "--bin-size", str(self.bin_size), "--name", tag,
-                "--preview", str(entry["preview_path"])]
+                "--bin-size", str(self.bin_size), "--name", tag]
+        for entry in ready:
+            args += ["--preview", str(entry["preview_path"])]
         if self.scan:
             args += ["--scan", str(self.scan)]
         cmd = [sys.executable, "-m", "xrd_app.cli", *args]
@@ -493,46 +455,37 @@ class ROIShapeWindow(QMainWindow):
             lambda process=process: self.log.appendPlainText(
                 bytes(process.readAllStandardOutput()).decode("utf-8", "replace")))
         process.finished.connect(
-            lambda code, status, entry=entry, process=process:
-            self._on_save_finished(entry, process, code, status))
-        entry["process"] = process
-        entry["status"] = "saving"
-        self._refresh_pending_list(select=row)
+            lambda code, status, ready=ready, process=process:
+            self._on_save_finished(ready, process, code, status))
+        for entry in ready:
+            entry["process"] = process
+            entry["status"] = "saving"
+        self._refresh_pending_list(select=self.pending_list.currentRow())
         process.start(cmd[0], cmd[1:])
 
-    def _on_save_finished(self, entry, process, code, _status):
-        if entry not in self.pending:
+    def _on_save_finished(self, entries, process, code, _status):
+        active = [entry for entry in entries
+                  if entry in self.pending and entry.get("process") is process]
+        if not active:
             return
-        row = self.pending.index(entry)
-        if entry.get("process") is not process:
-            return
-        entry["process"] = None
+        for entry in active:
+            entry["process"] = None
         if code != 0:
-            entry["status"] = "ready"
+            for entry in active:
+                entry["status"] = "ready"
             self.status.setText(f"Save failed (exit {code}); see log.")
-            self._refresh_pending_list(select=row)
+            self._refresh_pending_list(select=self.pending_list.currentRow())
             return
         tag = re.sub(r'[^A-Za-z0-9_.-]+', '_', self.name.text().strip()).strip('_.-')
-        self.result_path = self.dm.shapes_json("manual_roi", self.bin_size, self.scan,
-                                               variant=tag)
-        entry["status"] = "saved"
-        rect = entry.get("rect")
-        if rect is not None:
-            rect.set_color("lime", "lime", 0.18)
-        self._refresh_pending_list(select=row)
-        self.status.setText("Feature saved to the Shape/Verify catalog.")
-
-    def _load_result(self):
-        try:
-            kept, filtered = catalogs.load_features_any(self.result_path)
-            self.features = [("Kept", f) for f in kept] + [("Filtered", f) for f in filtered]
-            self.feature_index = 0
-            self.status.setText(
-                f"Saved standard Shape/Verify catalog: {self.result_path.name} "
-                f"({len(kept)} kept, {len(filtered)} filtered)")
-            self._render_feature()
-        except Exception as exc:
-            self.status.setText(f"Saved, but could not load result: {exc}")
+        self.result_path = self.dm.roi_map_json(tag, self.bin_size, self.scan)
+        for entry in active:
+            entry["status"] = "saved"
+            rect = entry.get("rect")
+            if rect is not None:
+                rect.set_color("lime", "lime", 0.18)
+        self._refresh_pending_list(select=self.pending_list.currentRow())
+        self.status.setText(
+            f"Saved {len(active)} features to ROI > Shape catalog {self.result_path.name}.")
 
     def _step(self, amount):
         if not self.features:
@@ -542,12 +495,12 @@ class ROIShapeWindow(QMainWindow):
 
     def _render_feature(self):
         if not self.features:
-            self.feature_label.setText("No shapes found")
+            self.feature_label.setText("No feature preview")
             self.heatmap.img.clear(); self.heatmap._grid_data = None
             return
         category, feature = self.features[self.feature_index]
         profile = feature.get("intensity_profile") or {}
-        metric = self.metric_combo.currentData() or feature.get("roi_metric", "integrated")
+        metric = "integrated"
         result = {"profile": profile, "n_bin_rows": 0, "n_bin_cols": 0,
                   "metric": metric}
         rows = []; cols = []
@@ -575,8 +528,8 @@ class ROIShapeWindow(QMainWindow):
             center_rc = None
         self.heatmap.set_markers(center_rc, None)
         self.heatmap.plot.setTitle(
-            f"{category}: {feature.get('reflection', '?')} feature "
-            f"{feature.get('feature_id', self.feature_index + 1)} - {metric}",
+            f"{category}: ROI feature "
+            f"{feature.get('feature_id', self.feature_index + 1)} - total ROI counts",
             color="w", size="10pt")
         self.feature_label.setText(f"{self.feature_index + 1}/{len(self.features)} {category}")
 

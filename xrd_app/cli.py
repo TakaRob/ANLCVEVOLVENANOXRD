@@ -1138,26 +1138,20 @@ def shapes(bin_size, scan, algorithm, from_peaks, peak_algo, link_tolerance, var
 
 
 # ─────────────────────────────────────────────────────────────────────
-# roi-shapes — detector ROI peak search -> standard shape catalog
+# roi-shapes — detector ROI intensity preview for the manual ROI catalog
 # ─────────────────────────────────────────────────────────────────────
 @main.command(name='roi-shapes')
 @click.option('--bin-size', type=int, default=3, help='Spatial bin size to process')
 @click.option('--scan', default=None, help='Scan number/name (defaults to config scan)')
-@click.option('--reflection', required=True, help='Reflection label assigned to the selected ROI')
 @click.option('--roi', required=True, help='Detector rectangle X0,Y0,X1,Y1 (half-open pixels)')
-@click.option('--name', required=True, help='Output tag used by Shape/Verify catalogs')
-@click.option('--metric', type=click.Choice(['integrated', 'intensity', 'mean']),
-              default='integrated', help='ROI value used for the spatial heatmap')
-@click.option('--normalize-frames', is_flag=True,
-              help='Divide values by the raw frame count represented by each spatial bin')
+@click.option('--name', required=True, help='Manual ROI catalog name')
 @click.option('--preview-output', default=None,
               help='Write one unsaved preview result here instead of updating a catalog')
 @click.option('--root', default='.', help='Project root directory')
-def roi_shapes(bin_size, scan, reflection, roi, name, metric, normalize_frames,
-               preview_output, root):
-    """Integrate one detector ROI over all spatial bins as one manual shape."""
+def roi_shapes(bin_size, scan, roi, name, preview_output, root):
+    """Integrate one detector ROI over all spatial bins for ROI > Shape."""
     import re
-    from .core import catalogs, io, lineage, processing, roi_map
+    from .core import io, processing, roi_map
 
     try:
         detector_roi = tuple(int(v.strip()) for v in roi.split(','))
@@ -1186,99 +1180,65 @@ def roi_shapes(bin_size, scan, reflection, roi, name, metric, normalize_frames,
     source = io.open_bin_source(dm, bin_size, scan)
     try:
         sampled = roi_map.sample_roi(
-            source, detector_roi, grid_mapping=gm, metric=metric,
-            normalize_frames=normalize_frames,
+            source, detector_roi, grid_mapping=gm, metric="integrated",
             progress=_make_progress("ROI intensity map"))
     finally:
         source.close()
     tth_map = io.load_tth_map(tth)
     beam_center = processing.estimate_beam_center(tth_map)
-    shapes_out = dm.shapes_json("manual_roi", bin_size, scan, variant=tag)
-    kept = []
-    if not preview_output and shapes_out.exists():
-        try:
-            kept, _filtered = catalogs.load_features_any(shapes_out)
-        except Exception:
-            kept = []
     feature = roi_map.to_shape_feature(
-        sampled, reflection, feature_id=len(kept) + 1,
+        sampled, "manual ROI", feature_id=1,
         tth_map=tth_map, beam_center=beam_center)
-    kept.append(feature)
-
-    shape_result = {
-        "kind": "manual_roi_shape",
+    preview_result = {
+        "kind": "manual_roi_preview",
         "scan": dm.scan_name,
         "bin_size": bin_size,
-        "shape_algo": "manual_roi",
-        "link_tolerance": None,
-        "n_kept": len(kept),
-        "n_filtered": 0,
-        "kept": kept,
-        "filtered": [],
-        "roi_metric": metric,
-        "normalize_frames": bool(normalize_frames),
+        "intensity_definition": "total detector counts inside ROI per spatial bin",
+        "features": [feature],
     }
-    shape_result["lineage"] = lineage.shape_lineage(
-        scan=dm.scan_name, bin_size=bin_size, shape_algorithm="manual_roi",
-        link_tolerance=None,
-        peak_source={"stage": "manual_roi", "detector_roi": sampled["roi"],
-                     "reflection": reflection, "metric": metric,
-                     "normalize_frames": bool(normalize_frames)})
-    output = Path(preview_output) if preview_output else shapes_out
-    _write_json(output, shape_result)
-    if not preview_output:
-        catalogs.record_catalog(dm.labels_dir(scan), shapes_out.name,
-                                shape_result["lineage"])
+    output = Path(preview_output) if preview_output else dm.roi_map_json(tag, bin_size, scan)
+    if preview_output:
+        _write_json(output, preview_result)
+    else:
+        from .core import roi_catalog
+        roi_catalog.save_previews(output, [feature], scan=dm.scan_name,
+                                  bin_size=bin_size, name=tag)
     click.echo(f"\nDone: manual ROI feature #{feature['feature_id']} sampled across "
                f"{feature['n_bins']} spatial bins -> {output}")
 
 
 @main.command(name='roi-save')
-@click.option('--preview', required=True, help='Completed ROI preview JSON')
-@click.option('--name', required=True, help='Output tag used by Shape/Verify catalogs')
+@click.option('--preview', 'previews', multiple=True, required=True,
+              help='Completed ROI preview JSON; repeat for every ready feature')
+@click.option('--name', required=True, help='Manual ROI catalog name')
 @click.option('--bin-size', type=int, default=3, help='Spatial bin size')
 @click.option('--scan', default=None, help='Scan number/name')
 @click.option('--root', default='.', help='Project root directory')
-def roi_save(preview, name, bin_size, scan, root):
-    """Commit one completed ROI preview to its Shape/Verify catalog."""
+def roi_save(previews, name, bin_size, scan, root):
+    """Save all completed previews to a dedicated ROI > Shape catalog."""
+    import json
     import re
-    from .core import catalogs, lineage
+    from .core import roi_catalog
 
-    preview_path = Path(preview)
-    _require(preview_path, "ROI preview")
-    preview_features, _ = catalogs.load_features_any(preview_path)
-    if len(preview_features) != 1:
-        raise click.ClickException(
-            f"Expected one feature in ROI preview; found {len(preview_features)}")
     tag = re.sub(r'[^A-Za-z0-9_.-]+', '_', name.strip()).strip('_.-')
     if not tag:
         raise click.BadParameter('must contain letters or numbers', param_hint='--name')
+    features = []
+    for preview in previews:
+        path = Path(preview)
+        _require(path, "ROI preview")
+        with open(path) as handle:
+            data = json.load(handle)
+        found = data.get("features", []) if isinstance(data, dict) else []
+        if len(found) != 1:
+            raise click.ClickException(
+                f"Expected one feature in ROI preview {path}; found {len(found)}")
+        features.append(found[0])
     dm = DataManager(root, scan=scan)
-    output = dm.shapes_json("manual_roi", bin_size, scan, variant=tag)
-    kept = []
-    if output.exists():
-        kept, _ = catalogs.load_features_any(output)
-    feature = preview_features[0]
-    feature["feature_id"] = len(kept) + 1
-    kept.append(feature)
-    result = {
-        "kind": "manual_roi_shape",
-        "scan": dm.scan_name,
-        "bin_size": bin_size,
-        "shape_algo": "manual_roi",
-        "link_tolerance": None,
-        "n_kept": len(kept),
-        "n_filtered": 0,
-        "kept": kept,
-        "filtered": [],
-        "lineage": lineage.shape_lineage(
-            scan=dm.scan_name, bin_size=bin_size, shape_algorithm="manual_roi",
-            link_tolerance=None,
-            peak_source={"stage": "manual_roi", "source": "ROI > Shape preview"}),
-    }
-    _write_json(output, result)
-    catalogs.record_catalog(dm.labels_dir(scan), output.name, result["lineage"])
-    click.echo(f"Saved manual ROI feature #{feature['feature_id']} -> {output}")
+    output = dm.roi_map_json(tag, bin_size, scan)
+    result = roi_catalog.save_previews(
+        output, features, scan=dm.scan_name, bin_size=bin_size, name=tag)
+    click.echo(f"Saved {len(features)} ROI features ({result['n_features']} total) -> {output}")
 
 
 # ─────────────────────────────────────────────────────────────────────

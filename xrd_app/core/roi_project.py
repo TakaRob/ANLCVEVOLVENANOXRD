@@ -13,12 +13,12 @@ from . import io, reflection_sum
 
 def create_from_scan(scan_folder, project_parent, name, tth_path, *,
                      positions_path=None, bin_size=3, summed_image=None) -> tuple[Path, str]:
-    """Create and prepare a single-scan project for ROI peak/shape processing.
+    """Create and prepare a single-scan project for manual ROI mapping.
 
     The raw scan remains in place and is registered by absolute path. The
     calibration and optional positions file are likewise linked by path. A grid
     mapping for ``bin_size`` is generated now; detector bins are built later by
-    ``xrd-app roi-shapes`` so the GUI can show progress and cancellation.
+    the ROI mapper so the GUI can show progress and cancellation.
     """
     scan_folder = Path(scan_folder).resolve()
     project_parent = Path(project_parent).resolve()

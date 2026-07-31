@@ -395,7 +395,7 @@ class DataManager:
         return self.labels_dir(scan) / f"{algo}_hdmap_{bin_size}x{bin_size}{tag}.json"
 
     def roi_map_json(self, name: str, bin_size: int, scan: object = None) -> Path:
-        """Spatial intensity map made from a manually selected detector ROI."""
+        """Dedicated ROI > Shape catalog, intentionally separate from shapes."""
         return self.labels_dir(scan) / f"{name}_roimap_{bin_size}x{bin_size}.json"
 
     def manual_labels_json(self, scan: object = None) -> Path:
