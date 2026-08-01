@@ -33,9 +33,12 @@ def _base(stage: str, scan, bin_size) -> dict:
     }
 
 
-def peak_lineage(scan, bin_size, algorithm, detector_file=None, snr=None) -> dict:
+def peak_lineage(scan, bin_size, algorithm, detector_file=None, snr=None,
+                 variant=None) -> dict:
     d = _base("peaks", scan, bin_size)
     d["peak_algorithm"] = algorithm
+    if variant:
+        d["variant"] = variant
     if detector_file is not None:
         d["detector_file"] = str(detector_file)
     if snr is not None:

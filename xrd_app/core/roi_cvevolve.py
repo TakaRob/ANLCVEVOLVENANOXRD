@@ -54,8 +54,9 @@ def create_session(dm, dest=None, holdout_pct=20.0, seed=42) -> dict:
 
     rng = np.random.default_rng(seed)
     order = rng.permutation(len(examples))
-    n_holdout = max(1, int(round(len(examples) * holdout_pct / 100.0))) \
-        if len(examples) > 1 else 0
+    n_holdout = min(len(examples) - 1,
+                    max(1, int(round(len(examples) * holdout_pct / 100.0)))) \
+        if len(examples) > 1 and holdout_pct > 0 else 0
     holdout_idx = set(order[:n_holdout].tolist())
     splits = {"test_data": [], "holdout_data": []}
     for index, example in enumerate(examples):

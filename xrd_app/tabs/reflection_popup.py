@@ -313,7 +313,8 @@ class ReflectionDialog(QDialog):
         algo = self.noise_algo_combo.currentData() or _RADIAL_MEDIAN
         if algo == _RADIAL_MEDIAN:
             if self._det is None:
-                self._det = io.load_module(self.dm.detector_script())
+                self._det = io.load_module(
+                    self.dm.detector_script(bin_size=self.bin_size))
             tth_data = self._det.precompute_tth(self._tth)
             return self._det.radial_median_subtract(image, tth_data)
         edges, centers, n_bins, indices, counts = nralgo.compute_tth_binning(self._tth)
@@ -991,7 +992,7 @@ class ReflectionDialog(QDialog):
 
     # ----- save -------------------------------------------------------
     def _save_reflections(self):
-        """Write reflections.json + reflections.py (does not close the dialog).
+        """Write canonical reflections JSON (does not close the dialog).
 
         Always writes the per-scan set. When "Set as project default" is checked,
         the same set is also written to the project ``Metadata/`` so every scan
@@ -1006,16 +1007,13 @@ class ReflectionDialog(QDialog):
             return
         mdir = self.dm.metadata_scan_dir(self.scan) if self.scan else self.dm.metadata_dir
         json_path = mdir / "reflections.json"
-        py_path = mdir / "reflections.py"
-        written = [json_path, py_path]
+        written = [json_path]
         made_default = False
         try:
-            refl_io.save(self.reflections, json_path, py_path)
+            refl_io.save(self.reflections, json_path)
             proj_dir = self.dm.metadata_dir
             if self.default_cb.isChecked() and proj_dir.resolve() != mdir.resolve():
-                pj = refl_io.save(self.reflections,
-                                  proj_dir / "reflections.json",
-                                  proj_dir / "reflections.py")
+                pj = refl_io.save(self.reflections, proj_dir / "reflections.json")
                 written.append(pj)
                 made_default = True
         except Exception as e:

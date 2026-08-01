@@ -39,6 +39,9 @@ include = ["xrd_app*"]
 exclude = ["xrd_app.tests*", "xrd_app.notebooks*"]
 namespaces = false
 
+[tool.setuptools]
+include-package-data = false
+
 [tool.setuptools.package-data]
 "xrd_app" = [
     "assets/*",
@@ -52,4 +55,16 @@ namespaces = false
     "CombinedAlgorithms/*.py",
     "CombinedAlgorithms/**/*.py",
     "NoiseReduction/*.py",
+]
+
+[tool.setuptools.exclude-package-data]
+"*" = [
+    "tests/*",
+    "tests/**/*",
+    "notebooks/*",
+    "notebooks/**/*",
+    "__pycache__/*",
+    "**/__pycache__/*",
+    "*.pyc",
+    "**/*.pyc",
 ]

@@ -17,7 +17,7 @@ from PyQt5.QtWidgets import (
     QVBoxLayout, QWidget,
 )
 
-from ..gui.lifecycle import stop_process
+from ..gui.lifecycle import start_process, stop_process
 
 _PROGRESS_RE = re.compile(r"PROGRESS\s+(\d+)\s*/\s*(\d+)")
 
@@ -139,7 +139,7 @@ class JobConsole(QWidget):
         self._proc.readyReadStandardOutput.connect(self._on_output)
         self._proc.finished.connect(self._on_finished)
         self._proc.errorOccurred.connect(self._on_error)
-        self._proc.start(cmd[0], cmd[1:])
+        start_process(self._proc, cmd[0], cmd[1:])
         if self._queue is None:
             self.status.setText("running")
         self.cancel_btn.setEnabled(True)

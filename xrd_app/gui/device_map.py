@@ -44,32 +44,23 @@ RESULTS_DIR = None
 HOLDOUT_DIR = None
 CATALOG_PATH = None   # selected feature-map JSON; None → canonical per-bin file
 GRID_PATH = None      # grid mapping matching the selected catalog's bins
+H5_PATH = None        # binned H5 carrying the same catalog variant
 
 
 def configure(project_root=".", bin_size=3, scan=None, catalog=None):
-    global _DM, _BIN_SIZE, RESULTS_DIR, HOLDOUT_DIR, CATALOG_PATH, GRID_PATH
+    global _DM, _BIN_SIZE, RESULTS_DIR, HOLDOUT_DIR, CATALOG_PATH, GRID_PATH, H5_PATH
     _DM = DataManager(project_root, scan=scan)
     _BIN_SIZE = bin_size
     RESULTS_DIR = _DM.results_dir()
     HOLDOUT_DIR = _DM.holdout_dir
     CATALOG_PATH = catalog
-    GRID_PATH = _resolve_grid_mapping()
-
-
-def _resolve_grid_mapping():
-    """Grid mapping whose bins match the selected catalog (so a catalog built on
-    a non-default coordinate grid uses the right grid dimensions instead of
-    clipping its out-of-range bins). Falls back to the per-bin default."""
-    default = _DM.grid_mapping(bin_size=_BIN_SIZE)
-    if not CATALOG_PATH:
-        return default
-    try:
-        cand_dir = _DM.metadata_scan_dir()
-        tagged = sorted(p for p in cand_dir.glob(
-            f"grid_mapping_{_BIN_SIZE}x{_BIN_SIZE}*.json") if Path(p) != Path(default))
-        return catalogs.best_grid_mapping([default] + tagged, CATALOG_PATH, default=default)
-    except Exception:
-        return default
+    if CATALOG_PATH:
+        resolved = catalogs.resolve_catalog_sources(
+            _DM, CATALOG_PATH, bin_size=_BIN_SIZE, scan=scan)
+        GRID_PATH, H5_PATH = resolved.grid_mapping, resolved.bins_h5
+    else:
+        GRID_PATH = _DM.grid_mapping(bin_size=_BIN_SIZE, scan=scan)
+        H5_PATH = _DM.bins_h5(_BIN_SIZE, scan=scan)
 
 
 REFLECTIONS = []

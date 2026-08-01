@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import math
 
-from PyQt5.QtCore import Qt
+from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QHBoxLayout, QLabel,
     QPushButton, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
@@ -59,6 +59,8 @@ class _NumItem(QTableWidgetItem):
 
 
 class ScanSummaryTab(QWidget):
+    bin_size_changed = pyqtSignal(int)
+
     def __init__(self, project_root, bin_size=3):
         super().__init__()
         self._project_root = project_root
@@ -146,6 +148,9 @@ class ScanSummaryTab(QWidget):
         return
 
     # ── selectors ─────────────────────────────────────────────────────
+    def current_bin_size(self):
+        return self._bin_size
+
     def _populate_types(self):
         try:
             self._types = st.catalog_types(self._dm, self._bin_size)
@@ -193,6 +198,7 @@ class ScanSummaryTab(QWidget):
         self._bin_size = self._bin_combo.currentData()
         self._populate_types()
         self._reload()
+        self.bin_size_changed.emit(self._bin_size)
 
     def _on_type_changed(self, _i):
         self._populate_reflections()

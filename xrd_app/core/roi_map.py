@@ -192,17 +192,26 @@ def sample_rois(
     if not normalized:
         return []
     keys = list(source.keys())
+    if not keys:
+        raise ValueError("ROI source has no spatial bins")
+    parsed = {key: _parse_key(key) for key in keys}
+    invalid = [key for key, rc in parsed.items() if rc is None]
+    if invalid:
+        raise ValueError(f"ROI source has invalid spatial bin key {invalid[0]!r}; expected ROW_COL")
     mapping_bins = (grid_mapping or {}).get("bins") or {}
+    if mapping_bins and not set(keys).intersection(mapping_bins):
+        raise ValueError("ROI source spatial bins do not overlap the grid mapping")
     profiles = [{} for _ in normalized]
     stride = max(2, int(stride))
-    parsed = {key: _parse_key(key) for key in keys}
-    regular = [key for key in keys if parsed[key] is not None]
+    regular = list(keys)
 
     if not fast or stride <= 1 or len(regular) < stride * stride * 2:
         if fast:
             log("[roi-map] fast preview guard: grid too small/irregular; using exact sweep")
         _sample_keys(source, keys, normalized, mapping_bins, normalize_frames,
                      profiles, progress=progress)
+        if any(not profile for profile in profiles):
+            raise ValueError("ROI does not overlap readable detector data")
         return [_result(roi, profile, grid_mapping, metric, normalize_frames,
                         approximate=False) for roi, profile in zip(normalized, profiles)]
 
@@ -212,46 +221,49 @@ def sample_rois(
         log("[roi-map] fast preview guard: no stride samples; using exact sweep")
         _sample_keys(source, keys, normalized, mapping_bins, normalize_frames,
                      profiles, progress=progress)
+        if any(not profile for profile in profiles):
+            raise ValueError("ROI does not overlap readable detector data")
         return [_result(roi, profile, grid_mapping, metric, normalize_frames,
                         approximate=False) for roi, profile in zip(normalized, profiles)]
 
     log(f"[roi-map] FAST PREVIEW: stride={stride}, coarse {len(coarse)}/{len(keys)} bins; "
         "small features between sampled cells may be missed")
-    _sample_keys(source, coarse, normalized, mapping_bins, normalize_frames, profiles)
+    _sample_keys(source, coarse, normalized, mapping_bins, normalize_frames, profiles,
+                 progress=progress)
+    if any(not profile for profile in profiles):
+        raise ValueError("ROI does not overlap readable detector data")
     refine = set()
     for profile in profiles:
         values = np.asarray([entry[metric] for entry in profile.values()], dtype=float)
-        if not values.size:
-            continue
         median = float(np.nanmedian(values))
         mad = float(np.nanmedian(np.abs(values - median))) * 1.4826
-        threshold = max(median + 3.0 * mad, median + 0.15 * (float(np.nanmax(values)) - median))
-        seeds = [key for key, entry in profile.items() if entry[metric] >= threshold]
-        if not seeds and profile:
+        threshold = max(median + 3.0 * mad,
+                        median + 0.15 * (float(np.nanmax(values)) - median))
+        seeds = [key for key, entry in profile.items() if entry[metric] > threshold]
+        if not seeds:
             seeds = [max(profile, key=lambda key: profile[key][metric])]
         for seed in seeds:
             row, col = parsed[seed]
             margin = stride + 1
             for key, rc in parsed.items():
-                if rc is not None and abs(rc[0] - row) <= margin and abs(rc[1] - col) <= margin:
+                if abs(rc[0] - row) <= margin and abs(rc[1] - col) <= margin:
                     refine.add(key)
     refine.difference_update(coarse)
     total_reads = len(coarse) + len(refine)
     log(f"[roi-map] FAST PREVIEW: densely refining {len(refine)} bins around coarse signal")
-    if progress is not None:
-        progress(len(coarse), max(total_reads, 1))
     _sample_keys(source, sorted(refine, key=lambda key: parsed[key]), normalized,
                  mapping_bins, normalize_frames, profiles, progress=progress,
                  progress_offset=len(coarse), progress_total=max(total_reads, 1))
 
     for profile in profiles:
-        measured = [entry[metric] for entry in profile.values()]
-        floor = float(np.nanmedian(measured)) if measured else 0.0
+        floors = {
+            name: float(np.nanmedian([entry[name] for entry in profile.values()]))
+            for name in METRICS
+        }
         for key in keys:
             if key not in profile:
                 n_frames = len(mapping_bins.get(key) or []) or 1
-                profile[key] = {"intensity": floor, "integrated": floor,
-                                "mean": floor, "n_pixels": 0,
+                profile[key] = {**floors, "n_pixels": 0,
                                 "n_frames": int(n_frames), "coarse_fill": True}
     return [_result(roi, profile, grid_mapping, metric, normalize_frames,
                     approximate=True, stride=stride,
@@ -314,6 +326,8 @@ def to_shape_feature(result: dict, reflection: str = "manual ROI", *,
         "center_bin": center_bin,
         "center_row": center_row,
         "center_col": center_col,
+        "n_bin_rows": int(result.get("n_bin_rows", 0)),
+        "n_bin_cols": int(result.get("n_bin_cols", 0)),
         "intensity_profile": intensity_profile,
         "reason": "manual fixed detector ROI integrated across all spatial bins",
         "manual_roi": dict(roi),

@@ -26,6 +26,7 @@ from typing import Callable, Union
 import h5py
 import hdf5plugin  # noqa: F401 — registers Zstd/LZ4 filters so compressed bins are readable
 import numpy as np
+from scipy import ndimage as ndi
 
 from . import io
 
@@ -107,6 +108,58 @@ def detect_peaks_with_intensity(image, tth_map, degs, deg_labels, tth_data, det,
         kept = kept[:max_peaks]
 
     return kept, cleaned
+
+
+def detect_peaks_on_image(image, tth_map=None, degs=None, deg_labels=None,
+                          percentile=97.0, min_pixels=3, pad=10, ignore_edge=2):
+    """Detect connected bright regions in one image and assign reflections.
+
+    Returns ``{label: [(y0, y1, x0, x1, cx, cy), ...]}``. This lightweight
+    threshold detector backs interactive labeling; production scan detection uses
+    :func:`detect_peaks_with_intensity`.
+    """
+    finite = image[np.isfinite(image)]
+    if finite.size == 0:
+        return {}
+    hotspot = image >= np.percentile(finite, percentile)
+    if ignore_edge > 0:
+        hotspot[:ignore_edge, :] = False
+        hotspot[-ignore_edge:, :] = False
+        hotspot[:, :ignore_edge] = False
+        hotspot[:, -ignore_edge:] = False
+
+    components, n_components = ndi.label(hotspot)
+    peaks = []
+    for component_id in range(1, n_components + 1):
+        ys, xs = np.where(components == component_id)
+        if len(ys) < min_pixels:
+            continue
+        y0 = max(int(ys.min()) - pad, 0)
+        y1 = min(int(ys.max()) + pad + 1, image.shape[0])
+        x0 = max(int(xs.min()) - pad, 0)
+        x1 = min(int(xs.max()) + pad + 1, image.shape[1])
+        peaks.append((y0, y1, x0, x1, int(np.mean(xs)), int(np.mean(ys))))
+
+    peaks.sort(key=lambda peak: (peak[0], peak[2]))
+    deduplicated = []
+    for peak in peaks:
+        if not any(peak[0] >= prior[0] and peak[1] <= prior[1] and
+                   peak[2] >= prior[2] and peak[3] <= prior[3]
+                   for prior in deduplicated):
+            deduplicated.append(peak)
+
+    if tth_map is None or degs is None or deg_labels is None:
+        return {"peak": deduplicated}
+    results = {}
+    for peak in deduplicated:
+        cx, cy = peak[4], peak[5]
+        label = "unknown"
+        if 0 <= cy < tth_map.shape[0] and 0 <= cx < tth_map.shape[1]:
+            tth_value = tth_map[cy, cx]
+            label = min(zip(deg_labels, degs),
+                        key=lambda item: abs(tth_value - item[1]))[0]
+        results.setdefault(label, []).append(peak)
+    return results
 
 
 # Worker-process state for parallel per-bin detection. The parent sets _DET_CTX
@@ -246,6 +299,88 @@ def estimate_beam_center(tth_map):
     res = minimize(objective, [tth_map.shape[0] // 2, tth_map.shape[1] + 200],
                    method='Nelder-Mead')
     return res.x[0], res.x[1]
+
+
+def expand_peak_spatially(center_bin, seed_peak, load_peaks,
+                          link_tolerance=DEFAULT_LINK_TOLERANCE,
+                          max_radius=None, cancelled=None):
+    """Flood-fill a peak through neighboring spatial bins.
+
+    ``load_peaks(bin_key)`` returns detected peak dictionaries or ``None`` when
+    the bin does not exist. Each accepted peak is linked to the peak in the
+    current frontier bin, matching the production shape-linking behavior.
+    """
+    center_row, center_col = (int(part) for part in center_bin.split("_"))
+    accepted = {center_bin: seed_peak}
+    queue = [center_bin]
+    members = [(center_bin, 0, center_row, center_col,
+                seed_peak["x"], seed_peak["y"], seed_peak)]
+    peak_cache = {}
+    while queue:
+        if cancelled and cancelled():
+            return None
+        bin_key = queue.pop(0)
+        row, col = (int(part) for part in bin_key.split("_"))
+        reference = accepted[bin_key]
+        for dr in (-1, 0, 1):
+            for dc in (-1, 0, 1):
+                if dr == 0 and dc == 0:
+                    continue
+                if cancelled and cancelled():
+                    return None
+                next_row, next_col = row + dr, col + dc
+                if max_radius is not None and max(abs(next_row - center_row),
+                                                  abs(next_col - center_col)) > max_radius:
+                    continue
+                next_key = f"{next_row}_{next_col}"
+                if next_key in accepted:
+                    continue
+                if next_key not in peak_cache:
+                    peak_cache[next_key] = load_peaks(next_key)
+                candidates = peak_cache[next_key]
+                if candidates is None:
+                    continue
+                matches = [peak for peak in candidates
+                           if peak.get("label") == seed_peak.get("label") and
+                           np.hypot(peak["x"] - reference["x"],
+                                    peak["y"] - reference["y"]) <= link_tolerance]
+                if not matches:
+                    continue
+                match = max(matches, key=lambda peak: peak["snr"])
+                accepted[next_key] = match
+                members.append((next_key, 0, next_row, next_col,
+                                match["x"], match["y"], match))
+                queue.append(next_key)
+    return members
+
+
+def build_explore_feature(members, seed_peak, beam_center):
+    """Characterize spatially expanded members using the viewer feature schema."""
+    bins = {member[0] for member in members}
+    intensities = [member[6]["cleaned_intensity"] for member in members]
+    snrs = [member[6]["snr"] for member in members]
+    xs = [member[4] for member in members]
+    ys = [member[5] for member in members]
+    brightest = int(np.argmax(intensities))
+    detector_x, detector_y = int(np.mean(xs)), int(np.mean(ys))
+    beam_y, beam_x = beam_center
+    chi = np.degrees(np.arctan2(detector_y - beam_y, detector_x - beam_x))
+    return {
+        "reflection": seed_peak["label"],
+        "detector_x": detector_x,
+        "detector_y": detector_y,
+        "peak_intensity": float(max(intensities)),
+        "mean_snr": float(np.mean(snrs)),
+        "n_bins": len(bins),
+        "spatial_extent": sorted(bins),
+        "center_bin": members[brightest][0],
+        "center_row": members[brightest][2],
+        "center_col": members[brightest][3],
+        "intensity_profile": _best_per_bin(members),
+        "chi_deg": round(float(chi), 1),
+        "reason": f"explore: {len(bins)} bins from manual selection",
+        "feature_id": -1,
+    }
 
 
 # ── Phase 4: output ────────────────────────────────────────────────

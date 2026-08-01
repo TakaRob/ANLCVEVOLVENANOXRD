@@ -1,10 +1,8 @@
-"""Reflection sets: JSON data + a generated ``reflections.py`` loader.
+"""Canonical JSON reflection sets with legacy Python import support.
 
-The GUI edits reflection data as JSON (``[{name, two_theta, width}, ...]``) and
-never hand-edits Python. ``reflections.py`` is *generated* from that JSON and is
-what the pipeline imports (it exposes ``degs``, ``deg_labels``, and ``widths``).
-Reflections can be per-scan (different scans, different angles), so both files
-live under ``Metadata/<scan>/`` (or project ``Metadata/`` as the default).
+The GUI and pipeline use JSON data (``[{name, two_theta, width}, ...]``).
+``reflections.py`` generation remains available only for external legacy tools.
+Reflection files can live per scan or at project level.
 """
 
 from __future__ import annotations
@@ -137,7 +135,8 @@ def generate_py(reflections: List[dict], path) -> Path:
 
 
 def save(reflections: List[dict], json_path, py_path=None) -> Path:
-    """Write reflections.json and the sibling reflections.py loader."""
+    """Write canonical JSON and, when requested, a legacy Python loader."""
     jp = write_json(reflections, json_path)
-    generate_py(reflections, py_path or jp.with_suffix(".py"))
+    if py_path is not None:
+        generate_py(reflections, py_path)
     return jp

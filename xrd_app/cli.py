@@ -55,8 +55,7 @@ def init(project_name, scan_number, root):
     # from its own Metadata/ (not the hidden bundled fallback) out of the box.
     from .core import reflections as refl_io
     mdir = DataManager(config=cfg).metadata_dir
-    refl_io.save(refl_io.default_reflections(),
-                 mdir / "reflections.json", mdir / "reflections.py")
+    refl_io.save(refl_io.default_reflections(), mdir / "reflections.json")
 
     click.echo(f"Project '{project_name}' initialized at {cfg.root}")
     click.echo(f"  Reflections: {mdir / 'reflections.json'} "
@@ -80,7 +79,7 @@ def init(project_name, scan_number, root):
 def whole_frame_reflections(scan, project, spacing, use_tth, root):
     """Write a whole-detector "(no reflections)" set as the resolved default.
 
-    Produces an ordinary ``reflections.{json,py}`` whose entries all share one
+    Produces an ordinary ``reflections.json`` whose entries all share one
     label, so ``build_tth_band_masks`` merges them into a single detector-spanning
     band — peaks/shape/territory then search the whole frame. For datasets with no
     known Bragg reflections. Consider ROI → Shape for that workflow too.
@@ -95,7 +94,7 @@ def whole_frame_reflections(scan, project, spacing, use_tth, root):
             tth_map = io.load_tth_map(tth_path)
     refls = refl_io.whole_frame_reflections(tth_map, spacing=spacing)
     mdir = dm.metadata_dir if project else dm.metadata_scan_dir(scan)
-    out = refl_io.save(refls, mdir / "reflections.json", mdir / "reflections.py")
+    out = refl_io.save(refls, mdir / "reflections.json")
     scope = "project default" if project else f"scan {dm.scan_name}"
     click.echo(f"[whole-frame-reflections] wrote {len(refls)} tiles ({scope}) → {out}")
     click.echo(f"  label: {refl_io.WHOLE_FRAME_LABEL} — detector will search the whole frame")
@@ -263,7 +262,7 @@ def detectors(bin_size, kind, root):
         click.echo("No detectors found.")
         return
     click.echo(f"Detectors ({lib_dir}):\n")
-    click.echo(f"  {'bin':>4}  {'f1':>7}  {'f2':>7}  {'src':>8}  name")
+    click.echo(f"  {'bin':>4}  {'f2':>7}  {'f1':>7}  {'src':>8}  name")
     click.echo(f"  {'-'*4}  {'-'*7}  {'-'*7}  {'-'*8}  {'-'*30}")
     for d in sorted(entries, key=lambda d: (
             d.get('bin_size') or '',
@@ -272,7 +271,7 @@ def detectors(bin_size, kind, root):
         f1 = f"{d['holdout_f1']:.4f}" if d.get('holdout_f1') is not None else "—"
         f2 = f"{d['holdout_f2']:.4f}" if d.get('holdout_f2') is not None else "—"
         bin_lbl = d.get('bin_size') or 'any'
-        click.echo(f"  {bin_lbl:>4}  {f1:>7}  {f2:>7}  "
+        click.echo(f"  {bin_lbl:>4}  {f2:>7}  {f1:>7}  "
                    f"{str(d.get('source') or '—'):>8}  {d['name']}")
 
 
@@ -1060,7 +1059,7 @@ def peaks(bin_size, scan, algorithm, snr, workers, out_name, variant, h5_path, t
     from .core import lineage
     result["lineage"] = lineage.peak_lineage(
         scan=dm.scan_name, bin_size=bin_size, algorithm=algo,
-        detector_file=det, snr=snr)
+        detector_file=det, snr=snr, variant=variant)
 
     out = dm.peaks_json(algo, bin_size, scan, variant=variant)
     _write_json(out, result)
@@ -1138,6 +1137,13 @@ def shapes(bin_size, scan, algorithm, from_peaks, peak_algo, link_tolerance, var
     _require(peaks_path, "peaks JSON (run 'xrd-app peaks' first)")
     with open(peaks_path) as f:
         peaks_data = json.load(f)
+    from .core import catalogs
+    try:
+        catalogs.validate_result_identity(
+            peaks_path, expected_scan=dm.scan_name,
+            expected_bin_size=bin_size, expected_variant=variant)
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
 
     tth = dm.tth_map(tth_path)
     refl = dm.reflections(reflections_path)
@@ -1146,6 +1152,11 @@ def shapes(bin_size, scan, algorithm, from_peaks, peak_algo, link_tolerance, var
     for label, p in [("tth", tth), ("reflections", refl), ("grid_mapping", gm),
                      ("shape algorithm", shape)]:
         _require(p, label)
+    try:
+        from .core import io as core_io
+        core_io.validate_grid_mapping_bin_size(gm, bin_size)
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
     algo = Path(shape).stem
 
     # Gridless coordinate linking: augment the grid mapping with true-(X,Y)
@@ -1311,20 +1322,28 @@ def roi_shapes(bin_size, scan, rois, name, preview_output, fast, stride, root):
     gm_path = dm.grid_mapping(bin_size=bin_size, scan=scan)
     for label, path in (("tth", tth), ("grid mapping", gm_path)):
         _require(path, label)
-    gm = io.load_grid_mapping(gm_path)
-    if not Path(h5).exists():
+    try:
+        gm = io.validate_grid_mapping_bin_size(gm_path, bin_size)
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+    if not fast and not Path(h5).exists():
         archive = dm.unbinned_archive_h5(scan=scan)
         click.echo(f"[roi-shapes] {bin_size}x{bin_size} bins are not built; "
                    "building them from the lossless archive/raw frames...")
         io.build_bins(gm, h5, bin_size=bin_size, compression="zstd",
                       log=click.echo, archive=archive if archive.exists() else None)
 
-    source = io.open_bin_source(dm, bin_size, scan)
+    try:
+        source = io.open_bin_source(dm, bin_size, scan, grid_mapping=gm_path)
+    except (FileNotFoundError, ValueError) as exc:
+        raise click.ClickException(f"Cannot open ROI bin source: {exc}") from exc
     try:
         sampled = roi_map.sample_rois(
             source, detector_rois, grid_mapping=gm, metric="integrated",
             fast=fast, stride=stride,
             progress=_make_progress("ROI intensity maps"), log=click.echo)
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
     finally:
         source.close()
     tth_map = io.load_tth_map(tth)
@@ -1333,10 +1352,15 @@ def roi_shapes(bin_size, scan, rois, name, preview_output, fast, stride, root):
         result, "manual ROI", feature_id=index,
         tth_map=tth_map, beam_center=beam_center)
         for index, result in enumerate(sampled, 1)]
+    for feature in features:
+        feature["n_bin_rows"] = int(gm.get("n_bin_rows", 0))
+        feature["n_bin_cols"] = int(gm.get("n_bin_cols", 0))
     preview_result = {
         "kind": "manual_roi_preview",
         "scan": dm.scan_name,
         "bin_size": bin_size,
+        "n_bin_rows": int(gm.get("n_bin_rows", 0)),
+        "n_bin_cols": int(gm.get("n_bin_cols", 0)),
         "approximate": bool(fast and any(r.get("approximate") for r in sampled)),
         "stride": stride if fast else 1,
         "intensity_definition": "total detector counts inside ROI per spatial bin",
@@ -1591,6 +1615,8 @@ def run_combined_cmd(bin_size, scan, algorithm, root):
     are not populated.
     """
     from .core import processing
+    if bin_size != 1:
+        raise click.UsageError("Combined algorithms require --bin-size 1.")
     dm = DataManager(root, scan=scan)
     det = dm.combined_script(algorithm)
     h5 = dm.binned_h5(bin_size)
@@ -1966,8 +1992,21 @@ def combined_device(device_map_path, tracks_path, intensity_key, out_path, root)
     click.echo(f"\nWrote combined device view:\n  {out}\n  {out.with_suffix('.summary.json')}")
 
 
+def _same_grid_lattice(child, source):
+    """Whether two grid mappings share the acquisition and coordinate lattice."""
+    keys = ("coordinate_source", "positions_real", "xrd_files", "frame_map")
+    compared = False
+    for key in keys:
+        if key not in child or key not in source:
+            continue
+        compared = True
+        if child[key] != source[key]:
+            return False
+    return compared
+
+
 def _ensure_1x1_grid_mapping(dm, scan, source_bin_size, log=click.echo):
-    """Build the 1×1 grid mapping if absent, so HD real (x, y) can attach.
+    """Build a lattice-compatible 1×1 mapping so HD real (x, y) can attach.
 
     The HD real-position layer needs a 1×1 grid mapping (cell → raw frame →
     stage (x, y)). It must share the source N×N catalog's lattice — same
@@ -1985,8 +2024,18 @@ def _ensure_1x1_grid_mapping(dm, scan, source_bin_size, log=click.echo):
     from .core import positions as P
 
     gm_path = dm.grid_mapping(bin_size=1, scan=scan)
+    nxn_path = dm.grid_mapping(bin_size=source_bin_size, scan=scan)
+    source_grid = None
+    if nxn_path and Path(nxn_path).exists():
+        with open(nxn_path) as f:
+            source_grid = json.load(f)
     if gm_path and Path(gm_path).exists():
-        return True  # respect an existing / regridded / variant mapping
+        with open(gm_path) as f:
+            child_grid = json.load(f)
+        if source_bin_size == 1 or (source_grid and _same_grid_lattice(child_grid, source_grid)):
+            return True
+        log(f"[hd-device-map] existing 1x1 grid {gm_path} does not match the "
+            f"{source_bin_size}x{source_bin_size} source lattice; rebuilding it.")
 
     try:
         scan_no = _require_scan_no(dm)
@@ -2018,11 +2067,7 @@ def _ensure_1x1_grid_mapping(dm, scan, source_bin_size, log=click.echo):
                 return False
 
         # Match the source N×N catalog's lattice so sub-bin keys align.
-        nxn_path = dm.grid_mapping(bin_size=source_bin_size, scan=scan)
-        coordinate_source = None
-        if nxn_path and Path(nxn_path).exists():
-            with open(nxn_path) as f:
-                coordinate_source = json.load(f).get("coordinate_source")
+        coordinate_source = (source_grid or {}).get("coordinate_source")
         deskew = io.deskew_method_for_source(coordinate_source)
 
         gm_path.parent.mkdir(parents=True, exist_ok=True)
@@ -2081,6 +2126,11 @@ def hd_device_map(bin_size, scan, catalog, win, max_cells, out_name, root):
         cat_path = catalogs.default_feature_source(dm.results_dir(scan), bin_size)
     _require(cat_path, f"{bin_size}×{bin_size} feature catalog "
                        "(run 'xrd-app shapes' first, or pass --catalog)")
+    try:
+        catalogs.validate_result_identity(
+            cat_path, expected_scan=dm.scan_name, expected_bin_size=bin_size)
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
 
     features, _ = catalogs.load_features_any(cat_path)
     if not features:

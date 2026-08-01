@@ -27,6 +27,7 @@ import json
 import os
 import re
 from pathlib import Path
+from typing import NamedTuple
 
 from .io import atomic_write_json
 
@@ -119,14 +120,86 @@ def has_lineage(path, results_dir=None) -> bool:
 
 # ── bin + cross-bin identity ───────────────────────────────────────
 def catalog_bin(path, results_dir=None) -> "int | None":
-    """Bin size for a catalog — filename first (cheap, reliable), lineage fallback."""
+    """Bin size for a catalog, preferring embedded/manifest lineage."""
+    lin = read_lineage(path, results_dir)
+    if isinstance(lin, dict) and lin.get("bin_size") is not None:
+        return lin["bin_size"]
+    data = _load_json(path)
+    if isinstance(data, dict) and data.get("bin_size") is not None:
+        return data["bin_size"]
     info = parse_name(Path(path).name)
-    if info and info.get("bin") is not None:
-        return info["bin"]
+    return info.get("bin") if info else None
+
+
+_IDENTITY_UNSET = object()
+
+
+def validate_result_identity(path, expected_scan=None, expected_bin_size=None,
+                             expected_variant=_IDENTITY_UNSET, results_dir=None) -> dict:
+    """Reject known scan/bin/variant mismatches for a result artifact."""
+    data = _load_json(path)
+    lin = read_lineage(path, results_dir)
+    metadata = lin if isinstance(lin, dict) else (data if isinstance(data, dict) else {})
+    info = parse_name(Path(path).name) or {}
+    actual_scan = metadata.get("scan")
+    if actual_scan is None and isinstance(data, dict):
+        actual_scan = data.get("scan")
+    if actual_scan is None:
+        parent = Path(path).parent.name
+        actual_scan = parent if re.fullmatch(r"Scan_\d+", parent, re.IGNORECASE) else None
+    actual_bin = metadata.get("bin_size")
+    if actual_bin is None and isinstance(data, dict):
+        actual_bin = data.get("bin_size")
+    if actual_bin is None:
+        actual_bin = info.get("bin")
+    actual_variant = catalog_variant(path, results_dir)
+
+    def _scan_number(value):
+        match = re.search(r"(\d+)$", str(value)) if value is not None else None
+        return int(match.group(1)) if match else value
+
+    mismatches = []
+    if (expected_scan is not None and actual_scan is not None
+            and _scan_number(actual_scan) != _scan_number(expected_scan)):
+        mismatches.append(f"scan {actual_scan!r} != {expected_scan!r}")
+    if (expected_bin_size is not None and actual_bin is not None
+            and int(actual_bin) != int(expected_bin_size)):
+        mismatches.append(f"bin {actual_bin}x{actual_bin} != "
+                          f"{expected_bin_size}x{expected_bin_size}")
+    if expected_variant is not _IDENTITY_UNSET and actual_variant != expected_variant:
+        expected_label = "plain" if expected_variant is None else repr(expected_variant)
+        mismatches.append(f"variant {actual_variant!r} != {expected_label}")
+    if mismatches:
+        raise ValueError(f"Artifact identity mismatch for {path}: " + ", ".join(mismatches))
+    return {"scan": actual_scan, "bin_size": actual_bin, "variant": actual_variant}
+
+
+def catalog_variant(path, results_dir=None):
+    """Coordinate variant for a catalog, preferring its embedded lineage.
+
+    Shape lineage inherits the variant of its upstream peaks. Older catalogs do
+    not record a variant, so their filename tag remains the fallback.
+    """
     lin = read_lineage(path, results_dir)
     if isinstance(lin, dict):
-        return lin.get("bin_size")
-    return None
+        for source in (lin, lin.get("peak_source")):
+            if isinstance(source, dict):
+                variant = source.get("variant") or source.get("tag")
+                if variant:
+                    return str(variant)
+        peak_file = lin.get("peak_source_file")
+        if peak_file:
+            source_info = parse_name(peak_file) or {}
+            if source_info.get("tag"):
+                return source_info["tag"]
+    info = parse_name(Path(path).name) or {}
+    tag = info.get("tag") or None
+    # Coordinate linking changes shape connectivity, not the source grid/H5.
+    if tag == "coord":
+        return None
+    if tag and tag.endswith("_coord"):
+        return tag[:-len("_coord")]
+    return tag
 
 
 def lineage_key(path):
@@ -371,29 +444,84 @@ def _grid_bin_keys(grid_mapping_path):
     return set()
 
 
-def best_grid_mapping(candidates, feature_catalog_path, default=None):
-    """The grid mapping whose bins best cover a feature catalog's bins.
+class GridCoverage(NamedTuple):
+    path: "Path | None"
+    matched: int
+    total: int
 
-    ``candidates`` is an ordered list of grid_mapping_*.json paths (put the
-    default first so it wins ties). Returns ``default`` when nothing covers the
-    catalog's bins — e.g. a catalog built on a non-default coordinate grid is
-    matched to the grid that actually contains its bins.
+
+class CatalogGridMismatch(ValueError):
+    """A nonempty catalog is not fully covered by a candidate grid mapping."""
+
+
+def best_grid_mapping(candidates, feature_catalog_path, default=None,
+                      coverage=False, strict=True):
+    """Return the grid mapping whose bins best cover a feature catalog.
+
+    ``coverage=True`` returns :class:`GridCoverage`. A nonempty catalog without
+    full coverage raises :class:`CatalogGridMismatch` by default; pass
+    ``strict=False`` only for callers intentionally inspecting partial coverage.
     """
     cbins = catalog_bin_keys(feature_catalog_path)
     if not cbins:
-        return default
-    best, best_score = default, 0
+        result = GridCoverage(Path(default) if default is not None else None, 0, 0)
+        return result if coverage else result.path
+    best, best_score = (Path(default) if default is not None else None), 0
     target = len(cbins)
     for gm in candidates:
         keys = _grid_bin_keys(gm)
         if not keys:
             continue
         score = sum(1 for b in cbins if b in keys)
-        if score > best_score:                 # strict → default (first) wins ties
+        if score > best_score:
             best, best_score = Path(gm), score
-        if best_score == target:               # full coverage — stop early
+        if best_score == target:
             break
-    return best if best_score > 0 else default
+    if best_score < target and strict:
+        names = ", ".join(Path(p).name for p in candidates) or "(none)"
+        raise CatalogGridMismatch(
+            f"Catalog {Path(feature_catalog_path).name} references {target} bin(s), "
+            f"but the best candidate covers only {best_score}/{target}: {names}")
+    result = GridCoverage(best, best_score, target)
+    return result if coverage else result.path
+
+
+class CatalogSources(NamedTuple):
+    grid_mapping: Path
+    bins_h5: Path
+    variant: "str | None"
+    matched: int
+    total: int
+
+
+def resolve_catalog_sources(dm, catalog_path, bin_size=None, scan=None):
+    """Resolve one catalog to a faithful grid/H5 pair for its scan and variant."""
+    results_dir = dm.results_dir(scan)
+    bin_size = bin_size or catalog_bin(catalog_path, results_dir)
+    if bin_size is None:
+        raise ValueError(f"Cannot determine bin size for catalog {Path(catalog_path).name}")
+    expected_scan = dm.scan_name_of(scan) if scan is not None else dm.scan_name
+    variant = catalog_variant(catalog_path, results_dir)
+    validate_result_identity(
+        catalog_path, expected_scan=expected_scan, expected_bin_size=bin_size,
+        expected_variant=variant, results_dir=results_dir)
+    if variant:
+        grid = dm.grid_mapping(bin_size=bin_size, scan=scan, variant=variant)
+        if not grid.exists():
+            raise FileNotFoundError(
+                f"Catalog {Path(catalog_path).name} requires variant {variant!r}, "
+                f"but its grid mapping does not exist: {grid}")
+        candidates = [grid]
+    else:
+        mdir = dm.metadata_scan_dir(scan)
+        default = dm.grid_mapping(bin_size=bin_size, scan=scan)
+        tagged = sorted(p for p in mdir.glob(
+            f"grid_mapping_{bin_size}x{bin_size}_*.json") if p != default)
+        candidates = [default] + tagged
+        grid = default
+    cov = best_grid_mapping(candidates, catalog_path, default=grid, coverage=True)
+    return CatalogSources(cov.path, dm.bins_h5(bin_size, scan=scan, variant=variant),
+                          variant, cov.matched, cov.total)
 
 
 def load_features_any(path):

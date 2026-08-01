@@ -569,11 +569,10 @@ class DataManager:
         return proj if proj.exists() else self._asset("tth.tiff")
 
     def reflection_source(self, scan: object = None) -> Optional[Path]:
-        """The user-selected reflections source for this scan, if any.
+        """The user-selected JSON or legacy Python reflection source, if any.
 
         Stored per scan under ``data_sources.reflections_by_scan`` and chosen via
-        the host header "Reflections:" selector or Setup → Load reflections…. The
-        value points at a ``reflections.py`` (its sibling ``.json`` is derived).
+        the host header "Reflections:" selector or Setup → Load reflections….
         """
         name = self._scan(scan)
         by_scan = self.config.get("data_sources", "reflections_by_scan", default={})
@@ -598,21 +597,30 @@ class DataManager:
         self.set_reflection_source(None, scan)
 
     def reflections_json(self, scan: object = None) -> Path:
-        """Reflection data (JSON): per-scan selection -> per-scan -> project."""
+        """Resolve JSON data for editors, independent of legacy pipeline modules."""
         chosen = self.reflection_source(scan)
         if chosen is not None:
-            return chosen.with_suffix(".json")
+            json_path = chosen if chosen.suffix.lower() == ".json" else chosen.with_suffix(".json")
+            if json_path.exists():
+                return json_path
+        configured = self.config.get("data_sources", "reflections")
+        if configured:
+            path = self._abs(configured)
+            json_path = path if path.suffix.lower() == ".json" else path.with_suffix(".json")
+            if json_path.exists():
+                return json_path
         per_scan = self.metadata_scan_dir(scan) / "reflections.json"
         if per_scan.exists():
             return per_scan
-        return self.metadata_dir / "reflections.json"
+        project = self.metadata_dir / "reflections.json"
+        return project if project.exists() else self._asset("reflections.json")
 
     def reflections(self, override: Optional[str] = None, scan: object = None) -> Path:
-        """Reflections module (.py loader) the pipeline imports.
+        """Resolve reflections with JSON canonical and Python compatibility.
 
-        override -> per-scan selection -> config -> per-scan
-        Metadata/<scan>/reflections.py -> project Metadata/reflections.py ->
-        bundled asset.
+        Explicit/per-scan/configured sources retain their selected format. Local
+        resolution prefers per-scan JSON, project JSON, then equivalent legacy
+        Python files, followed by the bundled JSON default.
         """
         if override:
             return self._abs(override)
@@ -622,17 +630,23 @@ class DataManager:
         configured = self.config.get("data_sources", "reflections")
         if configured:
             return self._abs(configured)
-        per_scan = self.metadata_scan_dir(scan) / "reflections.py"
-        if per_scan.exists():
-            return per_scan
-        proj = self.metadata_dir / "reflections.py"
-        return proj if proj.exists() else self._asset("reflections.py")
+        scan_dir = self.metadata_scan_dir(scan)
+        candidates = [
+            scan_dir / "reflections.json",
+            self.metadata_dir / "reflections.json",
+            scan_dir / "reflections.py",
+            self.metadata_dir / "reflections.py",
+        ]
+        for path in candidates:
+            if path.exists():
+                return path
+        return self._asset("reflections.json")
 
     def grid_mapping(self, override: Optional[str] = None, bin_size: Optional[int] = None,
                      scan: object = None, variant: Optional[str] = None) -> Path:
         if override:
             return self._abs(override)
-        if not variant:
+        if bin_size is None and scan is None and variant is None:
             configured = self.config.get("data_sources", "grid_mapping")
             if configured:
                 return self._abs(configured)
@@ -762,16 +776,18 @@ class DataManager:
             out.append(d)
         return out
 
-    def best_detector(self, bin_size: int) -> Optional[Path]:
-        """Path to the highest-scoring bundled detector for ``bin_size``.
+    @staticmethod
+    def _detector_supports_bin(entry: dict, bin_size: int) -> bool:
+        declared = entry.get("bin_size")
+        return declared is None or declared == f"{bin_size}x{bin_size}"
 
-        Only binned detectors are eligible — per-frame (unbinned) detectors run
-        through a different path and would crash the binned ``peaks`` pipeline.
+    def best_detector(self, bin_size: int) -> Optional[Path]:
+        """Path to the highest-scoring detector compatible with ``bin_size``.
+
+        Only an exact declared bin size or an explicitly generic (null) catalog
+        entry is eligible. Per-frame detectors use a different pipeline.
         """
-        def binned(dets):
-            return [d for d in dets if d.get("pipeline") != "perframe"]
-        candidates = binned(self.list_detectors(bin_size)) or \
-            binned(self.list_detectors(3)) or binned(self.list_detectors())
+        candidates = self.list_detectors(bin_size)
         if not candidates:
             return None
         candidates.sort(
@@ -782,35 +798,63 @@ class DataManager:
         return Path(candidates[0]["_path"])
 
     def resolve_detector_name(self, name: str, bin_size: Optional[int] = None) -> Optional[Path]:
-        """Resolve a bare detector name from the library."""
+        """Resolve a compatible bare detector name from the library."""
         stem = name[:-3] if name.endswith(".py") else name
         matches = [d for d in self.list_detectors() if d["name"] == stem]
-        if bin_size:
-            sized = [d for d in matches if d.get("bin_size") == f"{bin_size}x{bin_size}"]
-            matches = sized or matches
+        if bin_size is not None:
+            matches = [d for d in matches
+                       if self._detector_supports_bin(d, bin_size)]
         if matches:
             return Path(matches[0]["_path"])
         return None
 
+    def _catalog_entry_for_path(self, path: Path) -> Optional[dict]:
+        """Return metadata only when ``path`` is an actual cataloged script."""
+        target = path.resolve()
+        for entry in self.load_detector_catalog().get("detectors", []):
+            catalog_path = entry.get("_path")
+            if catalog_path and Path(catalog_path).resolve() == target:
+                return entry
+        return None
+
+    def _checked_detector_path(self, value: str, bin_size: int) -> Path:
+        path = self._abs(value)
+        entry = self._catalog_entry_for_path(path) if path.exists() else None
+        if entry is None and not path.exists():
+            stem = value[:-3] if value.endswith(".py") else value
+            matches = [d for d in self.list_detectors() if d["name"] == stem]
+            compatible = [d for d in matches
+                          if self._detector_supports_bin(d, bin_size)]
+            if compatible:
+                return Path(compatible[0]["_path"])
+            if matches:
+                entry = matches[0]
+        if entry is not None and not self._detector_supports_bin(entry, bin_size):
+            raise ValueError(
+                f"Detector {entry.get('name')!r} declares bin_size "
+                f"{entry.get('bin_size')!r}; requested {bin_size}x{bin_size}")
+        return path
+
     def detector_script(self, override: Optional[str] = None,
                         bin_size: Optional[int] = None) -> Path:
-        """Resolve the detector script.
+        """Resolve a detector with explicit catalog bin compatibility.
 
-        Precedence: explicit path/name -> config -> best bundled detector.
+        Precedence: explicit path/name -> config -> best cataloged detector.
+        Uncataloged external scripts are treated as generic because they have no
+        declared bin-size constraint.
         """
+        if bin_size is None:
+            raise ValueError("bin_size is required to resolve a detector script")
         if override:
-            p = Path(override)
-            if p.exists():
-                return self._abs(override)
-            byname = self.resolve_detector_name(override, bin_size)
-            if byname:
-                return byname
-            return self._abs(override)
+            return self._checked_detector_path(override, bin_size)
         configured = self.config.get("data_sources", "detector_script")
         if configured:
-            return self._abs(configured)
-        bundled = self.best_detector(bin_size or 3)
-        return bundled if bundled else (self.detectors_dir() / "detector.py")
+            return self._checked_detector_path(configured, bin_size)
+        bundled = self.best_detector(bin_size)
+        if bundled is None:
+            raise FileNotFoundError(
+                f"No detector supports requested bin size {bin_size}x{bin_size}")
+        return bundled
 
     # ----- combined algorithm library (peak + shape in one pass) -------
     def list_combined(self) -> list:

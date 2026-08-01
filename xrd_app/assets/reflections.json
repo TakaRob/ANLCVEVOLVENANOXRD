@@ -1,0 +1,57 @@
+[
+  {
+    "name": "PbI2",
+    "two_theta": 6.81319,
+    "width": 0.4
+  },
+  {
+    "name": "(001)",
+    "two_theta": 7.51422,
+    "width": 0.4
+  },
+  {
+    "name": "(011)",
+    "two_theta": 10.61748,
+    "width": 0.4
+  },
+  {
+    "name": "(111)",
+    "two_theta": 13.00831,
+    "width": 0.4
+  },
+  {
+    "name": "(002)",
+    "two_theta": 15.01266,
+    "width": 0.4
+  },
+  {
+    "name": "ITO",
+    "two_theta": 16.07224,
+    "width": 0.4
+  },
+  {
+    "name": "(012)",
+    "two_theta": 16.79944,
+    "width": 0.4
+  },
+  {
+    "name": "(112)",
+    "two_theta": 18.42549,
+    "width": 0.4
+  },
+  {
+    "name": "21.30",
+    "two_theta": 21.29655,
+    "width": 0.4
+  },
+  {
+    "name": "22.60",
+    "two_theta": 22.59817,
+    "width": 0.4
+  },
+  {
+    "name": "26.16",
+    "two_theta": 26.16205,
+    "width": 0.4
+  }
+]

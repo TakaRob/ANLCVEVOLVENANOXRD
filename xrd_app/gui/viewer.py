@@ -140,7 +140,7 @@ def configure(project_root=".", bin_size=3, scan=None):
     _BIN_SIZE = bin_size
     RESULTS_DIR = _DM.results_dir()
     HOLDOUT_DIR = _DM.holdout_dir
-    DETECTOR_PATH = _DM.detector_script()
+    DETECTOR_PATH = _DM.detector_script(bin_size=bin_size)
     H5_PATH = _DM.bins_h5(bin_size)
 
 
@@ -675,73 +675,41 @@ class _ExpansionWorker(QThread):
         self._seed_peak = seed_peak
 
     def run(self):
-        from ..core.processing import detect_peaks_with_intensity, _best_per_bin
+        from ..core.processing import (
+            build_explore_feature, detect_peaks_with_intensity,
+            expand_peak_spatially,
+        )
 
-        v = self._viewer
-        seed = self._seed_peak
-        parts = self._bin_key.split("_")
-        center_row, center_col = int(parts[0]), int(parts[1])
-        center_bk = self._bin_key
+        viewer = self._viewer
 
-        h5 = v._get_source()
-        accepted = {center_bk: seed}
-        peak_cache = {}
-        queue = [center_bk]
-        members = [(center_bk, 0, center_row, center_col,
-                    seed["x"], seed["y"], seed)]
+        def load_peaks(bin_key):
+            with viewer.h5_lock:
+                source = viewer._get_source()
+                if bin_key not in source:
+                    return None
+                image = np.clip(source[bin_key][:].astype(np.float64), 0, 1e9)
+            peaks, cleaned = detect_peaks_with_intensity(
+                image, viewer._tth_map, viewer._ref_degs,
+                viewer._ref_labels, viewer._tth_data, viewer._det)
+            for peak in peaks:
+                radius = 3
+                y0 = max(0, peak["y"] - radius)
+                y1 = min(cleaned.shape[0], peak["y"] + radius + 1)
+                x0 = max(0, peak["x"] - radius)
+                x1 = min(cleaned.shape[1], peak["x"] + radius + 1)
+                peak["cleaned_intensity"] = float(np.max(cleaned[y0:y1, x0:x1]))
+            return peaks
 
-        while queue:
-            if self.isInterruptionRequested():
-                return
-            bk = queue.pop(0)
-            br, bc = int(bk.split("_")[0]), int(bk.split("_")[1])
-            reference = accepted[bk]
-            for dr in [-1, 0, 1]:
-                for dc in [-1, 0, 1]:
-                    if self.isInterruptionRequested():
-                        return
-                    if dr == 0 and dc == 0:
-                        continue
-                    nr, nc = br + dr, bc + dc
-                    nbk = f"{nr}_{nc}"
-                    if nbk in accepted:
-                        continue
-                    if nbk not in peak_cache:
-                        with v.h5_lock:
-                            if nbk not in h5:
-                                continue
-                            image = np.clip(h5[nbk][:].astype(np.float64), 0, 1e9)
-
-                        peaks, cleaned = detect_peaks_with_intensity(
-                            image, v._tth_map, v._ref_degs,
-                            v._ref_labels, v._tth_data, v._det)
-
-                        for p in peaks:
-                            r = 3
-                            py0 = max(0, p['y'] - r)
-                            py1 = min(cleaned.shape[0], p['y'] + r + 1)
-                            px0 = max(0, p['x'] - r)
-                            px1 = min(cleaned.shape[1], p['x'] + r + 1)
-                            p['cleaned_intensity'] = float(
-                                np.max(cleaned[py0:py1, px0:px1]))
-                        peak_cache[nbk] = peaks
-
-                    match = None
-                    for p in peak_cache[nbk]:
-                        d = ((p["x"] - reference["x"])**2 +
-                             (p["y"] - reference["y"])**2) ** 0.5
-                        if d <= self.LINK_TOLERANCE and p["label"] == seed["label"]:
-                            if match is None or p["snr"] > match["snr"]:
-                                match = p
-                    if match:
-                        accepted[nbk] = match
-                        members.append((nbk, 0, nr, nc,
-                                        match["x"], match["y"], match))
-                        queue.append(nbk)
-
-        feat = v._build_explore_feature(members, seed)
-        feat["_members"] = members
-        self.finished.emit(self._job_id, feat, members)
+        members = expand_peak_spatially(
+            self._bin_key, self._seed_peak, load_peaks,
+            link_tolerance=self.LINK_TOLERANCE,
+            cancelled=self.isInterruptionRequested)
+        if members is None:
+            return
+        feature = build_explore_feature(members, self._seed_peak,
+                                        viewer._beam_center)
+        feature["_members"] = members
+        self.finished.emit(self._job_id, feature, members)
 
 
 class _RawIntensityWorker(QThread):
@@ -790,6 +758,8 @@ class _RawIntensityWorker(QThread):
 # ── Main Window ────────────────────────────────────────────────────
 
 class FeatureViewer(QMainWindow):
+
+    bin_size_changed = pyqtSignal(int)
 
     def __init__(self, embedded=False):
         super().__init__()
@@ -961,22 +931,17 @@ class FeatureViewer(QMainWindow):
             self._tth_bin_indices, self._tth_radial_counts = compute_tth_binning(self._tth_map)
 
     def _resolve_grid_mapping(self):
-        """Grid mapping matching the selected feature catalog (the grid whose
-        bins actually contain the catalog's bins); falls back to the per-bin
-        default. This is what lets a catalog built on a non-default coordinate
-        grid resolve its raw frames instead of reporting 'bin not found'."""
-        default = _DM.grid_mapping(bin_size=_BIN_SIZE)
-        if not self._sel_feature_catalog or RESULTS_DIR is None:
+        """Grid mapping matching the selected catalog's scan/bin/variant."""
+        default = _DM.grid_mapping(bin_size=self._bin_size, scan=self._scan)
+        self._catalog_variant = None
+        selected = self._sel_feature_catalog or self._sel_scan_catalog
+        if not selected or RESULTS_DIR is None:
             return default
-        cat = Path(RESULTS_DIR) / self._sel_feature_catalog
-        try:
-            cand_dir = _DM.metadata_scan_dir(self._scan)
-            tagged = sorted(p for p in cand_dir.glob(
-                f"grid_mapping_{_BIN_SIZE}x{_BIN_SIZE}*.json")
-                if Path(p) != Path(default))
-            return catalogs.best_grid_mapping([default] + tagged, cat, default=default)
-        except Exception:
-            return default
+        cat = Path(RESULTS_DIR) / selected
+        resolved = catalogs.resolve_catalog_sources(
+            _DM, cat, bin_size=self._bin_size, scan=self._scan)
+        self._catalog_variant = resolved.variant
+        return resolved.grid_mapping
 
     def _build_territory_remap(self, gm):
         """Map each territorial cell key → integer (row, col) for grid placement.
@@ -1037,10 +1002,8 @@ class FeatureViewer(QMainWindow):
         return f"{row}_{col}"
 
     def _bin_variant(self):
-        """Bins-file variant for the raw detector source (``"territory"`` when a
-        territorial mapping is loaded, else ``None``). Territorial frames live in
-        ``xrd_1x1_bins_territory.h5`` keyed by ``"<tid>_0"``."""
-        return "territory" if getattr(self, "_terr_rc", None) is not None else None
+        """Bins-file variant matching the selected catalog and grid mapping."""
+        return getattr(self, "_catalog_variant", None)
 
     def _get_source(self):
         """Lazily open the per-bin image source (built h5, or raw frames)."""
@@ -1186,20 +1149,11 @@ class FeatureViewer(QMainWindow):
             return None, None
         cat = Path(RESULTS_DIR) / self._sel_sub_catalog
         try:
-            mdir = _DM.metadata_scan_dir(self._scan)
-        except Exception:
+            resolved = catalogs.resolve_catalog_sources(
+                _DM, cat, bin_size=1, scan=self._scan)
+        except FileNotFoundError:
             return None, None
-        plain = mdir / "grid_mapping_1x1.json"
-        terr = mdir / "grid_mapping_1x1_territory.json"
-        cands = [p for p in (plain, terr) if Path(p).exists()]
-        if not cands:
-            return None, None
-        try:
-            best = catalogs.best_grid_mapping(cands, cat, default=cands[0])
-        except Exception:
-            best = cands[0]
-        variant = "territory" if str(best).endswith("_territory.json") else None
-        return best, variant
+        return resolved.grid_mapping, resolved.variant
 
     def _build_sub_territory_remap(self):
         """Set ``_sub_variant`` / ``_sub_terr_rc`` / ``_sub_rc_terr`` for the
@@ -1667,6 +1621,9 @@ class FeatureViewer(QMainWindow):
             if src in peaks:
                 self._sel_scan_catalog = src
 
+    def current_bin_size(self):
+        return self._selected_bin_size()
+
     def _selected_bin_size(self):
         """The bin size currently chosen in the Bin dropdown (may differ from the
         loaded bin until Load is pressed). Distinct from ``self._selected_bin``,
@@ -1759,9 +1716,11 @@ class FeatureViewer(QMainWindow):
         if self._sel_feature_catalog not in names:
             self._sel_feature_catalog = feats[0].name if feats else None
         self._populate_catalog_combos()
-        if self._selected_bin_size() != self._bin_size:
-            b = self._selected_bin_size()
-            self.scan_status.setText(f"Bin {b}×{b} selected — press Load to view")
+        selected = self._selected_bin_size()
+        if selected != self._bin_size:
+            self.scan_status.setText(
+                f"Bin {selected}×{selected} selected — press Load to view")
+        self.bin_size_changed.emit(selected)
 
     def _on_feature_catalog_changed(self, _idx):
         """Pick a feature catalog → print its peak-finding lineage. Apply live
@@ -4306,102 +4265,6 @@ class FeatureViewer(QMainWindow):
             self.info_label.setText(f"{n_running} expansion(s) still running...")
         else:
             self.info_label.setText("All expansions complete.")
-
-    LINK_TOLERANCE = 5
-
-    def _expand_peak_spatially(self, center_row, center_col, seed_peak):
-        from ..core.processing import detect_peaks_with_intensity
-
-        center_bk = f"{center_row}_{center_col}"
-        visited = {center_bk}
-        queue = [center_bk]
-        members = [(center_bk, 0, center_row, center_col,
-                     seed_peak["x"], seed_peak["y"], seed_peak)]
-        target_x, target_y = seed_peak["x"], seed_peak["y"]
-        max_radius = 10
-
-        while queue:
-            bk = queue.pop(0)
-            br, bc = int(bk.split("_")[0]), int(bk.split("_")[1])
-
-            for dr in [-1, 0, 1]:
-                for dc in [-1, 0, 1]:
-                    if dr == 0 and dc == 0:
-                        continue
-                    nr, nc = br + dr, bc + dc
-                    nbk = f"{nr}_{nc}"
-                    with self.h5_lock:
-                        h5 = self._get_source()
-                        if nbk in visited or nbk not in h5:
-                            continue
-                        dist = max(abs(nr - center_row), abs(nc - center_col))
-                        if dist > max_radius:
-                            continue
-                        visited.add(nbk)
-                        image = self._load_raw_image(nbk)
-                    peaks, cleaned = detect_peaks_with_intensity(
-                        image, self._tth_map, self._ref_degs,
-                        self._ref_labels, self._tth_data, self._det
-                    )
-
-                    for p in peaks:
-                        r = 3
-                        py0 = max(0, p['y'] - r)
-                        py1 = min(cleaned.shape[0], p['y'] + r + 1)
-                        px0 = max(0, p['x'] - r)
-                        px1 = min(cleaned.shape[1], p['x'] + r + 1)
-                        p['cleaned_intensity'] = float(
-                            np.max(cleaned[py0:py1, px0:px1]))
-
-                    match = None
-                    for p in peaks:
-                        d = ((p["x"] - target_x)**2 +
-                             (p["y"] - target_y)**2) ** 0.5
-                        if d <= self.LINK_TOLERANCE and p["label"] == seed_peak["label"]:
-                            if match is None or p["snr"] > match["snr"]:
-                                match = p
-                    if match:
-                        members.append((nbk, 0, nr, nc,
-                                        match["x"], match["y"], match))
-                        queue.append(nbk)
-
-        return members
-
-    def _build_explore_feature(self, members, seed_peak):
-        from ..core.processing import _best_per_bin
-
-        bins_in_feature = set(m[0] for m in members)
-        intensities = [m[6]["cleaned_intensity"] for m in members]
-        snrs = [m[6]["snr"] for m in members]
-        xs = [m[4] for m in members]
-        ys = [m[5] for m in members]
-        rows = [m[2] for m in members]
-        cols = [m[3] for m in members]
-
-        imax = int(np.argmax(intensities))
-        det_x = int(np.mean(xs))
-        det_y = int(np.mean(ys))
-
-        by, bx = self._beam_center
-        chi = float(np.degrees(np.arctan2(det_y - by, det_x - bx)))
-
-        feat = {
-            "reflection": seed_peak["label"],
-            "detector_x": det_x,
-            "detector_y": det_y,
-            "peak_intensity": float(max(intensities)),
-            "mean_snr": float(np.mean(snrs)),
-            "n_bins": len(bins_in_feature),
-            "spatial_extent": sorted(bins_in_feature),
-            "center_bin": members[imax][0],
-            "center_row": rows[imax],
-            "center_col": cols[imax],
-            "intensity_profile": _best_per_bin(members),
-            "chi_deg": round(chi, 1),
-            "reason": f"explore: {len(bins_in_feature)} bins from manual selection",
-            "feature_id": -1,
-        }
-        return feat
 
     def _on_tth_overlay_changed(self, state):
         self._show_tth_overlay = bool(state)

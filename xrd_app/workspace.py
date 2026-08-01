@@ -129,8 +129,7 @@ def create_project(name: str, workspace: Optional[Path] = None,
     try:
         from .core import reflections as refl_io
         mdir = DataManager(config=cfg).metadata_dir
-        refl_io.save(refl_io.default_reflections(),
-                     mdir / "reflections.json", mdir / "reflections.py")
+        refl_io.save(refl_io.default_reflections(), mdir / "reflections.json")
     except Exception:
         pass
 

@@ -38,13 +38,12 @@ from __future__ import annotations
 
 import json
 import math
-from collections import defaultdict
 from pathlib import Path
 from typing import Optional
 
 import numpy as np
 
-from . import catalogs
+from . import catalogs, orientation
 from .territory import _polygon_area
 
 # Internal row keys (stable — used for CSV columns and dict access). The
@@ -131,50 +130,22 @@ def _feature_area(f) -> float:
     return float(f.get("n_bins") or len(f.get("intensity_profile") or {}) or 1)
 
 
-def _kde_wrapped(chi, w, bandwidth, grid):
-    """Circular Gaussian KDE over χ (degrees) — wrapped Δχ, area-weighted."""
+def _kde_wrapped(chi, weights, bandwidth, grid):
+    """Circular Gaussian KDE over chi (degrees), area-weighted."""
     kde = np.zeros_like(grid, dtype=float)
-    for c, wi in zip(chi, w):
-        diff = (grid - c + 180.0) % 360.0 - 180.0
-        kde += wi * np.exp(-0.5 * (diff / bandwidth) ** 2)
+    for value, weight in zip(chi, weights):
+        diff = (grid - value + 180.0) % 360.0 - 180.0
+        kde += weight * np.exp(-0.5 * (diff / bandwidth) ** 2)
     return kde
 
 
 def _chi_clusters(feats, bandwidth):
-    """Area-weighted χ clusters split at KDE valleys (port of
-    ``orientation.cluster_features_by_chi``). Returns ``[{features, area}]``."""
-    from scipy.signal import find_peaks
-
-    items = [(_wrap180([f["chi_deg"]])[0], f)
-             for f in feats if f.get("chi_deg") is not None]
-    if not items:
-        return []
-    items.sort(key=lambda t: t[0])
-    chis = np.array([t[0] for t in items])
-    ws = np.array([_feature_area(f) for _, f in items], dtype=float)
-    if len(items) < 3:
-        return [{"features": [f for _, f in items], "area": float(ws.sum())}]
-
-    grid = np.linspace(-180, 179, 360)
-    kde = _kde_wrapped(chis, ws, bandwidth, grid)
-    pad = max(4, int(bandwidth * 2))
-    ext = np.concatenate([kde[-pad:], kde, kde[:pad]])
-    vidx, _ = find_peaks(-ext, distance=max(4, int(bandwidth * 1.5)),
-                         prominence=0.3 * kde.max())
-    vidx = vidx - pad
-    vidx = vidx[(vidx >= 0) & (vidx < 360)]
-    if len(vidx) < 2 or kde.max() == 0:
-        return [{"features": [f for _, f in items], "area": float(ws.sum())}]
-
-    vnorm = np.sort((grid[vidx] + 180) % 360)
-    nseg = len(vnorm)
-    groups = defaultdict(list)
-    for c, f in items:
-        cn = (c + 180) % 360
-        idx = int(np.searchsorted(vnorm, cn, side="right")) % nseg
-        groups[idx].append(f)
-    return [{"features": g, "area": sum(_feature_area(f) for f in g)}
-            for g in groups.values() if g]
+    """Area-weighted chi clusters from the shared orientation engine."""
+    clusters, _ = orientation.cluster_features_by_chi(
+        feats, bandwidth=bandwidth, weight_mode="area")
+    return [{"features": cluster["features"],
+             "area": sum(_feature_area(f) for f in cluster["features"])}
+            for cluster in clusters]
 
 
 def _chi_span(chi_vals) -> float:

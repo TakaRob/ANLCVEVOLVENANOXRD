@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PyQt5.QtCore import Qt
+from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtWidgets import (
     QAbstractItemView, QComboBox, QGroupBox, QHBoxLayout, QLabel, QListWidget,
     QListWidgetItem, QPushButton, QSpinBox, QVBoxLayout, QWidget, QSizePolicy,
@@ -39,6 +39,8 @@ _CHAIN_OPTION = "⟵ run peak algorithm above first"
 
 
 class ProgramsTab(QWidget):
+    bin_size_changed = pyqtSignal(int)
+
     def __init__(self, project_root, scan=None, bin_size=3):
         super().__init__()
         self.project_root = str(Path(project_root).resolve())
@@ -298,6 +300,9 @@ class ProgramsTab(QWidget):
             self.bin_combo.addItem("(no bins — create one)")
         self.bin_combo.blockSignals(False)
 
+    def current_bin_size(self):
+        return self.bin_size
+
     def _cur_bin(self):
         try:
             return int(self.bin_combo.currentText().split("x")[0])
@@ -308,6 +313,7 @@ class ProgramsTab(QWidget):
         bs = self._cur_bin()
         if bs is not None:
             self.bin_size = bs
+            self.bin_size_changed.emit(bs)
         self._refresh_algos()
         self._refresh_peak_sources()
         self._refresh_bins_status()

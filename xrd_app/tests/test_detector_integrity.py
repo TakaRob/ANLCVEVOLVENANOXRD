@@ -6,13 +6,13 @@ import pytest
 
 from xrd_app.config import DataManager, format_detector_label
 from xrd_app.core import io, save_algorithm
-from xrd_app.core.processing import REQUIRED_DETECTOR_API
+from xrd_app.core.processing import REQUIRED_DETECTOR_API, load_detector
 
 
 _VALID_DETECTOR = "\n".join(f"def {name}(*args, **kwargs): pass" for name in REQUIRED_DETECTOR_API)
 
 
-def _write_project_detector(root, name, *, f1, f2):
+def _write_project_detector(root, name, *, f1, f2, bin_size=None):
     library = root / "Algorithms" / "PeakAlgorithms"
     library.mkdir(parents=True, exist_ok=True)
     (library / f"{name}.py").write_text(_VALID_DETECTOR)
@@ -20,7 +20,7 @@ def _write_project_detector(root, name, *, f1, f2):
     data = json.loads(catalog.read_text()) if catalog.exists() else {"detectors": []}
     data["detectors"].append({
         "name": name, "file": f"{name}.py", "role": "detector",
-        "bin_size": None, "holdout_f1": f1, "holdout_f2": f2,
+        "bin_size": bin_size, "holdout_f1": f1, "holdout_f2": f2,
     })
     catalog.write_text(json.dumps(data))
 
@@ -48,6 +48,45 @@ def test_best_detector_and_label_are_f2_first(tmp_path):
     }) == "ranked (F2 0.80)"
 
 
+def test_detector_resolution_accepts_exact_and_generic_bins(tmp_path):
+    _write_project_detector(
+        tmp_path, "generic", f1=0.60, f2=0.70, bin_size=None)
+    _write_project_detector(
+        tmp_path, "exact", f1=0.50, f2=0.80, bin_size="3x3")
+    _write_project_detector(
+        tmp_path, "wrong", f1=0.99, f2=0.99, bin_size="5x5")
+    dm = DataManager(tmp_path)
+
+    assert dm.best_detector(3).stem == "exact"
+    assert dm.best_detector(4).stem == "generic"
+    assert dm.detector_script("exact", bin_size=3).stem == "exact"
+    assert dm.detector_script("generic", bin_size=4).stem == "generic"
+
+
+def test_detector_resolution_rejects_declared_wrong_size(tmp_path):
+    _write_project_detector(
+        tmp_path, "only_5x5", f1=0.90, f2=0.90, bin_size="5x5")
+    dm = DataManager(tmp_path)
+    detector = dm.project_algorithms_dir("peak") / "only_5x5.py"
+
+    with pytest.raises(ValueError, match="declares bin_size '5x5'.*3x3"):
+        dm.detector_script("only_5x5", bin_size=3)
+    with pytest.raises(ValueError, match="declares bin_size '5x5'.*3x3"):
+        dm.detector_script(str(detector), bin_size=3)
+
+    dm.config.data.setdefault("data_sources", {})["detector_script"] = str(detector)
+    with pytest.raises(ValueError, match="declares bin_size '5x5'.*3x3"):
+        dm.detector_script(bin_size=3)
+
+
+def test_uncataloged_external_detector_is_generic(tmp_path):
+    external = tmp_path / "external.py"
+    external.write_text(_VALID_DETECTOR)
+
+    assert DataManager(tmp_path).detector_script(
+        str(external), bin_size=4) == external
+
+
 def test_save_algorithm_uses_project_storage_and_is_discoverable(tmp_path):
     out = save_algorithm.save_algorithm(
         "5x5_tophat_band_adaptive_snr", sensitivity=5.0, bin_size=3,
@@ -58,6 +97,7 @@ def test_save_algorithm_uses_project_storage_and_is_discoverable(tmp_path):
     dm = DataManager(tmp_path)
     assert dm.resolve_detector_name("user_detector") == out
     assert (out.parent / "catalog.json").is_file()
+    load_detector(out)
 
 
 def test_save_algorithm_rejects_incompatible_base(tmp_path):
@@ -91,12 +131,16 @@ def test_dynamic_import_identity_tracks_path_and_content(tmp_path):
 def test_packaging_excludes_development_trees_and_keeps_runtime_assets():
     config = tomllib.loads(Path("pyproject.toml").read_text())
     discovery = config["tool"]["setuptools"]["packages"]["find"]
-    package_data = config["tool"]["setuptools"]["package-data"]["xrd_app"]
+    setuptools = config["tool"]["setuptools"]
+    package_data = setuptools["package-data"]["xrd_app"]
+    excluded_data = setuptools["exclude-package-data"]["*"]
 
     assert "xrd_app.tests*" in discovery["exclude"]
     assert "xrd_app.notebooks*" in discovery["exclude"]
     assert discovery["namespaces"] is False
+    assert setuptools["include-package-data"] is False
     assert "PeakAlgorithms/catalog.json" in package_data
     assert "PeakAlgorithms/*.py" in package_data
-    assert not any("test" in pattern.lower() or "notebook" in pattern.lower()
-                   or "pyc" in pattern.lower() for pattern in package_data)
+    assert "tests/**/*" in excluded_data
+    assert "notebooks/**/*" in excluded_data
+    assert "**/*.pyc" in excluded_data

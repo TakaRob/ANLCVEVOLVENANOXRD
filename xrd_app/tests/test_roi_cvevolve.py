@@ -30,6 +30,20 @@ def test_session_rejects_invalid_holdout_percentage(tmp_path, holdout_pct):
         roi_cvevolve.create_session(dm, holdout_pct=holdout_pct)
 
 
+def test_high_holdout_percentage_keeps_a_development_example(tmp_path):
+    dm = _project(tmp_path)
+    feature = {"feature_id": 1, "manual_roi": {"x0": 1, "y0": 2, "x1": 3, "y1": 4}}
+    for scan in ("Scan_0037", "Scan_0038"):
+        roi_catalog.save_previews(dm.roi_map_json("manual", 3, scan), [feature],
+                                  scan=scan, bin_size=3, name="manual")
+        reflection_sum.save(dm, scan, np.ones((5, 6)), is_raw=True)
+
+    result = roi_cvevolve.create_session(dm, dest=tmp_path / "session", holdout_pct=99)
+
+    assert len(result["splits"]["test_data"]) == 1
+    assert len(result["splits"]["holdout_data"]) == 1
+
+
 def test_session_exports_sums_labels_config_and_evaluator(tmp_path):
     dm = _project(tmp_path)
     scan = "Scan_0037"

@@ -96,15 +96,18 @@ def fit_all_models(tth_centers, radial_profile, valid_mask, tth_min, tth_max):
     try:
         popt, _ = curve_fit(gaussian_model, x_fit, y_fit, p0=[amp_init, mu_init, sigma_init, offset_init], maxfev=10000)
         results["gaussian"] = {"profile": gaussian_model(x_data, *popt), "params": dict(amplitude=popt[0], mu=popt[1], sigma=popt[2], offset=popt[3])}
-    except: pass
+    except (RuntimeError, ValueError, FloatingPointError, OverflowError):
+        pass
     try:
         popt, _ = curve_fit(split_gaussian_model, x_fit, y_fit, p0=[amp_init, mu_init, sigma_init, sigma_init, offset_init], maxfev=10000)
         results["split_gaussian"] = {"profile": split_gaussian_model(x_data, *popt), "params": dict(amplitude=popt[0], mu=popt[1], sigma_left=popt[2], sigma_right=popt[3], offset=popt[4])}
-    except: pass
+    except (RuntimeError, ValueError, FloatingPointError, OverflowError):
+        pass
     try:
         popt, _ = curve_fit(skewed_gaussian_model, x_fit, y_fit, p0=[amp_init, mu_init, sigma_init, 0.0, offset_init], maxfev=10000, bounds=([0, tth_min, 0.1, -20, 0], [np.inf, tth_max, 30, 20, np.inf]))
         results["skewed_gaussian"] = {"profile": skewed_gaussian_model(x_data, *popt), "params": dict(amplitude=popt[0], mu=popt[1], sigma=popt[2], skew=popt[3], offset=popt[4])}
-    except: pass
+    except (RuntimeError, ValueError, FloatingPointError, OverflowError):
+        pass
     best_fourier = None
     best_rmse = np.inf
     for cutoff in [0.02, 0.03, 0.05, 0.07, 0.10]:

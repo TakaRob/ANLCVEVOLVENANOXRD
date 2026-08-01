@@ -667,8 +667,6 @@ class SetupTab(QWidget):
             "Reflections (reflections.py reflections.json *.py *.json)")
         if not path:
             return
-        if path.endswith(".json"):
-            path = str(Path(path).with_suffix(".py"))
         dm.set_reflection_source(path, self.scan)
         # Refresh the host header selector + rebuild scan-dependent tabs.
         if self._host is not None:

@@ -171,6 +171,7 @@ def save_algorithm(base: str, *, sensitivity, bin_size: int,
     if base_path is None:
         raise ValueError(f"Unknown compatible base detector: {base}")
     load_detector(base_path)
+    base_import = base if dm.resolve_detector_name(base, bin_size) else base_path.stem
 
     if algorithms_dir is None:
         algorithms_dir = dm.project_algorithms_dir("peak")
@@ -190,7 +191,7 @@ def save_algorithm(base: str, *, sensitivity, bin_size: int,
         out_path = algorithms_dir / f"{stem}.py"
         rel_file = f"{stem}.py"
     out_path.write_text(_TEMPLATE.format(
-        base=base, sensitivity=sensitivity, noise=noise_reduction,
+        base=base_import, sensitivity=sensitivity, noise=noise_reduction,
         strength=noise_strength, shift=noise_shift, log_scale=log_scale,
         clip_lo=clip_lo_pct, clip_hi=clip_hi_pct))
 

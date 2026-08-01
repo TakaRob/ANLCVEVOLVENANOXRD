@@ -383,6 +383,7 @@ class MainWindow(QMainWindow):
         # Persistent tabs (e.g. Setup) can drive project switching.
         if hasattr(content, "set_host"):
             content.set_host(self)
+        self._connect_bin_context(content)
         # Host the tab in a resizable scroll area so a tall tab (e.g. Setup with
         # many stacked controls) can never force the whole window taller than the
         # display. With setWidgetResizable(True) the content still fills the
@@ -437,6 +438,28 @@ class MainWindow(QMainWindow):
             self.general.setVisible(False)
 
     # ----- context changes --------------------------------------------
+    def _connect_bin_context(self, content):
+        """Subscribe to the generic per-tab bin context contract, if exposed."""
+        source = content
+        if not hasattr(source, "bin_size_changed"):
+            source = getattr(content, "_embedded_window", None)
+        signal = getattr(source, "bin_size_changed", None)
+        if signal is not None:
+            signal.connect(self._on_bin_size_changed)
+        current = getattr(source, "current_bin_size", None)
+        if callable(current):
+            self._on_bin_size_changed(current())
+
+    def _on_bin_size_changed(self, bin_size):
+        try:
+            bin_size = int(bin_size)
+        except (TypeError, ValueError):
+            return
+        if bin_size <= 0 or bin_size == self.bin_size:
+            return
+        self.bin_size = bin_size
+        self._save_state()
+
     def _on_scan_changed(self, text):
         if not text or text.startswith("("):
             return

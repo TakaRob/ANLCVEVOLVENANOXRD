@@ -1,7 +1,10 @@
+import json
+
+import numpy as np
 import pytest
 from click.testing import CliRunner
 
-from xrd_app.cli import grid, main, peaks
+from xrd_app.cli import _same_grid_lattice, grid, main, peaks
 
 
 @pytest.mark.parametrize("command", sorted(main.commands))
@@ -78,3 +81,90 @@ def test_lineage_missing_explicit_target_fails(tmp_path):
 
     assert result.exit_code == 1
     assert "Result JSON not found" in result.stderr
+
+
+def _project_config(tmp_path):
+    (tmp_path / "Labels" / "Scan_0203").mkdir(parents=True)
+    (tmp_path / "config.yaml").write_text(
+        "name: test\nscan:\n  number: 203\n  name: Scan_0203\n"
+        "paths:\n  raw_dir: Raw\n  binned_dir: Binned\n"
+        "  metadata_dir: Metadata\n  labels_dir: Labels\n"
+    )
+
+
+def test_shapes_rejects_wrong_bin_from_peaks(tmp_path):
+    _project_config(tmp_path)
+    peaks_path = tmp_path / "foreign_peaks.json"
+    peaks_path.write_text(json.dumps({
+        "lineage": {"stage": "peaks", "scan": "Scan_0203", "bin_size": 3},
+        "peaks_by_bin": {},
+    }))
+
+    result = CliRunner().invoke(main, [
+        "shapes", "--root", str(tmp_path), "--scan", "203", "--bin-size", "5",
+        "--from-peaks", str(peaks_path),
+    ])
+
+    assert result.exit_code == 1
+    assert "bin 3x3 != 5x5" in result.stderr
+
+
+def test_fast_roi_shapes_missing_h5_uses_fallback_without_building(monkeypatch, tmp_path):
+    _project_config(tmp_path)
+    metadata = tmp_path / "Metadata" / "Scan_0203"
+    metadata.mkdir(parents=True)
+    (metadata / "grid_mapping_3x3.json").write_text(json.dumps({
+        "bin_size": 3, "n_bin_rows": 1, "n_bin_cols": 1,
+        "bins": {"0_0": [0]},
+    }))
+    (metadata / "tth.tiff").touch()
+
+    class Source:
+        def keys(self):
+            return ["0_0"]
+
+        def region(self, key, y0, y1, x0, x1):
+            return np.ones((y1 - y0, x1 - x0))
+
+        def close(self):
+            pass
+
+    built = []
+    monkeypatch.setattr("xrd_app.core.io.build_bins", lambda *a, **k: built.append(True))
+    monkeypatch.setattr("xrd_app.core.io.open_bin_source", lambda *a, **k: Source())
+    monkeypatch.setattr("xrd_app.core.io.load_tth_map", lambda path: np.ones((4, 4)))
+    monkeypatch.setattr("xrd_app.core.processing.estimate_beam_center", lambda image: (2, 2))
+
+    result = CliRunner().invoke(main, [
+        "roi-shapes", "--root", str(tmp_path), "--scan", "203", "--bin-size", "3",
+        "--roi", "0,0,2,2", "--name", "preview", "--fast",
+        "--preview-output", str(tmp_path / "preview.json"),
+    ])
+
+    assert result.exit_code == 0, result.output
+    assert built == []
+
+
+def test_hd_child_grid_requires_matching_lattice_provenance():
+    source = {
+        "coordinate_source": "positions_faithful",
+        "positions_real": True,
+        "xrd_files": ["a.h5"],
+        "frame_map": [[0, 0], [0, 1]],
+    }
+    assert _same_grid_lattice(dict(source), source)
+    assert not _same_grid_lattice(
+        {**source, "coordinate_source": "positions_xy"}, source)
+    assert not _same_grid_lattice(
+        {**source, "frame_map": [[0, 1], [0, 0]]}, source)
+    assert not _same_grid_lattice({}, source)
+
+
+def test_run_combined_rejects_non_1x1_before_resolving_artifacts(tmp_path):
+    result = CliRunner().invoke(main, [
+        "run-combined", "--root", str(tmp_path), "--scan", "203",
+        "--bin-size", "3", "--algorithm", "anything",
+    ])
+
+    assert result.exit_code == 2
+    assert "require --bin-size 1" in result.stderr

@@ -37,6 +37,7 @@ from PyQt5.QtGui import QColor, QFont
 from ..config import DataManager
 from ..core import hd_map as hd_core
 from . import device_map as dv
+from .lifecycle import start_process, stop_process
 
 pg.setConfigOptions(imageAxisOrder="row-major", antialias=True)
 
@@ -1053,12 +1054,18 @@ class HDMapBuilder(QMainWindow):
         self._proc.setProcessChannelMode(QProcess.MergedChannels)
         self._proc.readyReadStandardOutput.connect(self._on_output)
         self._proc.finished.connect(self._on_finished)
-        self._proc.start(cmd[0], cmd[1:])
+        self._proc.errorOccurred.connect(self._on_error)
+        start_process(self._proc, cmd[0], cmd[1:])
 
     def _cancel(self):
         if self._proc is not None and self._proc.state() != QProcess.NotRunning:
             self._cancelled = True
-            self._proc.kill()   # _on_finished re-enables the controls
+            stop_process(self._proc)  # _on_finished re-enables the controls
+
+    def _on_error(self, error):
+        if error == QProcess.FailedToStart and self._proc is not None:
+            self._log.appendPlainText(f"\n[failed to start: {self._proc.errorString()}]")
+            self._on_finished(-1, QProcess.CrashExit)
 
     def _on_output(self):
         data = bytes(self._proc.readAllStandardOutput()).decode("utf-8", "replace")
@@ -1090,8 +1097,7 @@ class HDMapBuilder(QMainWindow):
         self._status.setText(f"failed (exit {code})")
 
     def closeEvent(self, event):  # noqa: N802 (Qt signature)
-        if self._proc is not None and self._proc.state() != QProcess.NotRunning:
-            self._proc.kill()
+        stop_process(self._proc)
         super().closeEvent(event)
 
 

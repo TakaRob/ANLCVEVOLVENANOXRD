@@ -10,7 +10,6 @@ pyqtgraph rewrite of the matplotlib version (full feature parity). Clustering /
 density logic is framework-agnostic and unchanged; rendering is pyqtgraph.
 """
 
-import json
 import sys
 from collections import defaultdict
 
@@ -18,8 +17,6 @@ import numpy as np
 import tifffile
 import matplotlib
 import pyqtgraph as pg
-from scipy.ndimage import gaussian_filter1d
-from scipy.optimize import minimize
 
 from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import (
@@ -29,6 +26,7 @@ from PyQt5.QtWidgets import (
 )
 
 from ..config import DataManager
+from ..core import orientation as orientation_core
 
 pg.setConfigOptions(imageAxisOrder="row-major", antialias=True)
 
@@ -95,27 +93,8 @@ def load_tth_map():
     return tifffile.imread(str(_DM.tth_map())).astype(np.float64)
 
 
-def estimate_beam_center(tth_map):
-    step = 10
-    ys, xs = np.mgrid[0:tth_map.shape[0]:step, 0:tth_map.shape[1]:step]
-    ts = tth_map[::step, ::step]
-
-    def objective(params):
-        y0, x0 = params
-        dist = np.sqrt((ys - y0)**2 + (xs - x0)**2)
-        dist = np.maximum(dist, 1e-6)
-        k = np.sum(ts * dist) / np.sum(dist**2)
-        return np.sum((ts - k * dist)**2)
-
-    res = minimize(objective, [tth_map.shape[0] // 2, tth_map.shape[1] + 200],
-                   method='Nelder-Mead')
-    return res.x[0], res.x[1]
-
-
-def compute_chi_map(shape, beam_center):
-    by, bx = beam_center
-    ys, xs = np.mgrid[0:shape[0], 0:shape[1]]
-    return np.degrees(np.arctan2(ys - by, xs - bx))
+estimate_beam_center = orientation_core.estimate_beam_center
+compute_chi_map = orientation_core.compute_chi_map
 
 
 # ── Feature weighting ─────────────────────────────────────────────
@@ -133,119 +112,16 @@ WEIGHT_LABELS = {k: v.split(" — ")[0] for k, v in WEIGHT_MODES}
 WEIGHT_MODE = "count"
 
 
-def _feature_area(f):
-    return float(f.get("n_bins") or len(f.get("intensity_profile") or {}) or 1)
-
-
-def _feature_spread(f):
-    """Angular/strain spread of a feature (χ FWHM + Δ2θ FWHM), floored to 1."""
-    s = float(f.get("rocking_fwhm") or 0.0) + float(f.get("strain_breadth") or 0.0)
-    return s if s > 0 else 1.0
-
-
-def feature_weight(f, mode=None):
-    """Weight a feature contributes to a clump / histogram under ``mode``.
-
-    count      → 1 (head-count, the original behaviour)
-    area       → n_bins, so physically large features dominate
-    intensity  → peak intensity, so a small bright spot can outweigh a big faint one
-    bright_big → peak × spread × area, so bright *and* large *and* spread-out win
-    """
-    mode = mode or WEIGHT_MODE
-    if mode == "area":
-        return max(_feature_area(f), 0.0)
-    if mode == "intensity":
-        return max(float(f.get("peak_intensity") or 0.0), 0.0)
-    if mode == "bright_big":
-        inten = max(float(f.get("peak_intensity") or 0.0), 0.0)
-        return inten * _feature_spread(f) * max(_feature_area(f), 1.0)
-    return 1.0   # count (default / unknown)
+def feature_weight(feature, mode=None):
+    """Weight a feature using the active orientation-map mode."""
+    return orientation_core.feature_weight(feature, mode or WEIGHT_MODE)
 
 
 # ── Clustering ────────────────────────────────────────────────────
 def cluster_features_by_chi(features, bandwidth=5.0):
-    """Group features by KDE over chi, split at valleys. Returns (clusters, valleys)."""
-    from scipy.signal import find_peaks
-
-    items = [(f.get("chi_deg"), f) for f in features if f.get("chi_deg") is not None]
-    if not items:
-        return [], []
-    items.sort(key=lambda x: x[0])
-    n = len(items)
-    if n < 3:
-        return [_make_cluster([x[1] for x in items], [x[0] for x in items])], []
-
-    chis = np.array([x[0] for x in items])
-    ws = np.array([feature_weight(x[1]) for x in items], dtype=float)
-    total_w = float(ws.sum())
-    grid = np.linspace(-180, 179, 360)
-    kde = np.zeros(360)
-    for c, w in zip(chis, ws):
-        diff = (grid - c + 180) % 360 - 180
-        kde += w * np.exp(-0.5 * (diff / bandwidth) ** 2)
-
-    pad = max(4, int(bandwidth * 2))
-    kde_ext = np.concatenate([kde[-pad:], kde, kde[:pad]])
-    valley_idx, _ = find_peaks(-kde_ext, distance=max(4, int(bandwidth * 1.5)),
-                               prominence=0.3 * kde.max())
-    valley_idx = valley_idx - pad
-    valley_idx = valley_idx[(valley_idx >= 0) & (valley_idx < 360)]
-    if len(valley_idx) < 2 or kde.max() == 0:
-        return [_make_cluster([x[1] for x in items], chis.tolist())], []
-
-    valley_angles = grid[valley_idx]
-    v_norm = np.sort((valley_angles + 180) % 360)
-    n_segs = len(v_norm)
-
-    groups = defaultdict(list)
-    for chi_val, feat in items:
-        c_norm = (chi_val + 180) % 360
-        idx = int(np.searchsorted(v_norm, c_norm, side="right")) % n_segs
-        groups[idx].append((chi_val, feat))
-
-    clusters = []
-    for idx in sorted(groups.keys()):
-        g = groups[idx]
-        if not g:
-            continue
-        cl = _make_cluster([x[1] for x in g], [x[0] for x in g], total_w)
-        cl["chi_lo"] = float(v_norm[idx - 1] - 180)
-        cl["chi_hi"] = float(v_norm[idx] - 180)
-        cl["wraps"] = v_norm[idx - 1] > v_norm[idx]
-        clusters.append(cl)
-    return clusters, valley_angles.tolist()
-
-
-def _make_cluster(feats, chi_vals, total=None):
-    # ``total`` is the reflection's total weight (for the weighted percentage);
-    # falls back to this clump's own weight (→ 100%) for single-cluster cases.
-    cl_w = float(sum(feature_weight(f) for f in feats))
-    total = total if total else cl_w
-    chi_min, chi_max = min(chi_vals), max(chi_vals)
-    if chi_max - chi_min > 180:
-        shifted = [c + 360 if c < 0 else c for c in chi_vals]
-        s_min, s_max = min(shifted), max(shifted)
-        center = (s_min + s_max) / 2
-        if center > 180:
-            center -= 360
-        span = s_max - s_min
-        margin = max(3.0, span * 0.12)
-        lo, hi = s_min - margin, s_max + margin
-        chi_lo = lo if lo <= 180 else lo - 360
-        chi_hi = hi if hi <= 180 else hi - 360
-        wraps = True
-    else:
-        center = (chi_min + chi_max) / 2
-        span = chi_max - chi_min
-        margin = max(3.0, span * 0.12)
-        chi_lo, chi_hi = chi_min - margin, chi_max + margin
-        wraps = False
-    return {
-        "chi_center": round(center, 1), "chi_span": round(span, 1),
-        "chi_lo": chi_lo, "chi_hi": chi_hi, "wraps": wraps,
-        "pct": round(100.0 * cl_w / total, 1) if total else 0.0,
-        "features": feats, "n": len(feats), "weight": round(cl_w, 1),
-    }
+    """Delegate weighted circular KDE clustering to the core engine."""
+    return orientation_core.cluster_features_by_chi(
+        features, bandwidth=bandwidth, weight_mode=WEIGHT_MODE)
 
 
 def _chi_mask(chi_map, chi_lo, chi_hi, wraps):
@@ -296,37 +172,12 @@ def build_density_overlay(tth_map, chi_map, features_by_ref, active_refs,
     chi_idx = np.clip(((chi_map + 180)).astype(int), 0, 359)
     cmap = _mpl_cmap(cmap_name)
 
-    global_max = 0
-    densities = {}
-    for ref in active_refs:
-        if ref not in LABELED_DEGS:
-            continue
-        pairs = [(f["chi_deg"], feature_weight(f))
-                 for f in features_by_ref.get(ref, []) if f.get("chi_deg") is not None]
-        if not pairs:
-            continue
-        chi_arr = np.array([p[0] for p in pairs])
-        w_arr = np.array([p[1] for p in pairs], dtype=float)
-        hist, _ = np.histogram(chi_arr, bins=np.arange(-180, 181, 1), weights=w_arr)
-        smooth = gaussian_filter1d(hist.astype(float), sigma=sigma, mode="wrap")
-        densities[ref] = smooth
-        global_max = max(global_max, smooth.max())
-
+    refs = [ref for ref in active_refs if ref in LABELED_DEGS]
+    densities, global_max, vmin, vmax = orientation_core.orientation_densities(
+        features_by_ref, refs, sigma=sigma, low_pct=low_pct,
+        high_pct=high_pct, weight_mode=WEIGHT_MODE)
     if global_max == 0:
         return overlay, 0, 0.0, 1.0
-
-    # Contrast window from percentiles of the (non-empty) density values.
-    pool = np.concatenate([d for d in densities.values()])
-    pool = pool[pool > 0]
-    if pool.size:
-        if high_pct <= low_pct:
-            high_pct = min(100.0, low_pct + 1.0)
-        vmin = float(np.percentile(pool, low_pct))
-        vmax = float(np.percentile(pool, high_pct))
-    else:
-        vmin, vmax = 0.0, float(global_max)
-    if vmax <= vmin:
-        vmax = vmin + 1e-9
     span = vmax - vmin
 
     for ref, density in densities.items():

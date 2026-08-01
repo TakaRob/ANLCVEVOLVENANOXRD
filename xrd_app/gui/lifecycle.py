@@ -1,6 +1,55 @@
 """Small Qt lifecycle helpers shared by embedded GUI components."""
 
-from PyQt5.QtCore import QProcess
+import os
+import shutil
+import signal
+import time
+
+from PyQt5.QtCore import QProcess, QTimer
+
+
+_PROCESS_GROUP_PROPERTY = "_xrd_owned_process_group"
+
+
+def start_process(process, program, arguments=()):
+    """Start a QProcess, isolated in its own session on Linux/WSL when possible."""
+    program = str(program)
+    arguments = [str(arg) for arg in arguments]
+    executable = shutil.which(program)
+    setsid = shutil.which("setsid") if os.name == "posix" and executable else None
+    if setsid:
+        process.setProperty(_PROCESS_GROUP_PROPERTY, True)
+        process.start(setsid, [program, *arguments])
+    else:
+        process.setProperty(_PROCESS_GROUP_PROPERTY, False)
+        process.start(program, arguments)
+
+
+def _owned_process_group(process):
+    if not process.property(_PROCESS_GROUP_PROPERTY) or not hasattr(os, "killpg"):
+        return None
+    pid = int(process.processId())
+    return pid if pid > 0 else None
+
+
+def _signal_process_group(pgid, sig):
+    try:
+        os.killpg(pgid, sig)
+    except ProcessLookupError:
+        pass
+    except OSError:
+        return False
+    return True
+
+
+def _process_group_alive(pgid):
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True
+    return True
 
 
 def dispose_widget(widget):
@@ -29,9 +78,51 @@ def stop_thread(thread):
     return thread.wait()
 
 
-def stop_process(process, timeout_ms=3000):
-    """Kill a running QProcess and wait briefly for OS resource cleanup."""
+def stop_process_async(process, timeout_ms=3000):
+    """Request TERM now and schedule KILL without blocking the Qt event loop."""
     if process is None or process.state() == QProcess.NotRunning:
+        return
+    pgid = _owned_process_group(process)
+    if pgid is not None:
+        _signal_process_group(pgid, signal.SIGTERM)
+    else:
+        process.terminate()
+
+    def kill_if_running():
+        if pgid is not None:
+            if _process_group_alive(pgid):
+                _signal_process_group(pgid, signal.SIGKILL)
+        elif process.state() != QProcess.NotRunning:
+            process.kill()
+
+    QTimer.singleShot(timeout_ms, kill_if_running)
+
+
+def stop_process(process, timeout_ms=3000):
+    """TERM an owned process group, then KILL it after a bounded grace period."""
+    if process is None:
         return True
-    process.kill()
-    return process.waitForFinished(timeout_ms)
+    pgid = _owned_process_group(process)
+    if process.state() == QProcess.NotRunning and pgid is None:
+        return True
+    if pgid is not None:
+        _signal_process_group(pgid, signal.SIGTERM)
+    else:
+        process.terminate()
+    deadline = time.monotonic() + timeout_ms / 1000
+    while pgid is not None and _process_group_alive(pgid) and time.monotonic() < deadline:
+        if process.state() == QProcess.NotRunning:
+            time.sleep(0.01)
+        else:
+            process.waitForFinished(min(50, timeout_ms))
+    if pgid is None and process.waitForFinished(timeout_ms):
+        return True
+    if pgid is not None and not _process_group_alive(pgid):
+        process.waitForFinished(100)
+        return True
+    if pgid is not None:
+        _signal_process_group(pgid, signal.SIGKILL)
+    else:
+        process.kill()
+    process.waitForFinished(timeout_ms)
+    return pgid is None or not _process_group_alive(pgid)

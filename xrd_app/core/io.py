@@ -41,7 +41,6 @@ ARCHIVE_VERSION = 1
 # (``H5_DATASET``, 24 encoder cols), which ``core.positions`` reduces separately.
 H5_POSITION_GROUP = "entry/data/Position"
 _H5_SUFFIXES = (".h5", ".hdf5")
-DETECTOR_SHAPE = (1062, 1028)
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -104,7 +103,9 @@ def load_module(path: Union[str, Path]):
     # automated algo in its own sub-folder can import a base detector), and the
     # NoiseReduction/ library.
     pkg = Path(__file__).resolve().parent.parent
-    dirs = [str(path.resolve().parent)]
+    dirs = [str(path.parent)]
+    if path.name == "detector.py":
+        dirs.append(str(path.parent.parent))
     for extra in (pkg / "PeakAlgorithms", pkg / "CombinedAlgorithms",
                   pkg / "NoiseReduction"):
         if extra.is_dir():
@@ -272,7 +273,14 @@ def validate_scan(info: dict, expected_shape: Optional[list] = None) -> list:
 
 
 def load_reflections(path: Union[str, Path]):
-    """Load a reflections.py module; return (degs, deg_labels)."""
+    """Load reflection JSON or a legacy Python module; return angles and labels."""
+    path = Path(path)
+    if path.suffix.lower() == ".json":
+        from .reflections import read_json
+
+        reflections = read_json(path)
+        return ([float(r["two_theta"]) for r in reflections],
+                [str(r["name"]) for r in reflections])
     mod = load_module(path)
     return mod.degs, mod.deg_labels
 
@@ -283,6 +291,34 @@ def load_grid_mapping(grid_mapping: Union[str, Path, dict]) -> dict:
         return grid_mapping
     with open(grid_mapping) as f:
         return json.load(f)
+
+
+def validate_grid_mapping_bin_size(grid_mapping, expected_bin_size) -> dict:
+    """Load a grid mapping and reject a known bin-size mismatch."""
+    gm = load_grid_mapping(grid_mapping)
+    actual = gm.get("bin_size")
+    if actual is None and not isinstance(grid_mapping, dict):
+        match = _re.search(r"grid_mapping_(\d+)x(\d+)", Path(grid_mapping).stem)
+        actual = int(match.group(1)) if match and match.group(1) == match.group(2) else None
+    if actual is not None and int(actual) != int(expected_bin_size):
+        raise ValueError(
+            f"Grid mapping bin size is {actual}x{actual}, not requested "
+            f"{expected_bin_size}x{expected_bin_size}: {grid_mapping}")
+    return gm
+
+
+def _grid_variant(grid_mapping) -> Optional[str]:
+    if isinstance(grid_mapping, dict):
+        value = grid_mapping.get("variant")
+        return str(value) if value else None
+    try:
+        value = load_grid_mapping(grid_mapping).get("variant")
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        value = None
+    if value:
+        return str(value)
+    match = _re.match(r"grid_mapping_\d+x\d+_(.+)$", Path(grid_mapping).stem)
+    return match.group(1) if match else None
 
 
 def sum_binned_image(h5_path: Union[str, Path], max_bins: Optional[int] = None,
@@ -1286,6 +1322,113 @@ def _bin_sort_key(k: str):
     return (int(a), int(b))
 
 
+_BIN_KEY_RE = _re.compile(r"^(\d+)_(\d+)$")
+
+
+def _int_metadata(value, label, source):
+    """Return an integer metadata value with a source-specific error."""
+    try:
+        return int(value)
+    except (TypeError, ValueError, OverflowError):
+        raise ValueError(f"Invalid {label} metadata {value!r} in {source}") from None
+
+
+def _validate_binned_h5(h5, h5_path, bin_size, grid_mapping, variant=None):
+    """Validate a prebuilt bins file against the grid that gives keys meaning."""
+    gm = validate_grid_mapping_bin_size(grid_mapping, bin_size)
+    bins = gm.get("bins")
+    if not isinstance(bins, dict):
+        raise ValueError(f"Grid mapping has no valid 'bins' mapping: {grid_mapping}")
+
+    territory = variant == "territory" or gm.get("coordinate_source") == "territory_xy"
+    dimensions = {}
+    for name in ("n_bin_rows", "n_bin_cols"):
+        if name in gm:
+            dimensions[name] = _int_metadata(gm[name], name, grid_mapping)
+            if dimensions[name] < 0:
+                raise ValueError(f"Grid mapping {name} must be non-negative: {grid_mapping}")
+
+    mapping_keys = set()
+    required_keys = set()
+    for key, frame_indices in bins.items():
+        match = _BIN_KEY_RE.fullmatch(str(key))
+        if match is None:
+            raise ValueError(f"Invalid bin key {key!r} in grid mapping {grid_mapping}")
+        row, col = map(int, match.groups())
+        if not territory:
+            if "n_bin_rows" in dimensions and row >= dimensions["n_bin_rows"]:
+                raise ValueError(
+                    f"Grid mapping bin key {key!r} is outside n_bin_rows="
+                    f"{dimensions['n_bin_rows']}: {grid_mapping}")
+            if "n_bin_cols" in dimensions and col >= dimensions["n_bin_cols"]:
+                raise ValueError(
+                    f"Grid mapping bin key {key!r} is outside n_bin_cols="
+                    f"{dimensions['n_bin_cols']}: {grid_mapping}")
+        mapping_keys.add(str(key))
+        if frame_indices:
+            required_keys.add(str(key))
+
+    if "bin_size" in h5.attrs:
+        actual = _int_metadata(h5.attrs["bin_size"], "bin_size", h5_path)
+        if actual != int(bin_size):
+            raise ValueError(
+                f"Binned HDF5 bin_size is {actual}x{actual}, not requested "
+                f"{bin_size}x{bin_size}; file is stale or mismatched: {h5_path}")
+    for name, expected in dimensions.items():
+        if name in h5.attrs:
+            actual = _int_metadata(h5.attrs[name], name, h5_path)
+            if actual != expected:
+                raise ValueError(
+                    f"Binned HDF5 {name}={actual} does not match grid mapping "
+                    f"{name}={expected}; file is stale or mismatched: {h5_path}")
+
+    detector_shape = None
+    if "detector_shape" in h5.attrs:
+        try:
+            detector_shape = tuple(int(v) for v in h5.attrs["detector_shape"])
+        except (TypeError, ValueError, OverflowError):
+            raise ValueError(
+                f"Invalid detector_shape metadata in binned HDF5: {h5_path}") from None
+        if len(detector_shape) != 2 or any(v <= 0 for v in detector_shape):
+            raise ValueError(
+                f"Invalid detector_shape metadata {detector_shape!r} in binned HDF5: "
+                f"{h5_path}")
+
+    dataset_keys = set()
+    observed_shape = detector_shape
+    for key, obj in h5.items():
+        if _BIN_KEY_RE.fullmatch(key) is None:
+            if isinstance(obj, h5py.Dataset):
+                raise ValueError(
+                    f"Binned HDF5 dataset key {key!r} is not a row_col bin key: "
+                    f"{h5_path}")
+            continue  # Groups may hold unrelated metadata.
+        if not isinstance(obj, h5py.Dataset):
+            raise ValueError(f"Binned HDF5 bin key {key!r} is not a dataset: {h5_path}")
+        if key not in mapping_keys:
+            raise ValueError(
+                f"Binned HDF5 bin key {key!r} is not present in grid mapping; "
+                f"file is stale or mismatched: {h5_path}")
+        if obj.ndim != 2:
+            raise ValueError(
+                f"Binned HDF5 dataset {key!r} must be 2-D, got {obj.ndim}-D: {h5_path}")
+        if observed_shape is None:
+            observed_shape = obj.shape
+        elif tuple(obj.shape) != tuple(observed_shape):
+            raise ValueError(
+                f"Binned HDF5 dataset {key!r} has detector shape {obj.shape}, "
+                f"expected {tuple(observed_shape)}: {h5_path}")
+        dataset_keys.add(key)
+
+    missing = required_keys - dataset_keys
+    if missing:
+        sample = ", ".join(sorted(missing, key=_bin_sort_key)[:5])
+        raise ValueError(
+            f"Binned HDF5 is missing {len(missing)} populated grid-mapping bin(s) "
+            f"({sample}); file is stale or incomplete: {h5_path}")
+    return sorted(dataset_keys, key=_bin_sort_key)
+
+
 def sum_raw_frames(xrd_files, frame_map, frame_indices) -> Optional[np.ndarray]:
     """Sum the raw detector frames at ``frame_indices`` into one image.
 
@@ -1363,23 +1506,35 @@ class _H5Source(BinImageSource):
 
     is_raw = False
 
-    def __init__(self, h5_path):
+    def __init__(self, h5_path, bin_size=None, grid_mapping=None, variant=None):
         self._path = str(h5_path)
         self._f = h5py.File(self._path, "r")
+        try:
+            if grid_mapping is not None:
+                self._keys = _validate_binned_h5(
+                    self._f, self._path, bin_size, grid_mapping, variant=variant)
+            else:
+                self._keys = sorted(
+                    (key for key, obj in self._f.items()
+                     if _BIN_KEY_RE.fullmatch(key) and isinstance(obj, h5py.Dataset)),
+                    key=_bin_sort_key)
+        except Exception:
+            self._f.close()
+            raise
 
     def keys(self) -> list:
-        return sorted(self._f.keys(), key=_bin_sort_key)
+        return list(self._keys)
 
     def __contains__(self, key) -> bool:
-        return key in self._f
+        return key in self._keys
 
     def image(self, key: str) -> Optional[np.ndarray]:
-        if key not in self._f:
+        if key not in self._keys:
             return None
         return np.clip(self._f[key][:].astype(np.float64), 0, 1e9)
 
     def region(self, key, y0, y1, x0, x1):
-        if key not in self._f:
+        if key not in self._keys:
             return None
         # h5py reads only the requested slice from disk (clamps stop past edge).
         sub = self._f[key][max(0, y0):y1, max(0, x0):x1]
@@ -1484,8 +1639,7 @@ class _RawSource(BinImageSource):
         self.bin_size = bin_size
         gm_path = grid_mapping or dm.grid_mapping(bin_size=bin_size, scan=scan)
         if gm_path and Path(gm_path).exists():
-            with open(gm_path) as f:
-                gm = json.load(f)
+            gm = validate_grid_mapping_bin_size(gm_path, bin_size)
             self._bins = gm["bins"]
             self._xrd_files = gm["xrd_files"]
             self._frame_map = gm["frame_map"]
@@ -1592,17 +1746,28 @@ def open_bin_source(dm, bin_size, scan=None, n_cols=None, grid_mapping=None,
     ``xrd_1x1_bins_territory.h5``, keyed by ``"<tid>_0"``), so a territorial
     catalog loads its own per-territory frames rather than the plain grid's.
     """
-    h5 = dm.bins_h5(bin_size, scan=scan, variant=variant)
     gm = grid_mapping or dm.grid_mapping(bin_size=bin_size, scan=scan,
                                          variant=variant)
+    grid_variant = _grid_variant(gm)
+    if grid_mapping and variant and variant != grid_variant:
+        raise ValueError(
+            f"Grid mapping variant {grid_variant!r} does not match requested "
+            f"variant {variant!r}: {gm}")
+    if grid_mapping and grid_variant:
+        variant = grid_variant
+    h5 = dm.bins_h5(bin_size, scan=scan, variant=variant)
     archive = dm.unbinned_archive_h5(scan=scan)
+    if gm and Path(gm).exists():
+        validate_grid_mapping_bin_size(gm, bin_size)
     # The ordinary 1x1 bins file may contain collision sums and float conversion.
     # Prefer the lossless archive plus mapping there; explicit variants (notably
     # territory) and coarser prebuilt bins retain their exact-file precedence.
     if bin_size == 1 and not variant and archive.exists() and gm and Path(gm).exists():
         return _ArchiveSource(archive, gm)
     if h5 and os.path.exists(h5):
-        return _H5Source(h5)
+        return _H5Source(h5, bin_size=bin_size,
+                         grid_mapping=gm if gm and Path(gm).exists() else None,
+                         variant=variant)
     if archive.exists() and gm and Path(gm).exists():
         return _ArchiveSource(archive, gm)
     return _RawSource(dm, bin_size, scan=scan, n_cols=n_cols, grid_mapping=gm)

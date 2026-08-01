@@ -112,6 +112,61 @@ def test_fast_preview_uses_fewer_reads_and_marks_coarse_fill():
     assert result["center_bin"] == "6_6"
 
 
+def test_fast_constant_30x30_grid_has_bounded_reads_and_coarse_progress():
+    class ConstantSource:
+        def __init__(self):
+            self.requests = []
+
+        def keys(self):
+            return [f"{row}_{col}" for row in range(30) for col in range(30)]
+
+        def region(self, key, y0, y1, x0, x1):
+            self.requests.append(key)
+            return np.full((y1 - y0, x1 - x0), 2.0)
+
+    source = ConstantSource()
+    progress = []
+    result = roi_map.sample_roi(
+        source, (0, 0, 3, 2), fast=True, stride=3,
+        grid_mapping={"n_bin_rows": 30, "n_bin_cols": 30},
+        progress=lambda current, total: progress.append((current, total)),
+    )
+
+    assert len(source.requests) < 150
+    assert result["sampled_bins"] == len(source.requests)
+    assert (1, 100) in progress
+    assert (100, 100) in progress
+
+
+def test_fast_coarse_fill_uses_metric_specific_values():
+    class ConstantSource:
+        def keys(self):
+            return [f"{row}_{col}" for row in range(12) for col in range(12)]
+
+        def region(self, key, y0, y1, x0, x1):
+            return np.full((y1 - y0, x1 - x0), 2.0)
+
+    result = roi_map.sample_roi(
+        ConstantSource(), (0, 0, 3, 2), fast=True, stride=3,
+        grid_mapping={"n_bin_rows": 12, "n_bin_cols": 12},
+    )
+    fill = next(entry for entry in result["profile"].values()
+                if entry.get("coarse_fill"))
+
+    assert fill["intensity"] == 2.0
+    assert fill["mean"] == 2.0
+    assert fill["integrated"] == 12.0
+
+
+def test_empty_source_fails_clearly():
+    class EmptySource:
+        def keys(self):
+            return []
+
+    with pytest.raises(ValueError, match="no spatial bins"):
+        roi_map.sample_roi(EmptySource(), (0, 0, 2, 2), fast=True)
+
+
 def test_sample_roi_can_normalize_each_bin_by_frame_count():
     result = roi_map.sample_roi(
         _FakeSource(), (0, 0, 2, 2), metric="integrated",
@@ -135,6 +190,8 @@ def test_to_shape_feature_creates_one_complete_manual_feature():
     assert feature["reflection"] == "(001)"
     assert feature["manual_roi"] == {"x0": 2, "y0": 1, "x1": 5, "y1": 3}
     assert feature["n_bins"] == 2
+    assert feature["n_bin_rows"] == 2
+    assert feature["n_bin_cols"] == 2
     assert feature["spatial_extent"] == ["0_0", "0_1"]
     assert set(feature["intensity_profile"]) == {"0_0", "0_1"}
     assert "manual fixed detector ROI" in feature["reason"]

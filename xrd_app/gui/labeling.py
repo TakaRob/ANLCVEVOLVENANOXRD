@@ -41,7 +41,6 @@ import matplotlib.pyplot as plt
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg, NavigationToolbar2QT
 from matplotlib.patches import Rectangle, Circle
 from matplotlib import colors as mcolors
-from scipy import ndimage as ndi
 from scipy.signal import argrelextrema
 
 try:
@@ -56,7 +55,7 @@ from PyQt5.QtWidgets import (
     QListWidget, QListWidgetItem, QAbstractItemView, QMenu,
     QSizePolicy, QMessageBox, QAction,
 )
-from PyQt5.QtCore import Qt, QTimer
+from PyQt5.QtCore import Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QColor
 
 from ..core.algorithms import (
@@ -64,6 +63,7 @@ from ..core.algorithms import (
     compute_tth_binning, compute_radial_profile, fit_all_models,
     build_background_image, subtract_background,
 )
+from ..core.processing import detect_peaks_on_image
 from ..config import DataManager
 
 
@@ -117,15 +117,17 @@ def discover_algorithms(project_root, dm=None):
                 algo_file = Path(d["_path"])
                 if not algo_file.exists():
                     continue
-                f1 = d.get("holdout_f1")
-                f1_str = f", F1={f1:.2f}" if f1 else ""
+                f1, f2 = d.get("holdout_f1"), d.get("holdout_f2")
+                score = (f", F2={f2:.2f}" if f2 is not None else
+                         f", F1={f1:.2f}" if f1 is not None else "")
                 algos.append({
-                    "name": f"{d['name']} ({d.get('source', 'bundled')}{f1_str})",
+                    "name": f"{d['name']} ({d.get('source', 'bundled')}{score})",
                     "source": d.get("source", "bundled"),
                     "func_type": "module",
                     "file": str(algo_file),
                     "data_dir": str(algo_file.parent),
                     "holdout_f1": f1,
+                    "holdout_f2": f2,
                 })
         except Exception:
             pass
@@ -292,69 +294,6 @@ def load_and_sum_frames(frame_indices, xrd_files, xrd_file_map):
 
 
 # ===== Peak detection =====
-
-def find_peaks_on_image(image, tth_map=None, degs=None, deg_labels=None,
-                        percentile=97.0, min_pixels=3, pad=10, ignore_edge=2):
-    """Detect bright peaks anywhere on the image via global thresholding.
-
-    Returns {"peak": [(y0,y1,x0,x1,cx,cy), ...]} with reflection labels
-    assigned by nearest 2-theta arc when tth_map is provided.
-    """
-    finite = image[np.isfinite(image)]
-    if len(finite) == 0:
-        return {}
-
-    thr = np.percentile(finite, percentile)
-    hotspot = image >= thr
-
-    if ignore_edge > 0:
-        hotspot[:ignore_edge, :] = False
-        hotspot[-ignore_edge:, :] = False
-        hotspot[:, :ignore_edge] = False
-        hotspot[:, -ignore_edge:] = False
-
-    cc, n_comp = ndi.label(hotspot)
-    peaks = []
-    for comp_id in range(1, n_comp + 1):
-        ys, xs = np.where(cc == comp_id)
-        if len(ys) < min_pixels:
-            continue
-        y0 = max(int(ys.min()) - pad, 0)
-        y1 = min(int(ys.max()) + pad + 1, image.shape[0])
-        x0 = max(int(xs.min()) - pad, 0)
-        x1 = min(int(xs.max()) + pad + 1, image.shape[1])
-        cx, cy = int(np.mean(xs)), int(np.mean(ys))
-        peaks.append((y0, y1, x0, x1, cx, cy))
-
-    peaks.sort(key=lambda r: (r[0], r[2]))
-    dedup = []
-    for p in peaks:
-        keep = True
-        for q in dedup:
-            if p[0] >= q[0] and p[1] <= q[1] and p[2] >= q[2] and p[3] <= q[3]:
-                keep = False
-                break
-        if keep:
-            dedup.append(p)
-
-    # Assign reflection labels by nearest 2-theta arc
-    results = {}
-    if tth_map is not None and degs is not None and deg_labels is not None:
-        for y0, y1, x0, x1, cx, cy in dedup:
-            tth_val = tth_map[cy, cx] if 0 <= cy < tth_map.shape[0] and 0 <= cx < tth_map.shape[1] else None
-            label = "unknown"
-            if tth_val is not None:
-                best_dist = float("inf")
-                for lab, d in zip(deg_labels, degs):
-                    dist = abs(tth_val - d)
-                    if dist < best_dist:
-                        best_dist = dist
-                        label = lab
-            results.setdefault(label, []).append((y0, y1, x0, x1, cx, cy))
-    else:
-        results["peak"] = dedup
-
-    return results
 
 
 def find_local_maximum(image, click_x, click_y, radius=30):
@@ -815,6 +754,8 @@ class LabelCanvas(FigureCanvasQTAgg):
 # ===== Main Window =====
 
 class LabelingTool(QMainWindow):
+
+    bin_size_changed = pyqtSignal(int)
 
     def __init__(self, project_root=None, data_manager=None, scan=None, bin_size=None):
         super().__init__()
@@ -1436,6 +1377,9 @@ class LabelingTool(QMainWindow):
 
     # ----- Bin size change -----
 
+    def current_bin_size(self):
+        return self.bin_size
+
     def _current_grid_center(self):
         """Return the grid-space center (row, col) of the current bin."""
         bk = self.bin_keys[self._current_bin_idx]
@@ -1501,6 +1445,7 @@ class LabelingTool(QMainWindow):
         self.canvas.annotations = self._load_annotations_for_bin()
         self.canvas.selected_annotations = set()
         self._load_and_display()
+        self.bin_size_changed.emit(self.bin_size)
 
     # ----- Labeling mode -----
 

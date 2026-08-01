@@ -1,6 +1,6 @@
 {
   "description": "Bundled XRD Bragg-peak detector algorithms (flat library). These are Phase-1 (per-bin) detectors run by 'xrd-app peaks'; cross-bin linking + shape filtering is the separate 'shapes' stage. Algorithm names carry the bin size they were developed on (CVEvolve session). holdout_f1/holdout_f2 are that session's holdout scores (null = unscored). bin_size null = applies to any binned size. Per-frame combined (peak+shape) algorithms live in the CombinedAlgorithms/ library. Automated (CVEvolve) algorithms live in their own named sub-folder.",
-  "metric": "holdout_f1 / holdout_f2 (spatially-validated holdout score; higher is better)",
+  "metric": "holdout_f2 is the primary ranking metric; holdout_f1 is the fallback (spatially validated; higher is better)",
   "detectors": [
     {
       "name": "baseline",

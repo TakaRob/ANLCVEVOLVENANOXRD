@@ -23,7 +23,7 @@ from pathlib import Path
 
 import numpy as np
 import pyqtgraph as pg
-from PyQt5.QtCore import Qt
+from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtGui import QColor, QFont
 from PyQt5.QtWidgets import (
     QCheckBox, QComboBox, QHBoxLayout, QLabel, QLineEdit, QListWidget,
@@ -39,6 +39,8 @@ pg.setConfigOptions(imageAxisOrder="row-major", antialias=True)
 
 class RockingStudyView(QWidget):
     """Study selector + Run/Rocking/Combined/Report sub-tabs over one project."""
+
+    bin_size_changed = pyqtSignal(int)
 
     def __init__(self, project_root=".", scan=None, bin_size=3, parent=None):
         super().__init__(parent)
@@ -92,6 +94,7 @@ class RockingStudyView(QWidget):
         self.bin_spin = QSpinBox()
         self.bin_spin.setRange(1, 99)
         self.bin_spin.setValue(self.bin_size)
+        self.bin_spin.valueChanged.connect(self._on_bin_changed)
         form.addWidget(self.bin_spin)
 
         form.addWidget(QLabel("Output:"))
@@ -377,7 +380,17 @@ class RockingStudyView(QWidget):
         self._populate_report()
 
     # ---- host hook (scan/bin changes) -----------------------------------
+    def current_bin_size(self):
+        return self.bin_size
+
+    def _on_bin_changed(self, bin_size):
+        self.bin_size = bin_size
+        self.bin_size_changed.emit(bin_size)
+
     def update_context(self, scan, bin_size):
         self.scan = scan
         if bin_size:
             self.bin_size = bin_size
+            self.bin_spin.blockSignals(True)
+            self.bin_spin.setValue(bin_size)
+            self.bin_spin.blockSignals(False)

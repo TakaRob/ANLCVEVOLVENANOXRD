@@ -8,7 +8,7 @@ import os
 import re
 from pathlib import Path
 
-from PyQt5.QtCore import Qt
+from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtWidgets import (
     QComboBox, QFileDialog, QHBoxLayout, QLabel, QPushButton, QVBoxLayout,
     QWidget,
@@ -125,6 +125,8 @@ class BinnedTab(QWidget):
     tab now owns its bin choice, so it is unambiguous which view it applies to.
     """
 
+    bin_size_changed = pyqtSignal(int)
+
     def __init__(self, build_window, project_root, scan=None, bin_size=3,
                  extra_buttons=None):
         super().__init__()
@@ -170,6 +172,7 @@ class BinnedTab(QWidget):
         except ValueError:
             return
         self._rebuild()
+        self.bin_size_changed.emit(self._bin_size)
 
     def _rebuild(self):
         if self._win is not None:
@@ -210,6 +213,8 @@ class LineageCatalogTab(QWidget):
     from and the peak set it was derived from. ``Browse…`` loads any catalog JSON
     not auto-discovered and reads its bin/lineage from the file.
     """
+
+    bin_size_changed = pyqtSignal(int)
 
     _BROWSE = "__browse__"
 
@@ -319,6 +324,7 @@ class LineageCatalogTab(QWidget):
         self._bin_size = new_bin
         self._populate_features()
         self._rebuild()
+        self.bin_size_changed.emit(self._bin_size)
 
     def _on_feature_changed(self, _i):
         data = self._feat_combo.currentData()
@@ -343,6 +349,7 @@ class LineageCatalogTab(QWidget):
         if b is not None:
             self._bin_size = b
             self._populate_bins()
+            self.bin_size_changed.emit(self._bin_size)
         self._populate_features()
         if self._feat_combo.findData(path) < 0:
             at = max(0, self._feat_combo.count() - 1)  # before Browse…
