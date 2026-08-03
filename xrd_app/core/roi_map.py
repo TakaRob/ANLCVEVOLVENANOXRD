@@ -149,6 +149,8 @@ def _roi_groups(rois):
 def _sample_keys(source, keys, rois, mapping_bins, normalize_frames, profiles,
                  progress=None, progress_offset=0, progress_total=None):
     groups = _roi_groups(rois)
+    normalize_source = (normalize_frames and
+                        getattr(source, "aggregation", "sum") != "mean_per_frame")
     total = progress_total or len(keys)
     for index, key in enumerate(keys):
         for group in groups:
@@ -161,7 +163,7 @@ def _sample_keys(source, keys, rois, mapping_bins, normalize_frames, profiles,
                 if patch.size:
                     n_frames = len(mapping_bins.get(key) or []) or 1
                     profiles[roi_index][key] = _reduction(
-                        patch, n_frames, normalize_frames)
+                        patch, n_frames, normalize_source)
         if progress is not None:
             progress(progress_offset + index + 1, total)
 

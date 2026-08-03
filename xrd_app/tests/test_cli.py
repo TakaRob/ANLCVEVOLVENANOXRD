@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 from click.testing import CliRunner
 
-from xrd_app.cli import _same_grid_lattice, grid, main, peaks
+from xrd_app.cli import _same_grid_lattice, bin, grid, main, make_bins, peaks, roi_shapes
 
 
 @pytest.mark.parametrize("command", sorted(main.commands))
@@ -30,6 +30,14 @@ def test_help_lists_workflow_and_defaults():
     peak_params = {param.name: param for param in peaks.params}
     assert peak_params["workers"].default is None
     assert "--workers" in runner.invoke(main, ["peaks", "--help"]).output
+    roi_params = {param.name: param for param in roi_shapes.params}
+    assert roi_params["normalize_frames"].default is False
+    assert "--normalize-frames" in runner.invoke(main, ["roi-shapes", "--help"]).output
+    for command in (bin, make_bins):
+        params = {param.name: param for param in command.params}
+        assert params["normalize_frames"].default is False
+        assert "--normalize-frames" in runner.invoke(
+            main, [command.name, "--help"]).output
 
 
 def test_init_requires_name_without_prompting(tmp_path):
@@ -143,6 +151,51 @@ def test_fast_roi_shapes_missing_h5_uses_fallback_without_building(monkeypatch, 
 
     assert result.exit_code == 0, result.output
     assert built == []
+
+
+def test_roi_shapes_passes_frame_normalization(monkeypatch, tmp_path):
+    _project_config(tmp_path)
+    metadata = tmp_path / "Metadata" / "Scan_0203"
+    metadata.mkdir(parents=True)
+    (metadata / "grid_mapping_3x3.json").write_text(json.dumps({
+        "bin_size": 3, "n_bin_rows": 1, "n_bin_cols": 1,
+        "bins": {"0_0": [0, 1]},
+    }))
+    (metadata / "tth.tiff").touch()
+
+    class Source:
+        def close(self):
+            pass
+
+    observed = {}
+
+    def sample_rois(source, rois, **kwargs):
+        observed.update(kwargs)
+        return [{
+            "roi": {"x0": 0, "y0": 0, "x1": 2, "y1": 2},
+            "metric": "integrated", "normalize_frames": True,
+            "center_bin": "0_0",
+            "profile": {"0_0": {"intensity": 1.0, "integrated": 4.0,
+                                  "mean": 1.0, "n_pixels": 4, "n_frames": 2}},
+        }]
+
+    monkeypatch.setattr("xrd_app.core.io.open_bin_source", lambda *a, **k: Source())
+    monkeypatch.setattr("xrd_app.core.io.load_tth_map", lambda path: np.ones((4, 4)))
+    monkeypatch.setattr("xrd_app.core.roi_map.sample_rois", sample_rois)
+    monkeypatch.setattr("xrd_app.core.processing.estimate_beam_center", lambda image: (2, 2))
+
+    output = tmp_path / "preview.json"
+    result = CliRunner().invoke(main, [
+        "roi-shapes", "--root", str(tmp_path), "--scan", "203", "--bin-size", "3",
+        "--roi", "0,0,2,2", "--name", "preview", "--fast", "--normalize-frames",
+        "--preview-output", str(output),
+    ])
+
+    assert result.exit_code == 0, result.output
+    assert observed["normalize_frames"] is True
+    preview = json.loads(output.read_text())
+    assert preview["normalize_frames"] is True
+    assert preview["intensity_definition"].startswith("mean detector counts")
 
 
 def test_hd_child_grid_requires_matching_lattice_provenance():

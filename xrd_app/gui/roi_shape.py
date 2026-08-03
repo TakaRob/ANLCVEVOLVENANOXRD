@@ -72,7 +72,8 @@ class ROIShapeWindow(QMainWindow):
         h.setContentsMargins(0, 0, 0, 0)
         h.addWidget(QLabel("<b>Bin:</b>"))
         self.bin_combo = QComboBox()
-        self.bin_combo.addItems([f"{n}x{n}" for n in (1, 2, 3, 4, 5)])
+        bins = sorted({1, 2, 3, 4, 5, self.bin_size})
+        self.bin_combo.addItems([f"{n}x{n}" for n in bins])
         self.bin_combo.setCurrentText(f"{self.bin_size}x{self.bin_size}")
         self.bin_combo.currentTextChanged.connect(self._bin_changed)
         h.addWidget(self.bin_combo)
@@ -580,7 +581,8 @@ class ROIShapeWindow(QMainWindow):
         args = ["roi-shapes", "--root", self.project_root,
                 "--bin-size", str(self.bin_size),
                 "--name", self.name.text().strip() or "manual_roi",
-                "--preview-output", str(preview)]
+                "--preview-output", str(preview),
+                "--normalize-frames"]
         for entry in entries:
             args += ["--roi", ",".join(str(v) for v in entry["roi"])]
         if self.fast_preview_cb.isChecked():

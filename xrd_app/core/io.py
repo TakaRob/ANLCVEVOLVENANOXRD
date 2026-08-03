@@ -1232,12 +1232,15 @@ def build_bins(
     compression: str = "zstd",
     log: Callable[[str], None] = print,
     archive: Optional[Union[str, Path]] = None,
+    normalize_frames: bool = False,
 ) -> Path:
-    """Sum each bin's raw frames into a single binned HDF5 file.
+    """Aggregate each bin's raw frames into a single binned HDF5 file.
 
+    Frames are summed by default. With ``normalize_frames=True``, each sum is
+    divided by its contributing frame count to produce a per-frame mean, which
+    removes intensity artifacts from unequal true-position cell occupancy.
     Output structure: one float32 dataset per bin keyed ``"row_col"``, with
-    ``bin_size``, ``n_bin_rows``, ``n_bin_cols``, ``n_bins`` and
-    ``detector_shape`` stored as file attributes.
+    aggregation provenance and grid dimensions stored as file attributes.
     """
     gm = load_grid_mapping(grid_mapping)
     bin_size = bin_size or gm["bin_size"]
@@ -1251,7 +1254,9 @@ def build_bins(
     n_bins = len(bins)
 
     comp_kwargs, compression_label = get_compression_kwargs(compression)
+    aggregation = "mean_per_frame" if normalize_frames else "sum"
     log(f"Building {n_bins} bin images ({bin_size}x{bin_size}) -> {output}")
+    log(f"  Aggregation: {aggregation}")
     log(f"  Compression: {compression_label}")
 
     # Write to a temporary file and atomically rename it onto `output` only
@@ -1266,6 +1271,9 @@ def build_bins(
     out.attrs["n_bin_rows"] = gm["n_bin_rows"]
     out.attrs["n_bin_cols"] = gm["n_bin_cols"]
     out.attrs["n_bins"] = n_bins
+    out.attrs["aggregation"] = aggregation
+    if normalize_frames:
+        out.attrs["normalized_by"] = "contributing_frame_count"
     if frame_store.is_archive:
         out.attrs["pixel_source"] = "xrd_unbinned_archive.h5"
     first_frame = next((gi for indices in bins.values() for gi in indices), None)
@@ -1281,8 +1289,12 @@ def build_bins(
                 summed = frame if summed is None else summed + frame
 
             if summed is not None:
+                if normalize_frames:
+                    summed /= len(frame_indices)
                 np.clip(summed, 0, 1e9, out=summed)
-                out.create_dataset(bin_key, data=summed.astype(np.float32), **comp_kwargs)
+                dataset = out.create_dataset(
+                    bin_key, data=summed.astype(np.float32), **comp_kwargs)
+                dataset.attrs["n_frames"] = len(frame_indices)
 
             if (i + 1) % 100 == 0 or (i + 1) == n_bins:
                 elapsed = time.time() - t0
@@ -1509,6 +1521,7 @@ class _H5Source(BinImageSource):
     def __init__(self, h5_path, bin_size=None, grid_mapping=None, variant=None):
         self._path = str(h5_path)
         self._f = h5py.File(self._path, "r")
+        self.aggregation = str(self._f.attrs.get("aggregation", "sum"))
         try:
             if grid_mapping is not None:
                 self._keys = _validate_binned_h5(

@@ -96,6 +96,10 @@ BIN_CONFIGS = {
     1: {"label": "1×1 (raw)"},
 }
 
+
+def bin_size_label(bin_size):
+    return BIN_CONFIGS.get(bin_size, {"label": f"{bin_size}×{bin_size}"})["label"]
+
 IMAGE_CACHE_MAX = 50
 
 
@@ -770,10 +774,8 @@ class LabelingTool(QMainWindow):
         # scan's dir, finding nothing for any scan but 203 -> empty grid -> crash.
         self._scan_number = self.dm.scan_number(scan) or 203
 
-        # Open at the requested bin size when it is a valid choice; otherwise
-        # fall back to 5. Starting at a size that has prebuilt bins avoids the
-        # slow raw-frame fallback in _load_bin_data_for_size.
-        self.bin_size = bin_size if bin_size in BIN_SIZES else 5
+        # Any positive size is valid; presets are only UI shortcuts.
+        self.bin_size = int(bin_size) if bin_size is not None and int(bin_size) > 0 else 5
         self._labeling_enabled = False
         self._init_done = False
 
@@ -1015,10 +1017,20 @@ class LabelingTool(QMainWindow):
         bin_layout = QHBoxLayout()
         self.bin_size_combo = QComboBox()
         for bs in BIN_SIZES:
-            self.bin_size_combo.addItem(BIN_CONFIGS[bs]["label"], bs)
-        self.bin_size_combo.setCurrentIndex(BIN_SIZES.index(self.bin_size))
+            self.bin_size_combo.addItem(bin_size_label(bs), bs)
+        self.bin_size_combo.addItem("(manual)", None)
+        self.manual_bin_size = QSpinBox()
+        self.manual_bin_size.setRange(1, 99)
+        self.manual_bin_size.setValue(self.bin_size)
+        self.manual_bin_size.setPrefix("N = ")
+        self.manual_bin_size.setVisible(self.bin_size not in BIN_SIZES)
+        selected = self.bin_size_combo.findData(
+            self.bin_size if self.bin_size in BIN_SIZES else None)
+        self.bin_size_combo.setCurrentIndex(selected)
         self.bin_size_combo.currentIndexChanged.connect(self._on_bin_size_changed)
+        self.manual_bin_size.editingFinished.connect(self._on_manual_bin_size_changed)
         bin_layout.addWidget(self.bin_size_combo)
+        bin_layout.addWidget(self.manual_bin_size)
         self.bin_size_status = QLabel("")
         bin_layout.addWidget(self.bin_size_status)
         bin_group.setLayout(bin_layout)
@@ -1404,7 +1416,18 @@ class LabelingTool(QMainWindow):
 
     def _on_bin_size_changed(self, idx):
         new_size = self.bin_size_combo.currentData()
-        if new_size is None or new_size == self.bin_size or not self._init_done:
+        manual = new_size is None
+        self.manual_bin_size.setVisible(manual)
+        if manual:
+            new_size = self.manual_bin_size.value()
+        self._change_bin_size(new_size)
+
+    def _on_manual_bin_size_changed(self):
+        if self.bin_size_combo.currentData() is None:
+            self._change_bin_size(self.manual_bin_size.value())
+
+    def _change_bin_size(self, new_size):
+        if new_size == self.bin_size or not self._init_done:
             return
 
         gr, gc = self._current_grid_center()
@@ -1422,7 +1445,13 @@ class LabelingTool(QMainWindow):
             # working size so the view stays usable instead of going black.
             QMessageBox.warning(self, "Bin size unavailable", str(e))
             self.bin_size_combo.blockSignals(True)
-            self.bin_size_combo.setCurrentIndex(BIN_SIZES.index(prev_size))
+            self.manual_bin_size.blockSignals(True)
+            self.manual_bin_size.setValue(prev_size)
+            previous = self.bin_size_combo.findData(
+                prev_size if prev_size in BIN_SIZES else None)
+            self.bin_size_combo.setCurrentIndex(previous)
+            self.manual_bin_size.setVisible(prev_size not in BIN_SIZES)
+            self.manual_bin_size.blockSignals(False)
             self.bin_size_combo.blockSignals(False)
             self.bin_size = prev_size
             return
@@ -1437,7 +1466,7 @@ class LabelingTool(QMainWindow):
         self._current_bin_idx = target_idx
 
         h5_exists = self.bins_h5_path and os.path.exists(self.bins_h5_path)
-        label = BIN_CONFIGS[new_size]["label"]
+        label = bin_size_label(new_size)
         self.bin_size_status.setText(
             f"{self.n_bins} bins" + ("" if h5_exists else " (raw frames)"))
 
@@ -1711,7 +1740,7 @@ class LabelingTool(QMainWindow):
 
         n_frames = len(self.bin_mapping[bk]) if self.bin_mapping else 0
         frames_str = f"  |  {n_frames} frames" if n_frames else ""
-        label = BIN_CONFIGS[self.bin_size]["label"]
+        label = bin_size_label(self.bin_size)
         if self.bin_size == 1:
             title = f"Raw ({br}, {bc})  |  Index {self._current_bin_idx}{frames_str}"
         else:

@@ -196,7 +196,32 @@ def test_build_bins_uses_archive_when_raw_paths_are_gone(tmp_path):
     io.build_bins(gm, output, compression="gzip", archive=archive, log=lambda _: None)
 
     with h5py.File(output, "r") as f:
+        assert f.attrs["aggregation"] == "sum"
+        assert f["0_0"].attrs["n_frames"] == 2
         assert np.array_equal(f["0_0"][:], frames.sum(axis=0).astype(np.float32))
+
+
+def test_build_bins_can_normalize_by_contributing_frame_count(tmp_path):
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    frames = np.array([[[2, 4]], [[6, 8]]], dtype=np.uint16)
+    raw_path = raw / "scan_0007_000.h5"
+    _raw_file(raw_path, frames)
+    gm = {
+        "bin_size": 1, "n_bin_rows": 1, "n_bin_cols": 1,
+        "xrd_files": [str(raw_path)], "frame_map": [[0, 0], [0, 1]],
+        "bins": {"0_0": [0, 1]},
+    }
+    output = tmp_path / "normalized_bins.h5"
+
+    io.build_bins(gm, output, compression="gzip", normalize_frames=True,
+                  log=lambda _: None)
+
+    with h5py.File(output, "r") as f:
+        assert f.attrs["aggregation"] == "mean_per_frame"
+        assert f.attrs["normalized_by"] == "contributing_frame_count"
+        assert f["0_0"].attrs["n_frames"] == 2
+        assert np.array_equal(f["0_0"][:], np.array([[4, 6]], dtype=np.float32))
 
 
 def test_summation_clips_saturation_instead_of_zeroing(tmp_path):

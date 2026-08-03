@@ -987,8 +987,11 @@ def archive_unbinned(scan, xrd_dir, positions, output, compression, force, root)
                    'tagged grid mapping and writes a tagged binned HDF5.')
 @click.option('--output', help='Output binned HDF5 path (defaults to per-scan Binned/)')
 @click.option('--compression', type=click.Choice(['zstd', 'gzip', 'lz4', 'none']), default='zstd')
+@click.option('--normalize-frames/--sum-frames', default=False,
+              help='Write the mean per contributing frame instead of the frame sum.')
 @click.option('--root', default='.', help='Project root directory')
-def bin(bin_size, scan, grid_mapping, variant, output, compression, root):
+def bin(bin_size, scan, grid_mapping, variant, output, compression,
+        normalize_frames, root):
     """Pre-build the binned HDF5 (xrd_NxN_bins.h5) used by 'peaks'."""
     from .core import io
     dm = DataManager(root, scan=scan)
@@ -1014,7 +1017,8 @@ def bin(bin_size, scan, grid_mapping, variant, output, compression, root):
 
     archive = dm.unbinned_archive_h5(scan=scan)
     io.build_bins(gm_data, out, bin_size=bin_size, compression=compression,
-                  log=click.echo, archive=archive if archive.exists() else None)
+                  log=click.echo, archive=archive if archive.exists() else None,
+                  normalize_frames=normalize_frames)
     click.echo(f"Wrote bins -> {out}")
 
 
@@ -1297,8 +1301,12 @@ def roi_detect(scan, algorithm, sensitivity, max_rois, output, root):
 @click.option('--fast', is_flag=True, help='Approximate coarse-to-fine preview (never use for save)')
 @click.option('--stride', type=click.IntRange(2, 10), default=3,
               help='Spatial stride for --fast preview')
+@click.option('--normalize-frames/--sum-frames', default=False,
+              help='Divide each spatial bin by its contributing frame count. Use '
+                   'for intensity maps when true-position cells have unequal occupancy.')
 @click.option('--root', default='.', help='Project root directory')
-def roi_shapes(bin_size, scan, rois, name, preview_output, fast, stride, root):
+def roi_shapes(bin_size, scan, rois, name, preview_output, fast, stride,
+               normalize_frames, root):
     """Batch detector ROIs into spatial maps with one pass over scan bins."""
     from .core import io, processing, roi_map
 
@@ -1340,7 +1348,7 @@ def roi_shapes(bin_size, scan, rois, name, preview_output, fast, stride, root):
     try:
         sampled = roi_map.sample_rois(
             source, detector_rois, grid_mapping=gm, metric="integrated",
-            fast=fast, stride=stride,
+            normalize_frames=normalize_frames, fast=fast, stride=stride,
             progress=_make_progress("ROI intensity maps"), log=click.echo)
     except ValueError as exc:
         raise click.ClickException(str(exc)) from exc
@@ -1363,7 +1371,11 @@ def roi_shapes(bin_size, scan, rois, name, preview_output, fast, stride, root):
         "n_bin_cols": int(gm.get("n_bin_cols", 0)),
         "approximate": bool(fast and any(r.get("approximate") for r in sampled)),
         "stride": stride if fast else 1,
-        "intensity_definition": "total detector counts inside ROI per spatial bin",
+        "normalize_frames": bool(normalize_frames),
+        "intensity_definition": (
+            "mean detector counts per contributing frame inside ROI per spatial bin"
+            if normalize_frames else
+            "total detector counts inside ROI per spatial bin"),
         "features": features,
     }
     output = Path(preview_output) if preview_output else dm.roi_map_json(tag, bin_size, scan)
@@ -1517,14 +1529,18 @@ def run_pipeline(ctx, bin_size, scan, algorithm, shape_algo, snr, root):
 @click.option('--rawgrid', is_flag=True,
               help='Bypass (X,Y) de-skew: use the legacy serpentine X-only grid.')
 @click.option('--compression', type=click.Choice(['zstd', 'gzip', 'lz4', 'none']), default='zstd')
+@click.option('--normalize-frames/--sum-frames', default=False,
+              help='Write the mean per contributing frame instead of the frame sum.')
 @click.option('--root', default='.', help='Project root directory')
 @click.pass_context
-def make_bins(ctx, bin_size, scan, grid_shape, rawgrid, compression, root):
+def make_bins(ctx, bin_size, scan, grid_shape, rawgrid, compression,
+              normalize_frames, root):
     """Archive raw frames once, then build the requested grid and bins."""
     ctx.invoke(archive_unbinned, scan=scan, compression=compression, root=root)
     ctx.invoke(grid, bin_size=bin_size, scan=scan, shape=grid_shape,
                rawgrid=rawgrid, root=root)
-    ctx.invoke(bin, bin_size=bin_size, scan=scan, compression=compression, root=root)
+    ctx.invoke(bin, bin_size=bin_size, scan=scan, compression=compression,
+               normalize_frames=normalize_frames, root=root)
     dm = DataManager(root, scan=scan)
     click.echo(f"\nBins ready: {dm.binned_h5(bin_size)}")
 

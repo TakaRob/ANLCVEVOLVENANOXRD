@@ -127,10 +127,6 @@ def default_config(name: str, root: Path, scan_number: Optional[int] = None) -> 
         },
         # Map of bin_size (int) -> path to the pre-binned HDF5 file.
         "bins": {},
-        "tracking": {
-            "enabled": True,
-            "mlflow_tracking_uri": f"file://{root / 'CVEvolve' / 'mlruns'}",
-        },
     }
     return cfg
 

@@ -21,6 +21,7 @@ from xrd_app.app import MainWindow
 from xrd_app.gui.roi_shape import ROIShapeWindow
 from xrd_app.gui import lifecycle
 from xrd_app.gui.lifecycle import dispose_widget, start_process, stop_process, stop_thread
+from xrd_app.tabs import _console
 from xrd_app.tabs._console import JobConsole
 
 
@@ -260,6 +261,22 @@ def test_roi_heatmap_click_selects_requested_bin(monkeypatch):
     assert window.spatial_index == 1
     assert window.image_mode.currentIndex() == 1
     assert "2_3" in window.spatial_label.text()
+
+
+def test_job_console_adds_transient_environment(monkeypatch):
+    _app()
+    console = JobConsole()
+    captured = {}
+
+    def fake_start(process, program, arguments=()):
+        captured["key"] = process.processEnvironment().value("ARGO_API_KEY")
+
+    monkeypatch.setattr(_console, "start_process", fake_start)
+    console.run(["--help"], env={"ARGO_API_KEY": "temporary-secret"})
+
+    assert captured["key"] == "temporary-secret"
+    assert "temporary-secret" not in console.log.toPlainText()
+    console._proc = None
 
 
 def test_job_console_handles_process_start_failure(monkeypatch):

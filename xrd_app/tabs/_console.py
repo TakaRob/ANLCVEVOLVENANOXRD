@@ -10,7 +10,7 @@ from __future__ import annotations
 import re
 import sys
 
-from PyQt5.QtCore import QProcess, pyqtSignal
+from PyQt5.QtCore import QProcess, QProcessEnvironment, pyqtSignal
 from PyQt5.QtGui import QFont
 from PyQt5.QtWidgets import (
     QHBoxLayout, QLabel, QPlainTextEdit, QProgressBar, QPushButton, QTabWidget,
@@ -58,12 +58,13 @@ class JobConsole(QWidget):
     def is_running(self) -> bool:
         return self._proc is not None and self._proc.state() != QProcess.NotRunning
 
-    def run(self, args, cwd=None, on_finished=None, header=None):
+    def run(self, args, cwd=None, on_finished=None, header=None, env=None):
         """Run ``[python, -m, xrd_app.cli, *args]`` (args is the CLI arg list).
 
         ``on_finished(exit_code)`` is invoked once when the process exits (e.g.
         to refresh a status label after the job completes). ``header`` is an
         optional note printed above the command (it survives the log clear).
+        ``env`` adds transient environment values without displaying them.
         """
         if self.is_running():
             self._append("\n[a job is already running — cancel it first]\n")
@@ -74,7 +75,7 @@ class JobConsole(QWidget):
         self.log.clear()
         if header:
             self._append(header if header.endswith("\n") else header + "\n")
-        self._start(args, cwd)
+        self._start(args, cwd, env=env)
 
     def run_many(self, jobs, cwd=None, on_all_finished=None, header=None):
         """Queue several CLI invocations, run them back-to-back in one console.
@@ -128,11 +129,16 @@ class JobConsole(QWidget):
         self.status.setText(f"job {idx}/{self._queue_total}")
         self._start(args, self._queue_cwd)
 
-    def _start(self, args, cwd=None):
+    def _start(self, args, cwd=None, env=None):
         """Launch one QProcess for ``args`` (does not clear the log)."""
         cmd = [sys.executable, "-m", "xrd_app.cli", *[str(a) for a in args]]
         self._append("$ " + " ".join(cmd) + "\n")
         self._proc = QProcess(self)
+        if env:
+            process_env = QProcessEnvironment.systemEnvironment()
+            for name, value in env.items():
+                process_env.insert(str(name), str(value))
+            self._proc.setProcessEnvironment(process_env)
         if cwd:
             self._proc.setWorkingDirectory(str(cwd))
         self._proc.setProcessChannelMode(QProcess.MergedChannels)

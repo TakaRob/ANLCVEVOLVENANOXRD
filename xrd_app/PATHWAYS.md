@@ -45,7 +45,7 @@ Everything resolves through `config.ProjectConfig` and `config.DataManager`
   Labels/    <scan>/*_peaks_*.json, *_shapes_*.json, feature_catalog_*.json,
                     *_hdmap_*.json, *_combined_*.json, catalog_lineage.json, *.csv
   Figures/   PNG exports
-  CVEvolve/  optimizer sessions + mlruns/
+  CVEvolve/  optimizer sessions + optional Hutch databases
   Study/     multi-scan rocking-study outputs (aggregate → track → rocking → predict → combined-device, RSM, qspace/)
 ```
 
@@ -58,8 +58,8 @@ Everything resolves through `config.ProjectConfig` and `config.DataManager`
   `name`, `scan:{number,name}`, `detector:{shape}`, `scans:{}` (mirrors
   `Raw/scans.json`), `paths:{raw_dir,binned_dir,...}`, `data_sources:{raw_root,
   position_root, raw_scan_dir, position_csv, tth_map, reflections, grid_mapping,
-  detector_script}`, `bins:{}` (bin_size→h5 path), `tracking:{enabled,
-  mlflow_tracking_uri}`.
+   detector_script}`, `bins:{}` (bin_size→h5 path).
+
 
 Path precedence for any input: **explicit override → `data_sources` entry in
 `config.yaml` → conventional default → (for tth/reflections) bundled package

@@ -299,6 +299,11 @@ class CVEvolveDialog(QDialog):
         self.engine.addItems(["podman", "docker", "local"])
         rl.addRow("Engine:", self.engine)
 
+        self.argo_key = QLineEdit()
+        self.argo_key.setEchoMode(QLineEdit.Password)
+        self.argo_key.setPlaceholderText("Transient; not saved (uses ARGO_API_KEY)")
+        rl.addRow("Argo username / API key:", self.argo_key)
+
         self.hutch = QCheckBox("Enable Hutch tracking (live SQL + model output)")
         rl.addRow("Tracking:", self.hutch)
 
@@ -427,7 +432,9 @@ class CVEvolveDialog(QDialog):
         else:
             self.hutch_view.stop()
             self.hutch_view.hide()
-        self.console.run(args)
+        key = self.argo_key.text().strip()
+        env = {"ARGO_API_KEY": key} if key else None
+        self.console.run(args, env=env)
 
     def closeEvent(self, event):  # noqa: N802 (Qt signature)
         self.hutch_view.stop()

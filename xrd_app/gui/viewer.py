@@ -918,9 +918,8 @@ class FeatureViewer(QMainWindow):
         self._tth_data = det.precompute_tth(self._tth_map)
         self._radial_median_subtract = det.radial_median_subtract
 
-        ref_mod = load_module(_DM.reflections(scan=_DM._scan()))
-        self._ref_degs = ref_mod.degs
-        self._ref_labels = ref_mod.deg_labels
+        self._ref_degs, self._ref_labels = io.load_reflections(
+            _DM.reflections(scan=_DM._scan()))
         self._show_tth_overlay = False
 
         from ..core.processing import estimate_beam_center

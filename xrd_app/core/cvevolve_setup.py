@@ -55,8 +55,8 @@ def scaffold_project(dest_dir, name: str, force: bool = False) -> Dict[str, list
 
     Writes ``config.yaml`` / ``prompt.md`` / ``holdout_test_prompt.md``. The
     config's ``{{ROOT}}`` (this CVEvolve dir) and ``{{NAME}}`` (session name)
-    placeholders are expanded so ``workspace``/``tracking``/``hutch`` paths point
-    into the project. Existing files are left untouched unless ``force``.
+    placeholders are expanded so ``workspace`` and ``hutch`` paths point into
+    the project. Existing files are left untouched unless ``force``.
 
     Returns ``{"written": [...], "skipped": [...]}`` (absolute paths as str).
     """

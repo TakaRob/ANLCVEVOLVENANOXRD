@@ -89,9 +89,6 @@ def create_session(dm, dest=None, holdout_pct=20.0, seed=42) -> dict:
         "branching": {"warmup_rounds": 3, "tune_every": 3, "evolve_every": 2,
                       "min_scored_for_tune": 1, "min_scored_for_evolve": 2},
         "stopping": {"max_rounds": 25, "patience_rounds": 12, "min_improvement": 0.0},
-        "tracking": {"enabled": False,
-                     "mlflow_tracking_uri": f"file://{dest / 'mlruns'}",
-                     "mlflow_experiment_name": "ROI Summed Detection"},
     }
     with open(dest / "config.yaml", "w") as handle:
         yaml.safe_dump(config, handle, sort_keys=False)

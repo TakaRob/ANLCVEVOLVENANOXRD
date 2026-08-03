@@ -1,82 +1,52 @@
-Evaluate the submitted algorithm against the holdout validation set of single-exposure (1×1) XRD frames.
+Evaluate the submitted per-bin Bragg peak detector against the supplied holdout set.
 
-## Holdout data directory contents
+## Holdout data
 
-- **`bin_annotations.json`**: Ground truth annotations for bins that contain peaks. Format:
-  ```json
-  {
-    "1_1": {
-      "(001)": [[842, 972], [855, 557]],
-      "(111)": [[388, 1017], [374, 752], [467, 324]],
-      ...
-    },
-    ...
-  }
-  ```
-  Keys are bin identifiers (`"row_col"` in the 1×1 grid), values are dicts mapping reflection names to lists of `[x, y]` pixel coordinates.
+Inspect the holdout directory rather than assuming a particular bin size, detector shape, scan-grid shape, or number of examples. It commonly contains:
 
-- **`empty_bins.json`**: A list of bin keys confirmed to contain **no peaks**. A correct algorithm should return zero detections for these bins.
+- **`bin_annotations.json`**: Ground-truth peaks grouped by bin and reflection. Bin entries map reflection names to detector pixel coordinates.
+- **`empty_bins.json`**: Reviewed bins containing no peaks.
+- **`grid_mapping.json`**: Grid and bin metadata when available.
+- **`tth.tiff`**: Per-pixel 2-theta map.
+- **`reflections.py`**: Valid reflection names and expected 2-theta values.
+- **`labels/`**: Per-bin label files when required by the evaluator.
+- **`evaluate.py`**: Holdout evaluation harness when supplied.
 
-- **`grid_mapping.json`**: Spatial grid metadata — `n_bin_rows` (156), `n_bin_cols` (221).
-
-- **`tth.tiff`**: The per-pixel 2-theta map (same as test data).
-
-- **`reflections.py`**: Reflection 2-theta values and labels (same as test data).
-
-- **`noise_reduction_algorithms.py`**: Noise reduction library (same as test data).
-
-- **`labels/`**: Directory of per-bin JSON label files (e.g., `1_1.json`), each containing the ground truth annotations for that center bin.
-
-## Loading frame images
-
-All frames are pre-computed in a single HDF5 file at **`/home/takaji/xrd_1x1_bins.h5`**. Load any frame with:
-
-```python
-import h5py
-import numpy as np
-
-def load_frame(bin_key, bins_h5_path="/home/takaji/xrd_1x1_bins.h5"):
-    with h5py.File(bins_h5_path, "r") as f:
-        return f[bin_key][:].astype(np.float64)
-```
+Use the supplied files and the evaluator's command-line help to discover paths and formats. Confirm whether annotation points are represented as `[row, col]` or `(x, y)` before comparing them with detector coordinates.
 
 ## Evaluation procedure
 
-1. For each bin in `bin_annotations.json`, plus the bins in `empty_bins.json`:
-   a. Run the submitted algorithm with that bin as the `--center-bin`.
-   b. The algorithm should detect peaks in the center frame (optionally also in neighboring frames within a spatial radius, linking them across frames as a spatial-persistence confirmation), and output the peaks for the center bin.
-   c. Compare detections against ground truth annotations for that center bin.
+1. Evaluate every annotated bin and every reviewed empty bin in the holdout set.
+2. Run the submitted algorithm on each bin's detector image independently.
+3. Compare the reported reflection and detector position with the ground truth using the matching rule implemented by the supplied evaluator.
+4. Enforce one-to-one matching: each ground-truth point and each detection can participate in at most one match.
+5. Use the evaluator's handling of empty bins. A reviewed empty bin should produce no detections.
+6. Report the aggregate primary metric and supporting precision, recall, and F1 values provided by the evaluator.
 
-2. **Matching criterion**: A detected point within **40 pixels** (Euclidean distance) of a ground truth point counts as a true positive. Each ground truth point can match at most one detection, and vice versa.
-
-3. **Per-bin scores** (precision P, recall R):
-   - If a bin has no ground truth peaks and the algorithm correctly detects nothing: F2 = 1.0
-   - If a bin has no ground truth peaks but the algorithm detects one or more: F2 = 0.0
-   - Otherwise: F2 = 5 * P * R / (4 * P + R)  (recall-weighted, β=2)
-
-4. **Aggregate metric**: The PRIMARY metric is the **mean F2 score** (recall-weighted) across all validation bins, weighted equally. Because the ground truth is derived from 3×3 annotations and undercounts the peaks visible at full 1×1 sensitivity, recall of the known features is prioritized ~4× over precision. Mean F1, precision, and recall are reported for context.
-
-5. Print the aggregate F2 score as the metric value. Also print per-bin scores for debugging.
+The primary metric is **mean per-bin F2** (beta=2), which emphasizes recall while still penalizing excessive proposals. Do not replace it with F1 or a global point-weighted score.
 
 ## Running the evaluation
 
-The simplest path is the provided `evaluate.py` harness (seeded into the holdout dir), pointed at the holdout labels at FULL settings:
+Prefer the supplied holdout `evaluate.py` harness. Inspect its interface first:
+
 ```bash
-python <holdout_dir>/evaluate.py \
-    --candidate <algorithm>.py \
-    --labels-dir <holdout_dir>/labels \
-    --two-theta <holdout_dir>/tth.tiff \
-    --reflections <holdout_dir>/reflections.py \
-    --grid-mapping <holdout_dir>/grid_mapping.json \
-    --spatial-radius 5 --downsample 1 --workers 8
+python <holdout_dir>/evaluate.py --help
 ```
-It prints `PRIMARY_SCORE_F2=` (the metric) plus mean F1/precision/recall. Do NOT use the dev-mode knobs (`--subset`, `--downsample>1`, `--spatial-radius<5`) for the holdout score.
 
-Alternatively, run the algorithm per bin via its IO format (`--center-bin`, `--output`) and aggregate the per-bin F2 scores yourself.
+Then run the candidate over the complete holdout set using the evaluator's full-resolution defaults. Do not use development subsets, reduced resolution, or other approximate speed settings for the final holdout score.
 
-**Subprocess timeout**: Set the subprocess timeout to at least **120 seconds** per bin (full-resolution spatial_radius=5 processes ~121 frames; the optimized detector handles a bin in well under a minute).
+If no evaluation harness is supplied, invoke the candidate according to its documented contract, aggregate one-to-one matches per bin, and compute:
+
+```text
+F2 = 5 * precision * recall / (4 * precision + recall)
+```
+
+Handle zero-denominator and empty-bin cases explicitly and consistently, then average the per-bin scores equally.
 
 ## Important notes
 
-- The holdout bins span a variety of signal levels: some have many strong peaks, some have a single faint peak, and some have no peaks at all.
-- Do not train or tune hyperparameters on this holdout set. It is for final evaluation only.
+- This is final validation data. Do not tune algorithms or hyperparameters against it.
+- This task evaluates each bin's peak detections independently.
+- Do not hard-code a bin size, detector dimensions, matching radius, or data path.
+- Ensure each reported peak lies in the expected 2-theta band for its reflection.
+- Include all holdout bins in the final result and print the primary F2 score clearly.

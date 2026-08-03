@@ -6,8 +6,9 @@ from pathlib import Path
 
 from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtWidgets import (
-    QAbstractItemView, QComboBox, QGroupBox, QHBoxLayout, QLabel, QListWidget,
-    QListWidgetItem, QPushButton, QSpinBox, QVBoxLayout, QWidget, QSizePolicy,
+    QAbstractItemView, QCheckBox, QComboBox, QGroupBox, QHBoxLayout, QLabel,
+    QListWidget, QListWidgetItem, QPushButton, QSpinBox, QVBoxLayout, QWidget,
+    QSizePolicy,
 )
 
 from ..config import DataManager, format_detector_label
@@ -109,6 +110,13 @@ class ProgramsTab(QWidget):
             "Bin size to build (NxN). Type any value; after building it appears "
             "in “Existing bins” above.")
         bl.addWidget(self.make_bin_spin)
+        self.normalize_bins_cb = QCheckBox("Normalize by frame count")
+        self.normalize_bins_cb.setChecked(False)
+        self.normalize_bins_cb.setToolTip(
+            "Divide each spatial bin by its contributing frame count. This writes "
+            "mean-per-frame detector images and removes brightness artifacts where "
+            "true-position grid cells contain unequal numbers of frames.")
+        bl.addWidget(self.normalize_bins_cb)
         make_bins_btn = QPushButton("Create bins")
         make_bins_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.MinimumExpanding)
         make_bins_btn.setMinimumHeight(40)
@@ -451,6 +459,9 @@ class ProgramsTab(QWidget):
         bs = self.make_bin_spin.value()  # Create bins depends only on this spin box.
         jobs = [["make-bins", "--root", self.project_root, "--scan", str(n),
                  "--bin-size", str(bs)] for n in scans]
+        if self.normalize_bins_cb.isChecked():
+            for job in jobs:
+                job.append("--normalize-frames")
         self.console.run_many(jobs, on_all_finished=lambda _n: self._on_bins_built(bs))
 
     def _on_bins_built(self, bs):

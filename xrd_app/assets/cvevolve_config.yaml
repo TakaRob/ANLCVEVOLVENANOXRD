@@ -22,19 +22,15 @@ metric:
   direction_hint: maximize
   target_value: null
   description_hint: >-
-    PRIMARY METRIC: mean per-center-bin F2 score (recall-weighted, beta=2)
-    for spatially-validated Bragg peak detection. Ground truth is derived
-    from 3x3 annotations mapped to the center 1x1 frame, so it UNDERCOUNTS
-    the peaks visible at full 1x1 sensitivity. The PRIMARY GOAL is therefore
-    to RECALL all known 3x3 features; extra 1x1 detections are often real and
-    must be only lightly penalized, so recall is weighted ~4x precision (F2).
-    The algorithm must detect peaks in single-exposure frames, favoring recall
-    within the known 2-theta bands. A detected point within 40 pixels of a
-    ground truth point is a match. Maximize mean F2 across evaluation bins
-    (precision/F1 reported for context only). Sensitivity can always be raised
-    later; do not sacrifice recall of the 3x3 features to chase precision.
-    (Optionally link detections across neighboring frames as a light spatial-
-    persistence confirmation - real peaks recur in clusters, noise is isolated.)
+    PRIMARY METRIC: mean per-bin F2 score (recall-weighted, beta=2) for Bragg
+    peak detection at the selected bin size. Detect peaks independently in each
+    detector image and restrict candidates to the known 2-theta reflection
+    bands. The evaluation harness defines the coordinate convention, matching
+    radius, and empty-bin behavior. Maximize mean F2 across evaluation bins;
+    precision, recall, and F1 are supporting metrics. Ground truth may omit weak
+    real peaks, so favor recall without producing an excessive number of
+    proposals. Tune thresholds and feature-size parameters from the supplied
+    development data rather than assuming values from another bin size.
 branching:
   warmup_rounds: 3
   tune_every: 3
@@ -46,13 +42,6 @@ stopping:
   max_rounds: 25
   patience_rounds: 12
   min_improvement: 0.0
-# MLflow tracking — standard experiment tracker. Point mlflow_tracking_uri at a
-# server (e.g. http://164.54.100.181:5000/) to log to the shared beamline server
-# instead of the local file store.
-tracking:
-  enabled: false
-  mlflow_tracking_uri: 'file://{{ROOT}}/mlruns'
-  mlflow_experiment_name: CVEvolve
 # Hutch tracking — CVEvolve's own lightweight daemon + SQLite DB. Toggled from
 # the "Enable Hutch tracking" checkbox in the Use CVEvolve dialog, which also
 # drives the live [SQL table] [model output] view. db_path lives under the

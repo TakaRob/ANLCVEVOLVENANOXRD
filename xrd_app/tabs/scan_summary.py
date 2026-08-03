@@ -23,7 +23,7 @@ from PyQt5.QtWidgets import (
 )
 
 from ..config import DataManager
-from ..core import scan_table as st
+from ..core import catalogs, scan_table as st
 from ._embed import placeholder
 
 TAB_META = {
@@ -65,7 +65,7 @@ class ScanSummaryTab(QWidget):
         super().__init__()
         self._project_root = project_root
         self._dm = DataManager(project_root)
-        self._bin_size = bin_size if bin_size in _BIN_SIZES else 3
+        self._bin_size = int(bin_size) if int(bin_size) > 0 else 3
         self._types = []                # catalog_types() entries for the bin
 
         lay = QVBoxLayout(self)
@@ -75,7 +75,11 @@ class ScanSummaryTab(QWidget):
         bar = QHBoxLayout()
         bar.addWidget(QLabel("<b>Bin:</b>"))
         self._bin_combo = QComboBox()
-        for b in _BIN_SIZES:
+        bins = set(_BIN_SIZES)
+        for scan in self._dm.discover_scans(selected_only=True):
+            bins.update(catalogs.available_bins(self._dm.results_dir(scan)))
+        bins.add(self._bin_size)
+        for b in sorted(bins):
             self._bin_combo.addItem(f"{b}x{b}", b)
         self._bin_combo.setCurrentIndex(self._bin_combo.findData(self._bin_size))
         self._bin_combo.activated.connect(self._on_bin_changed)

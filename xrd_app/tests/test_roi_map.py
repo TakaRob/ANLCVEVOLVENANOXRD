@@ -178,6 +178,19 @@ def test_sample_roi_can_normalize_each_bin_by_frame_count():
     assert result["normalize_frames"] is True
 
 
+def test_frame_normalization_does_not_double_normalize_mean_per_frame_source():
+    source = _FakeSource()
+    source.aggregation = "mean_per_frame"
+
+    result = roi_map.sample_roi(
+        source, (0, 0, 2, 2), metric="integrated", normalize_frames=True,
+        grid_mapping={"bins": {"0_0": [0], "0_1": [1, 2]}},
+    )
+
+    assert result["profile"]["0_1"]["integrated"] == 40.0
+    assert result["normalize_frames"] is True
+
+
 def test_to_shape_feature_creates_one_complete_manual_feature():
     sampled = roi_map.sample_roi(
         _FakeSource(), (2, 1, 5, 3), metric="integrated",

@@ -133,7 +133,7 @@ class BinnedTab(QWidget):
         self._build_window = build_window
         self._project_root = project_root
         self._scan = scan
-        self._bin_size = bin_size if bin_size in _BIN_SIZES else _BIN_SIZES[0]
+        self._bin_size = int(bin_size) if int(bin_size) > 0 else _BIN_SIZES[0]
         self._win = None
 
         lay = QVBoxLayout(self)
@@ -143,7 +143,8 @@ class BinnedTab(QWidget):
         bar = QHBoxLayout()
         bar.addWidget(QLabel("<b>Bin:</b>"))
         self._bin_combo = QComboBox()
-        self._bin_combo.addItems([f"{b}x{b}" for b in _BIN_SIZES])
+        bins = sorted(set(_BIN_SIZES) | {self._bin_size})
+        self._bin_combo.addItems([f"{b}x{b}" for b in bins])
         self._bin_combo.setCurrentText(f"{self._bin_size}x{self._bin_size}")
         self._bin_combo.currentTextChanged.connect(self._on_bin_changed)
         bar.addWidget(self._bin_combo)
@@ -224,7 +225,7 @@ class LineageCatalogTab(QWidget):
         self._build_window = build_window
         self._project_root = project_root
         self._scan = scan
-        self._bin_size = bin_size if bin_size in _BIN_SIZES else _BIN_SIZES[0]
+        self._bin_size = int(bin_size) if int(bin_size) > 0 else _BIN_SIZES[0]
         self._feature = None    # selected feature-catalog path str
         self._win = None
         self._view_state = None  # carried layers/metric across catalog switches
@@ -278,7 +279,7 @@ class LineageCatalogTab(QWidget):
         if not bins:                       # no catalogs yet → offer the standard set
             bins = _BIN_SIZES
         if self._bin_size not in bins:
-            self._bin_size = bins[0]
+            bins = sorted(set(bins) | {self._bin_size})
         self._bin_combo.blockSignals(True)
         self._bin_combo.clear()
         for b in bins:

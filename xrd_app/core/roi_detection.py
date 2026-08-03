@@ -47,7 +47,6 @@ def discover_algorithms(dm) -> list[dict]:
     """Bundled baseline plus evolved algorithms from the ROI CVEvolve session."""
     import json
     library = Path(__file__).resolve().parent.parent / "ROIAlgorithms"
-    dog = library / "wieghold_summed_dog.py"
     algorithms = [
         {"name": "Wieghold conservative (P=0.992, F1=0.797)",
          "file": str(library / "wieghold_peak_conservative.py"),
@@ -58,8 +57,6 @@ def discover_algorithms(dm) -> list[dict]:
         {"name": "Wieghold very conservative (P=0.991, F1=0.780)",
          "file": str(library / "wieghold_peak_very_conservative.py"),
          "source": "manual F1 training", "default_sensitivity": 0.80},
-        {"name": "Wieghold summed DoG (legacy F2 tuning)",
-         "file": str(dog), "source": "manual tuning", "default_sensitivity": 12.0},
         {"name": "Baseline summed-image detector",
          "file": str(default_algorithm()), "source": "bundled", "default_sensitivity": 4.0},
     ]
