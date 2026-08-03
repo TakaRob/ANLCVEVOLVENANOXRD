@@ -105,6 +105,8 @@ def multi_scale_tophat(image, sizes=(9, 15, 21)):
 
 def build_tth_band_masks(tth_map, degs, deg_labels, tth_tolerance=0.4):
     """Pre-compute boolean masks for each reflection's 2-theta band."""
+    if "(no reflections)" in deg_labels:
+        return {"(no reflections)": np.ones(tth_map.shape, dtype=bool)}
     bands = {}
     for label, deg_val in zip(deg_labels, degs):
         mask = np.abs(tth_map - deg_val) <= tth_tolerance

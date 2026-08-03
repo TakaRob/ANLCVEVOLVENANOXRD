@@ -13,11 +13,11 @@ from typing import List
 
 DEFAULT_WIDTH = 0.4  # ± degrees; the manual `width` drives the detection band
 
-# Label shared by every tile of a whole-detector reflection set. A set whose
-# entries all carry this one label OR-merges (in build_tth_band_masks) into a
-# single band that spans the detector — the "no known reflections" workflow,
-# expressed as an ordinary reflection set with no special-case code anywhere.
+# This reserved label tells detectors that the single reflection has unlimited
+# width. The large numeric width keeps editors and legacy JSON consumers usable;
+# detectors recognize the label and use an all-true mask regardless of 2θ range.
 WHOLE_FRAME_LABEL = "(no reflections)"
+WHOLE_FRAME_WIDTH = 180.0
 
 # Perovskite default reflection set used to seed a new project's reflections.json
 # (and the bundled assets/reflections.py fallback). The first 8 are the labeled
@@ -52,38 +52,14 @@ def whole_frame_reflections(
     tth_min: float = 0.0,
     tth_max: float = 40.0,
 ) -> List[dict]:
-    """Tile the 2θ range with entries that all share ``label``.
+    """Return one reserved reflection with unlimited detector width.
 
-    Every entry uses the same ``label`` so ``build_tth_band_masks`` OR-merges them
-    into one band covering the whole detector — an ordinary reflection set that
-    lets the band-restricted detector search everything (for datasets with no
-    known Bragg reflections). ``spacing`` 0.3° < the detector tolerance (0.4°) so
-    the merged band is contiguous with no gaps.
-
-    When a ``tth_map`` is given the range is clamped to its observed span (padded
-    by ``margin``) to keep the tile count small; otherwise the fixed ``tth_min``…
-    ``tth_max`` default is used (tiles off the detector just contribute empty
-    masks, so it stays correct across recalibration).
+    The unused range arguments remain accepted so existing CLI calls do not
+    break. Production detectors recognize ``WHOLE_FRAME_LABEL`` and search every
+    detector pixel, independent of calibration range or matching tolerance.
     """
-    lo, hi = float(tth_min), float(tth_max)
-    if tth_map is not None:
-        import numpy as np
-
-        finite = np.asarray(tth_map, dtype=float)
-        finite = finite[np.isfinite(finite)]
-        if finite.size:
-            lo = max(0.0, float(finite.min()) - margin)
-            hi = float(finite.max()) + margin
-    step = float(spacing)
-    if step <= 0:
-        raise ValueError("spacing must be > 0")
-    reflections = []
-    deg = lo
-    # inclusive of hi (fp-safe) so the top of the range is covered
-    while deg <= hi + step / 2:
-        reflections.append({"name": label, "two_theta": round(deg, 5), "width": DEFAULT_WIDTH})
-        deg += step
-    return reflections
+    del tth_map, spacing, margin, tth_min, tth_max
+    return [{"name": label, "two_theta": 0.0, "width": WHOLE_FRAME_WIDTH}]
 
 
 def read_json(path) -> List[dict]:
@@ -93,7 +69,10 @@ def read_json(path) -> List[dict]:
         return []
     with open(path) as f:
         data = json.load(f)
-    return data if isinstance(data, list) else data.get("reflections", [])
+    reflections = data if isinstance(data, list) else data.get("reflections", [])
+    if reflections and all(r.get("name") == WHOLE_FRAME_LABEL for r in reflections):
+        return whole_frame_reflections()
+    return reflections
 
 
 def write_json(reflections: List[dict], path) -> Path:

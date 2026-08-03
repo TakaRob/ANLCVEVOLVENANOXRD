@@ -2042,6 +2042,7 @@ class FeatureViewer(QMainWindow):
         self._xrf_store_cache = {}   # scan -> per-frame store frames (or None)
         self._xrf_gm_cache = {}      # (scan, grid) -> grid_mapping dict (or None)
         self._xrf_point_cache = {}   # (scan, grid, bin_key) -> spectrum (or None)
+        grp.setVisible(False)
         parent_layout.addWidget(grp)
 
     def _open_xrf_popup(self):

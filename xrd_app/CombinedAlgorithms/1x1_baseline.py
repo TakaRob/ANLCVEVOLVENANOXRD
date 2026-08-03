@@ -79,6 +79,8 @@ def fast_tophat(image, size=11):
 
 
 def build_tth_band_masks(tth_map, degs, deg_labels, tth_tolerance=0.5):
+    if "(no reflections)" in deg_labels:
+        return {"(no reflections)": np.ones(tth_map.shape, dtype=bool)}
     bands = {}
     for label, deg_val in zip(deg_labels, degs):
         mask = np.abs(tth_map - deg_val) <= tth_tolerance

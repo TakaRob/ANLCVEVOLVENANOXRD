@@ -230,6 +230,7 @@ class SetupTab(QWidget):
             "Edit the ME7 fluorescence elements + energy calibration: view the "
             "grand-sum spectrum, pick emission lines, detect peaks, set eV/bin.")
         b_xrf.clicked.connect(self._open_xrf_calibration)
+        b_xrf.setVisible(False)
         cl.addWidget(b_tth)
         cl.addWidget(b_poni)
         cl.addWidget(b_refl)

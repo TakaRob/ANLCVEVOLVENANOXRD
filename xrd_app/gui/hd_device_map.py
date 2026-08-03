@@ -702,6 +702,7 @@ class HDDeviceMapWindow(QMainWindow):
                     row = QHBoxLayout()
             if row.count():
                 gl.addLayout(row)
+        grp.setVisible(False)
         parent_layout.addWidget(grp)
 
     def _update_xrf_underlay(self):

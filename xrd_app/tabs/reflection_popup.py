@@ -940,7 +940,7 @@ class ReflectionDialog(QDialog):
         tth_map = self._tth if getattr(self, "_tth", None) is not None else None
         self._fill_table(refl_io.whole_frame_reflections(tth_map))
         self.status.setText(
-            f"filled {len(self.reflections)} whole-detector tiles "
+            f"filled one unlimited-width reflection "
             f"('{refl_io.WHOLE_FRAME_LABEL}') — Save to apply")
 
     def _on_cmap_changed(self, name):

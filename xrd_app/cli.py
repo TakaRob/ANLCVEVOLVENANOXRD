@@ -71,18 +71,15 @@ def init(project_name, scan_number, root):
 @click.option('--scan', default=None, help='Scan number/name (defaults to config scan)')
 @click.option('--project', is_flag=True, default=False,
               help='Write the project-wide default (Metadata/) instead of per-scan.')
-@click.option('--spacing', type=float, default=0.3, show_default=True,
-              help='2θ tile spacing in degrees (< the 0.4° detection tolerance).')
-@click.option('--use-tth/--no-use-tth', 'use_tth', default=False,
-              help='Clamp the tiled 2θ range to the resolved tth map span.')
+@click.option('--spacing', type=float, default=0.3, hidden=True)
+@click.option('--use-tth/--no-use-tth', 'use_tth', default=False, hidden=True)
 @click.option('--root', default='.', help='Project root directory')
 def whole_frame_reflections(scan, project, spacing, use_tth, root):
-    """Write a whole-detector "(no reflections)" set as the resolved default.
+    """Write one unlimited-width "(no reflections)" reflection.
 
-    Produces an ordinary ``reflections.json`` whose entries all share one
-    label, so ``build_tth_band_masks`` merges them into a single detector-spanning
-    band — peaks/shape/territory then search the whole frame. For datasets with no
-    known Bragg reflections. Consider ROI → Shape for that workflow too.
+    Detectors recognize this reserved reflection as a detector-spanning band, so
+    peaks/shape/territory search the whole frame. For datasets with no known Bragg
+    reflections. Consider ROI → Shape for that workflow too.
     """
     from .core import reflections as refl_io
     dm = DataManager(root, scan=scan)
@@ -96,7 +93,7 @@ def whole_frame_reflections(scan, project, spacing, use_tth, root):
     mdir = dm.metadata_dir if project else dm.metadata_scan_dir(scan)
     out = refl_io.save(refls, mdir / "reflections.json")
     scope = "project default" if project else f"scan {dm.scan_name}"
-    click.echo(f"[whole-frame-reflections] wrote {len(refls)} tiles ({scope}) → {out}")
+    click.echo(f"[whole-frame-reflections] wrote one unlimited-width reflection ({scope}) → {out}")
     click.echo(f"  label: {refl_io.WHOLE_FRAME_LABEL} — detector will search the whole frame")
 
 

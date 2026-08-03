@@ -74,6 +74,9 @@ def detect_peaks_with_intensity(image, tth_map, degs, deg_labels, tth_data, det,
     cleaned = det.radial_median_subtract(image, tth_data)
     tophat = det.fast_tophat(cleaned, size=15)
     bands = det.build_tth_band_masks(tth_map, degs, deg_labels, tth_tolerance=0.4)
+    from .reflections import WHOLE_FRAME_LABEL
+    if WHOLE_FRAME_LABEL in deg_labels:
+        bands = {WHOLE_FRAME_LABEL: np.ones(tth_map.shape, dtype=bool)}
     roi_mask = None
     if detector_roi is not None:
         x0, y0, x1, y1 = detector_roi
@@ -703,7 +706,9 @@ def run_shapes(
         progress(1, 2)
 
     beam_center = estimate_beam_center(tth_map)
-    ref_tth_map = {lbl: round(d, 5) for d, lbl in zip(degs, deg_labels)}
+    from .reflections import WHOLE_FRAME_LABEL
+    ref_tth_map = {lbl: round(d, 5) for d, lbl in zip(degs, deg_labels)
+                   if lbl != WHOLE_FRAME_LABEL}
 
     log("  Filtering by gaussian profile + characterizing shapes...")
     kept, filtered = shape.characterize_features(

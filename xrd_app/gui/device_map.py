@@ -1152,6 +1152,7 @@ class DeviceMapWindow(QMainWindow):
                     row = QHBoxLayout()
             if row.count():
                 gl.addLayout(row)
+        grp.setVisible(False)
         parent_layout.addWidget(grp)
 
     def _compute_xrf_rgba(self):
