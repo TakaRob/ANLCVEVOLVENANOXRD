@@ -186,6 +186,11 @@ class HDDeviceMapWindow(QMainWindow):
             self._chi_data_min, self._chi_data_max = -180, 180
         self._chi_lo = float(self._chi_data_min)
         self._chi_hi = float(self._chi_data_max)
+        sizes = [dv._feature_size(f) for f in self.features]
+        self._size_data_min = min(sizes, default=1)
+        self._size_data_max = max(sizes, default=1)
+        self._size_lo = self._size_data_min
+        self._size_hi = self._size_data_max
 
     def _unwrap_chi(self, c):
         """Lift a wrapped (±180) angle into the continuous range (matches Device View)."""
@@ -196,12 +201,18 @@ class HDDeviceMapWindow(QMainWindow):
             return None
         return (self._chi_lo, self._chi_hi)
 
+    def _size_range(self):
+        if (self._size_lo <= self._size_data_min
+                and self._size_hi >= self._size_data_max):
+            return None
+        return (self._size_lo, self._size_hi)
+
     def _visible_refs(self):
         return [r for r in self.reflections if self.layer_cbs[r].isChecked()]
 
-    def _feature_visible(self, feat, visible, chi_range):
+    def _feature_visible(self, feat, visible, chi_range, size_range=None):
         return (feat.get("reflection") in visible
-                and dv._feat_in_chi_range(feat, chi_range))
+                and dv._feature_visible(feat, chi_range, size_range))
 
     # ----- UI --------------------------------------------------------
     def _build_ui(self):
@@ -354,6 +365,27 @@ class HDDeviceMapWindow(QMainWindow):
 
         self._build_xrf_group(rl)
 
+        sg = QGroupBox("Feature size range")
+        sgl = QVBoxLayout(sg)
+        self.size_hist = pg.PlotWidget()
+        self.size_hist.setBackground("w")
+        self.size_hist.setFixedHeight(150)
+        self.size_hist.setLabel("bottom", "Feature size (# bins)")
+        self.size_hist.setLabel("left", "Count (log)")
+        self.size_hist.setMouseEnabled(False, False)
+        self.size_hist.setLogMode(y=True)
+        sgl.addWidget(self.size_hist)
+        self.size_slider = dv.QRangeSlider(self._size_data_min, self._size_data_max)
+        self.size_slider.rangeChanged.connect(self._on_size_range)
+        self.size_slider.setEnabled(self._size_data_max > self._size_data_min)
+        sgl.addWidget(self.size_slider)
+        self.size_label = QLabel()
+        self.size_label.setStyleSheet(
+            "font-family: monospace; font-size: 0.9em; color:#555; padding:2px;")
+        sgl.addWidget(self.size_label)
+        rl.addWidget(sg)
+        self._update_size_visuals()
+
         # Chi range: histogram above the slider (like Device View)
         cg = QGroupBox("χ angle range")
         cgl = QVBoxLayout(cg)
@@ -391,7 +423,7 @@ class HDDeviceMapWindow(QMainWindow):
         return max((e.get(self.metric) for e in feat.get("hd_profile", {}).values()
                     if e.get(self.metric) is not None), default=None)
 
-    def _combined_grid(self, visible, chi_range):
+    def _combined_grid(self, visible, chi_range, size_range):
         # Where features overlap in a 1×1 cell, the *brighter feature* should own
         # the cell (show its own pixels), not whichever feature happens to have the
         # larger local sample there. Rank visible features by peak intensity and
@@ -399,7 +431,7 @@ class HDDeviceMapWindow(QMainWindow):
         grid = np.full((self.n_rows, self.n_cols), np.nan)
         ranked = []
         for f in self.features:
-            if not self._feature_visible(f, visible, chi_range):
+            if not self._feature_visible(f, visible, chi_range, size_range):
                 continue
             peak = self._feature_peak(f)
             if peak is not None:
@@ -440,18 +472,22 @@ class HDDeviceMapWindow(QMainWindow):
         self._clear_items()
         if hasattr(self, "chi_hist"):
             self._draw_chi_histogram()   # reflect layer changes in the histogram
+        if hasattr(self, "size_hist"):
+            self._draw_size_histogram()
         visible = self._visible_refs()
         chi_range = self._chi_range()
+        size_range = self._size_range()
         isolate = (self._isolate and self._locked_idx is not None
-                   and 0 <= self._locked_idx < len(self.features)
-                   and self._feature_visible(
-                       self.features[self._locked_idx], visible, chi_range))
+                    and 0 <= self._locked_idx < len(self.features)
+                    and self._feature_visible(
+                        self.features[self._locked_idx], visible, chi_range, size_range))
+
         if self.display == DISPLAY_XY and self.positions_real:
             self.img_item.setVisible(False)
-            self._redraw_xy(visible, chi_range, isolate)
+            self._redraw_xy(visible, chi_range, size_range, isolate)
         else:
             self.img_item.setVisible(True)
-            self._redraw_grid(visible, chi_range, isolate)
+            self._redraw_grid(visible, chi_range, size_range, isolate)
         self._update_xrf_underlay()
         if self.show_trajectory:
             self._draw_trajectory(
@@ -462,7 +498,7 @@ class HDDeviceMapWindow(QMainWindow):
         if self._locked_idx is not None and isolate:
             self._show_feature_info(self._locked_idx)
 
-    def _redraw_grid(self, visible, chi_range, isolate):
+    def _redraw_grid(self, visible, chi_range, size_range, isolate):
         self.plot.setLabel("bottom", "Col (1×1)")
         self.plot.setLabel("left", "Row (1×1)")
         self.plot.getViewBox().invertX(False)
@@ -475,11 +511,11 @@ class HDDeviceMapWindow(QMainWindow):
             if isolate:
                 grid = np.full((self.n_rows, self.n_cols), np.nan)
                 m = iso_feat.get("_mask")
-                full = self._combined_grid(visible, chi_range)
+                full = self._combined_grid(visible, chi_range, size_range)
                 if m is not None:
                     grid[m] = full[m]
             else:
-                grid = self._combined_grid(visible, chi_range)
+                grid = self._combined_grid(visible, chi_range, size_range)
             vmin, vmax = self._levels(grid)
             rgba = dv._scalar_to_rgba(grid, vmin, vmax, cmap)
             self.img_item.setVisible(True)
@@ -491,7 +527,8 @@ class HDDeviceMapWindow(QMainWindow):
         for ref in visible:
             merged = np.zeros((self.n_rows, self.n_cols), dtype=bool)
             for f in self.features:
-                if f.get("reflection") == ref and dv._feat_in_chi_range(f, chi_range):
+                if (f.get("reflection") == ref
+                        and dv._feature_visible(f, chi_range, size_range)):
                     if isolate and f is not self.features[self._locked_idx]:
                         continue
                     m = f.get("_mask")
@@ -506,10 +543,10 @@ class HDDeviceMapWindow(QMainWindow):
                 self.plot.addItem(iso)
                 self._items.append(iso)
         if self.show_points:
-            self._draw_points(visible, chi_range, space=DISPLAY_GRID,
+            self._draw_points(visible, chi_range, size_range, space=DISPLAY_GRID,
                               only_idx=self._locked_idx if isolate else None)
 
-    def _redraw_xy(self, visible, chi_range, isolate):
+    def _redraw_xy(self, visible, chi_range, size_range, isolate):
         orient = self.xy_orientation
         self.plot.setLabel("bottom", f"Stage {orient['horizontal'].upper()} (µm)")
         self.plot.setLabel("left", f"Stage {orient['vertical'].upper()} (µm)")
@@ -520,7 +557,7 @@ class HDDeviceMapWindow(QMainWindow):
         # Gather sampled points (x, y, value, ref).
         xs, ys, vals, refs, fidx = [], [], [], [], []
         for i, f in enumerate(self.features):
-            if not self._feature_visible(f, visible, chi_range):
+            if not self._feature_visible(f, visible, chi_range, size_range):
                 continue
             for e in f.get("hd_profile", {}).values():
                 if "x" not in e or "y" not in e:
@@ -557,15 +594,15 @@ class HDDeviceMapWindow(QMainWindow):
         self.plot.addItem(sc)
         self._items.append(sc)
         if self.show_points:
-            self._draw_points(visible, chi_range, space=DISPLAY_XY,
+            self._draw_points(visible, chi_range, size_range, space=DISPLAY_XY,
                               only_idx=self._locked_idx if isolate else None)
 
-    def _draw_points(self, visible, chi_range, space, only_idx=None):
+    def _draw_points(self, visible, chi_range, size_range, space, only_idx=None):
         entries = []
         for i, f in enumerate(self.features):
             if only_idx is not None and i != only_idx:
                 continue
-            if not self._feature_visible(f, visible, chi_range):
+            if not self._feature_visible(f, visible, chi_range, size_range):
                 continue
             if space == DISPLAY_GRID:
                 pos = self._pxy(f["center_col"] + 0.5, f["center_row"] + 0.5)
@@ -764,6 +801,40 @@ class HDDeviceMapWindow(QMainWindow):
         self._redraw()
         self.plot.autoRange()  # grid↔xy have very different coordinate ranges
 
+    def _update_size_visuals(self):
+        self._draw_size_histogram()
+        self.size_label.setText(f"Size: {self._size_lo} to {self._size_hi} bins")
+
+    def _draw_size_histogram(self):
+        self.size_hist.clear()
+        visible = self._visible_refs()
+        sizes = [dv._feature_size(f) for f in self.features
+                 if f.get("reflection") in visible]
+        if not sizes:
+            return
+        max_size = max(sizes)
+        edges = np.arange(0.5, max_size + 1.5, 1.0)
+        centers = np.arange(1, max_size + 1)
+        h_all, _ = np.histogram(sizes, bins=edges)
+        inside = [s for s in sizes if self._size_lo <= s <= self._size_hi]
+        h_in, _ = np.histogram(inside, bins=edges) if inside \
+            else (np.zeros(len(centers)), None)
+        self.size_hist.addItem(pg.BarGraphItem(
+            x=centers, height=h_all, width=0.9,
+            brush=(204, 204, 204, 130), pen=None))
+        self.size_hist.addItem(pg.BarGraphItem(
+            x=centers, height=h_in, width=0.9,
+            brush=(67, 99, 216, 220), pen=None))
+        for v in (self._size_lo, self._size_hi):
+            self.size_hist.addItem(pg.InfiniteLine(
+                pos=v, angle=90, pen=pg.mkPen("r", width=1.2, style=Qt.DashLine)))
+        self.size_hist.setTitle(f"{len(inside)}/{len(sizes)} features selected")
+
+    def _on_size_range(self, lo, hi):
+        self._size_lo, self._size_hi = int(lo), int(hi)
+        self._update_size_visuals()
+        self._schedule_redraw()
+
     def _on_chi_range(self, lo, hi):
         self._chi_lo, self._chi_hi = float(lo), float(hi)
         self.chi_label.setText(f"χ: {lo}° to {hi}°")   # label updates immediately
@@ -820,8 +891,9 @@ class HDDeviceMapWindow(QMainWindow):
         best_idx, best_d = None, float("inf")
         visible = self._visible_refs()
         chi_range = self._chi_range()
+        size_range = self._size_range()
         for i, f in enumerate(self.features):
-            if not self._feature_visible(f, visible, chi_range):
+            if not self._feature_visible(f, visible, chi_range, size_range):
                 continue
             if space == DISPLAY_GRID:
                 cx, cy = self._pxy(f["center_col"], f["center_row"])
@@ -895,6 +967,7 @@ class HDDeviceMapWindow(QMainWindow):
         return {"metric": self.metric, "display": self.display,
                 "isolate": self._isolate, "trajectory": self.show_trajectory,
                 "dot_size": self.dot_size,
+                "size_range": [self._size_lo, self._size_hi],
                 "xrf_on": self.xrf_on, "xrf_mode": self.xrf_mode,
                 "xrf_normalize": self.xrf_normalize, "xrf_opacity": self.xrf_opacity,
                 "xrf_hidden": [e for e, cb in self.xrf_cbs.items()
@@ -919,6 +992,15 @@ class HDDeviceMapWindow(QMainWindow):
         if "dot_size" in state:
             self.dot_size = int(state["dot_size"])
             self.dot_spin.setValue(self.dot_size)
+        size_range = state.get("size_range")
+        if isinstance(size_range, (list, tuple)) and len(size_range) == 2:
+            self._size_lo = max(self._size_data_min, min(int(size_range[0]),
+                                                         self._size_data_max))
+            self._size_hi = max(self._size_lo, min(int(size_range[1]),
+                                                   self._size_data_max))
+            self.size_slider.setLow(self._size_lo)
+            self.size_slider.setHigh(self._size_hi)
+            self._update_size_visuals()
         self._apply_xrf_view_state(state)
         self._redraw()
 

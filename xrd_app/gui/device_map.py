@@ -244,14 +244,36 @@ def _feat_in_chi_range(feat, chi_range):
     return lo <= chi <= hi
 
 
-def _build_outline_groups(features, n_rows, n_cols, visible_refs, chi_range=None):
-    """Merge all feature masks per reflection for outline drawing."""
+def _feature_size(feat):
+    """Feature area in spatial bins, accepting both standard and HD catalogs."""
+    n_bins = feat.get("n_bins")
+    if n_bins is not None:
+        return max(1, int(n_bins))
+    profile = feat.get("hd_profile") or feat.get("intensity_profile") or {}
+    if profile:
+        return len(profile)
+    mask = feat.get("_mask")
+    return max(1, int(mask.sum())) if mask is not None else 1
+
+
+def _feat_in_size_range(feat, size_range):
+    return size_range is None or size_range[0] <= _feature_size(feat) <= size_range[1]
+
+
+def _feature_visible(feat, chi_range=None, size_range=None):
+    return (_feat_in_chi_range(feat, chi_range)
+            and _feat_in_size_range(feat, size_range))
+
+
+def _build_outline_groups(features, n_rows, n_cols, visible_refs, chi_range=None,
+                          size_range=None):
+    """Merge all visible feature masks per reflection for outline drawing."""
     groups = []
     for ref in visible_refs:
         merged = np.zeros((n_rows, n_cols), dtype=bool)
         for f in features:
             if f["reflection"] == ref and f.get("_mask") is not None:
-                if _feat_in_chi_range(f, chi_range):
+                if _feature_visible(f, chi_range, size_range):
                     merged |= f["_mask"]
         if merged.any():
             groups.append((ref, merged))
@@ -506,9 +528,15 @@ class DeviceMapWindow(QMainWindow):
             self._chi_data_min, self._chi_data_max = -180, 180
         self._chi_lo = float(self._chi_data_min)
         self._chi_hi = float(self._chi_data_max)
+        sizes = [_feature_size(f) for f in features]
+        self._size_data_min = min(sizes, default=1)
+        self._size_data_max = max(sizes, default=1)
+        self._size_lo = self._size_data_min
+        self._size_hi = self._size_data_max
 
         self._build_ui()
         self._update_chi_visuals()
+        self._update_size_visuals()
         self._redraw()
 
     # ----- UI ---------------------------------------------------------
@@ -648,6 +676,41 @@ class DeviceMapWindow(QMainWindow):
 
         self._build_xrf_group(rl)
 
+        sg = QGroupBox("Feature size range")
+        sgl = QVBoxLayout(sg)
+        self.size_hist = pg.PlotWidget()
+        self.size_hist.setBackground("w")
+        self.size_hist.setFixedHeight(150)
+        self.size_hist.setLabel("bottom", "Feature size (# bins)")
+        self.size_hist.setLabel("left", "Count (log)")
+        self.size_hist.setMouseEnabled(False, False)
+        self.size_hist.setLogMode(y=True)
+        sgl.addWidget(self.size_hist)
+        self.size_range_slider = QRangeSlider(self._size_data_min, self._size_data_max)
+        self.size_range_slider.rangeChanged.connect(self._on_size_slider)
+        self.size_range_slider.setEnabled(self._size_data_max > self._size_data_min)
+        sgl.addWidget(self.size_range_slider)
+        size_row = QHBoxLayout()
+        size_row.addWidget(QLabel("Min:"))
+        self.size_min_spin = QSpinBox()
+        self.size_min_spin.setRange(self._size_data_min, self._size_data_max)
+        self.size_min_spin.setValue(self._size_data_min)
+        self.size_min_spin.valueChanged.connect(self._on_size_min_spin)
+        size_row.addWidget(self.size_min_spin)
+        size_row.addStretch()
+        size_row.addWidget(QLabel("Max:"))
+        self.size_max_spin = QSpinBox()
+        self.size_max_spin.setRange(self._size_data_min, self._size_data_max)
+        self.size_max_spin.setValue(self._size_data_max)
+        self.size_max_spin.valueChanged.connect(self._on_size_max_spin)
+        size_row.addWidget(self.size_max_spin)
+        sgl.addLayout(size_row)
+        self.size_range_label = QLabel()
+        self.size_range_label.setStyleSheet(
+            "font-family: monospace; font-size: 0.9em; color: #555; padding: 2px;")
+        sgl.addWidget(self.size_range_label)
+        rl.addWidget(sg)
+
         rl.addWidget(QLabel("  Azimuthal distribution (χ)"))
         ref_row = QHBoxLayout()
         ref_row.addWidget(QLabel("Reflection:"))
@@ -745,19 +808,26 @@ class DeviceMapWindow(QMainWindow):
             return None
         return (self._chi_lo, self._chi_hi)
 
+    def _size_range(self):
+        if (self._size_lo <= self._size_data_min
+                and self._size_hi >= self._size_data_max):
+            return None
+        return (self._size_lo, self._size_hi)
+
     # ----- main heatmap -----------------------------------------------
-    def _compute_combined(self, metric, visible_refs, chi_range):
-        """Return (combined, vmin, vmax) over visible refs with chi filtering."""
-        chi_valid = {}
-        if chi_range is not None:
+    def _compute_combined(self, metric, visible_refs, chi_range, size_range):
+        """Return (combined, vmin, vmax) over features passing both filters."""
+        feature_valid = {}
+        if chi_range is not None or size_range is not None:
             for ref in visible_refs:
                 mask = np.zeros((self.n_rows, self.n_cols), dtype=bool)
                 for f in self.features:
-                    if f["reflection"] == ref and _feat_in_chi_range(f, chi_range):
+                    if (f["reflection"] == ref
+                            and _feature_visible(f, chi_range, size_range)):
                         m = f.get("_mask")
                         if m is not None:
                             mask |= m
-                chi_valid[ref] = mask
+                feature_valid[ref] = mask
 
         combined = np.full((self.n_rows, self.n_cols), np.nan)
         for ref in visible_refs:
@@ -767,8 +837,8 @@ class DeviceMapWindow(QMainWindow):
             valid = np.isfinite(Z)
             if metric == "intensity":
                 valid = valid & (Z > 0)
-            if ref in chi_valid:
-                valid = valid & chi_valid[ref]
+            if ref in feature_valid:
+                valid = valid & feature_valid[ref]
             if not valid.any():
                 continue
             first_fill = valid & np.isnan(combined)
@@ -854,18 +924,20 @@ class DeviceMapWindow(QMainWindow):
             self.hover_label.setText("Hover over a feature to see details")
 
         chi_range = self._chi_range()
+        size_range = self._size_range()
 
         # Is a locked feature being isolated this redraw? (only if still visible)
         isolate = (self._isolate and self._locked_idx is not None
                    and 0 <= self._locked_idx < len(self.features))
         iso_feat = self.features[self._locked_idx] if isolate else None
         if isolate and not (iso_feat["reflection"] in self.visible_refs
-                            and _feat_in_chi_range(iso_feat, chi_range)):
+                            and _feature_visible(iso_feat, chi_range, size_range)):
             isolate, iso_feat = False, None
             self._locked_idx = None
 
         outline_groups = _build_outline_groups(
-            self.features, self.n_rows, self.n_cols, self.visible_refs, chi_range)
+            self.features, self.n_rows, self.n_cols, self.visible_refs,
+            chi_range, size_range)
 
         # Base image
         if self.metric == "none":
@@ -886,7 +958,7 @@ class DeviceMapWindow(QMainWindow):
             # feature (its own value range) at full strength on top.
             cmap = self._current_cmap()
             full, fvmin, fvmax = self._compute_combined(
-                self.metric, self.visible_refs, chi_range)
+                self.metric, self.visible_refs, chi_range, size_range)
             rgba = _scalar_to_rgba(full, fvmin, fvmax, cmap)
             a = rgba[..., 3].astype(np.uint16) * _ISO_GHOST_ALPHA // 255
             rgba[..., 3] = a.astype(np.ubyte)
@@ -901,7 +973,7 @@ class DeviceMapWindow(QMainWindow):
                 self._update_colorbar(None, None, None)
         else:
             combined, vmin, vmax = self._compute_combined(
-                self.metric, self.visible_refs, chi_range)
+                self.metric, self.visible_refs, chi_range, size_range)
             cmap = self._current_cmap()
             rgba = _scalar_to_rgba(combined, vmin, vmax, cmap)
             self.img_item.setImage(rgba, autoLevels=False)
@@ -934,7 +1006,7 @@ class DeviceMapWindow(QMainWindow):
 
         # Points / labels (only the selected feature's label while isolating)
         if self.show_labels:
-            self._draw_points(chi_range,
+            self._draw_points(chi_range, size_range,
                               only_idx=self._locked_idx if isolate else None)
 
         self._update_xrf_underlay()
@@ -945,7 +1017,7 @@ class DeviceMapWindow(QMainWindow):
         if self._locked_idx is not None:
             feat = self.features[self._locked_idx]
             if (feat["reflection"] in self.visible_refs
-                    and _feat_in_chi_range(feat, chi_range)):
+                    and _feature_visible(feat, chi_range, size_range)):
                 # While isolating, the base image already shows the feature in
                 # full color — draw just its crisp outline (no translucent fill).
                 self._draw_highlight(self._locked_idx, fill=not isolate)
@@ -972,15 +1044,16 @@ class DeviceMapWindow(QMainWindow):
         h = self.glw.height() or 600
         return max(8, min(24, int(round(h / 45))))
 
-    def _draw_points(self, chi_range, only_idx=None):
+    def _draw_points(self, chi_range, size_range, only_idx=None):
         # Cache args so a window resize can re-lay the labels at the new font size.
-        self._points_state = (chi_range, only_idx)
+        self._points_state = (chi_range, size_range, only_idx)
         entries = []
         for i, feat in enumerate(self.features):
             if only_idx is not None and i != only_idx:
                 continue
             ref = feat["reflection"]
-            if ref not in self.visible_refs or not _feat_in_chi_range(feat, chi_range):
+            if (ref not in self.visible_refs
+                    or not _feature_visible(feat, chi_range, size_range)):
                 continue
             # Grid (row, col) → pixel center. Use grid space, not center_row/col,
             # which are physical XY in coordinate-based catalogs.
@@ -1000,8 +1073,8 @@ class DeviceMapWindow(QMainWindow):
         if not self.show_labels or self._points_state is None:
             return
         self._clear_items(self._point_items)
-        chi_range, only_idx = self._points_state
-        self._draw_points(chi_range, only_idx=only_idx)
+        chi_range, size_range, only_idx = self._points_state
+        self._draw_points(chi_range, size_range, only_idx=only_idx)
 
     # ----- layer / metric controls ------------------------------------
     # ----- XRF underlay ----------------------------------------------
@@ -1143,6 +1216,7 @@ class DeviceMapWindow(QMainWindow):
         self.visible_refs = [ref for ref in REFLECTIONS if self.layer_cbs[ref].isChecked()]
         if self._chi_hist_ref is None:
             self._draw_chi_histogram()
+        self._draw_size_histogram()
         self._redraw()
 
     def _on_labels_toggle(self, checked):
@@ -1170,6 +1244,7 @@ class DeviceMapWindow(QMainWindow):
                               if not cb.isChecked()],
             "points": self.labels_cb.isChecked(),
             "isolate": self._isolate,
+            "size_range": [self._size_lo, self._size_hi],
             "xrf_on": self.xrf_on,
             "xrf_mode": self.xrf_mode,
             "xrf_normalize": self.xrf_normalize,
@@ -1205,6 +1280,14 @@ class DeviceMapWindow(QMainWindow):
             self.cmap_combo.blockSignals(True)
             self.cmap_combo.setCurrentIndex(self.cmap_combo.findData(cmap))
             self.cmap_combo.blockSignals(False)
+        size_range = state.get("size_range")
+        if isinstance(size_range, (list, tuple)) and len(size_range) == 2:
+            self._size_lo = max(self._size_data_min, min(int(size_range[0]),
+                                                         self._size_data_max))
+            self._size_hi = max(self._size_lo, min(int(size_range[1]),
+                                                   self._size_data_max))
+            self._sync_size_widgets()
+            self._update_size_visuals()
         m = state.get("metric")
         if m and self.metric_combo.findData(m) >= 0:
             self.metric_combo.blockSignals(True)
@@ -1248,6 +1331,63 @@ class DeviceMapWindow(QMainWindow):
             self.xrf_on_cb.blockSignals(True)
             self.xrf_on_cb.setChecked(self.xrf_on)
             self.xrf_on_cb.blockSignals(False)
+
+    # ----- feature size range filter ----------------------------------
+    def _update_size_visuals(self):
+        self._draw_size_histogram()
+        self.size_range_label.setText(
+            f"Size: {self._size_lo} to {self._size_hi} bins")
+
+    def _draw_size_histogram(self):
+        self.size_hist.clear()
+        sizes = [_feature_size(f) for f in self.features
+                 if f["reflection"] in self.visible_refs]
+        if not sizes:
+            return
+        max_size = max(sizes)
+        edges = np.arange(0.5, max_size + 1.5, 1.0)
+        centers = np.arange(1, max_size + 1)
+        h_all, _ = np.histogram(sizes, bins=edges)
+        inside = [s for s in sizes if self._size_lo <= s <= self._size_hi]
+        h_in, _ = np.histogram(inside, bins=edges) if inside \
+            else (np.zeros(len(centers)), None)
+        self.size_hist.addItem(pg.BarGraphItem(
+            x=centers, height=h_all, width=0.9,
+            brush=(204, 204, 204, 130), pen=None))
+        self.size_hist.addItem(pg.BarGraphItem(
+            x=centers, height=h_in, width=0.9,
+            brush=(67, 99, 216, 220), pen=None))
+        for v in (self._size_lo, self._size_hi):
+            self.size_hist.addItem(pg.InfiniteLine(
+                pos=v, angle=90, pen=pg.mkPen("r", width=1.2, style=Qt.DashLine)))
+        pct = 100 * len(inside) / len(sizes)
+        self.size_hist.setTitle(f"{len(inside)}/{len(sizes)} features ({pct:.0f}%) selected")
+
+    def _sync_size_widgets(self):
+        widgets = (self.size_range_slider, self.size_min_spin, self.size_max_spin)
+        for widget in widgets:
+            widget.blockSignals(True)
+        self.size_range_slider.setLow(self._size_lo)
+        self.size_range_slider.setHigh(self._size_hi)
+        self.size_min_spin.setValue(self._size_lo)
+        self.size_max_spin.setValue(self._size_hi)
+        for widget in widgets:
+            widget.blockSignals(False)
+
+    def _set_size_range(self, lo, hi):
+        self._size_lo, self._size_hi = int(lo), int(hi)
+        self._sync_size_widgets()
+        self._update_size_visuals()
+        self._redraw()
+
+    def _on_size_slider(self, lo, hi):
+        self._set_size_range(lo, hi)
+
+    def _on_size_min_spin(self, val):
+        self._set_size_range(min(val, self._size_hi), self._size_hi)
+
+    def _on_size_max_spin(self, val):
+        self._set_size_range(self._size_lo, max(val, self._size_lo))
 
     # ----- chi range filter -------------------------------------------
     def _update_chi_visuals(self):
@@ -1386,10 +1526,11 @@ class DeviceMapWindow(QMainWindow):
     def _nearest_feature(self, mx, my):
         best_idx, best_dist = None, float("inf")
         chi_r = self._chi_range()
+        size_r = self._size_range()
         for i, feat in enumerate(self.features):
             if feat["reflection"] not in self.visible_refs:
                 continue
-            if not _feat_in_chi_range(feat, chi_r):
+            if not _feature_visible(feat, chi_r, size_r):
                 continue
             gr, gc = _feat_grid_rc(feat)
             dc = mx - (gc + 0.5)

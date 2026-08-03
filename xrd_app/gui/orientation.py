@@ -27,6 +27,7 @@ from PyQt5.QtWidgets import (
 
 from ..config import DataManager
 from ..core import orientation as orientation_core
+from .device_map import QRangeSlider, _feature_size
 
 pg.setConfigOptions(imageAxisOrder="row-major", antialias=True)
 
@@ -254,6 +255,11 @@ class OrientationMapWindow(QMainWindow):
     # ── data ──
     def _load_data(self):
         self._features = load_features()
+        sizes = [_feature_size(f) for f in self._features]
+        self._size_data_min = min(sizes, default=1)
+        self._size_data_max = max(sizes, default=1)
+        self._size_lo = self._size_data_min
+        self._size_hi = self._size_data_max
         self._tth_map = load_tth_map()
         self._beam_center = estimate_beam_center(self._tth_map)
         self._chi_map = compute_chi_map(self._tth_map.shape, self._beam_center)
@@ -265,12 +271,18 @@ class OrientationMapWindow(QMainWindow):
         for f in self._features:
             self._by_ref[f["reflection"]].append(f)
 
+    def _filtered_by_ref(self):
+        return {ref: [f for f in features
+                      if self._size_lo <= _feature_size(f) <= self._size_hi]
+                for ref, features in self._by_ref.items()}
+
     def _cluster_all(self):
+        self._visible_by_ref = self._filtered_by_ref()
         self._clusters_by_ref = {}
         self._valleys_by_ref = {}
         for ref in self._all_reflections:
             clusters, valleys = cluster_features_by_chi(
-                self._by_ref.get(ref, []), self._bandwidth)
+                self._visible_by_ref.get(ref, []), self._bandwidth)
             self._clusters_by_ref[ref] = clusters
             self._valleys_by_ref[ref] = valleys
         self._build_sector_id_map()
@@ -409,6 +421,26 @@ class OrientationMapWindow(QMainWindow):
         sl.addLayout(tg)
         rl.addWidget(sg)
 
+        fg = QGroupBox("Feature size range")
+        fgl = QVBoxLayout(fg)
+        self.size_hist = pg.PlotWidget()
+        self.size_hist.setBackground("w")
+        self.size_hist.setFixedHeight(150)
+        self.size_hist.setLabel("bottom", "Feature size (# bins)")
+        self.size_hist.setLabel("left", "Count (log)")
+        self.size_hist.setMouseEnabled(False, False)
+        self.size_hist.setLogMode(y=True)
+        fgl.addWidget(self.size_hist)
+        self.size_slider = QRangeSlider(self._size_data_min, self._size_data_max)
+        self.size_slider.setEnabled(self._size_data_max > self._size_data_min)
+        fgl.addWidget(self.size_slider)
+        self.size_label = QLabel()
+        self.size_label.setStyleSheet(
+            "font-family: monospace; font-size: 0.9em; color:#555; padding:2px;")
+        fgl.addWidget(self.size_label)
+        rl.addWidget(fg)
+        self._update_size_visuals()
+
         rl.addWidget(QLabel("  Azimuthal distribution (χ)"))
         self.az_hist = pg.PlotWidget(); self.az_hist.setBackground("w")
         self.az_hist.setFixedHeight(220)
@@ -442,6 +474,7 @@ class OrientationMapWindow(QMainWindow):
         self.contrast_lo.valueChanged.connect(lambda _v: self._render_main())
         self.contrast_hi.valueChanged.connect(lambda _v: self._render_main())
         self.weight_combo.currentIndexChanged.connect(self._on_weight_changed)
+        self.size_slider.rangeChanged.connect(self._on_size_range)
         for c in (self.arcs_cb, self.bounds_cb, self.markers_cb, self.labels_cb):
             c.toggled.connect(self._on_toggle)
 
@@ -456,7 +489,42 @@ class OrientationMapWindow(QMainWindow):
     def _on_filter_changed(self):
         self._active_refs = {r for r, cb in self._ref_checks.items() if cb.isChecked()}
         self._build_sector_id_map()
+        self._update_size_visuals()
         self._render_main()
+
+    def _update_size_visuals(self):
+        self.size_hist.clear()
+        sizes = [_feature_size(f) for f in self._features
+                 if f["reflection"] in self._active_refs]
+        inside = [s for s in sizes if self._size_lo <= s <= self._size_hi]
+        if sizes:
+            max_size = max(sizes)
+            edges = np.arange(0.5, max_size + 1.5, 1.0)
+            centers = np.arange(1, max_size + 1)
+            h_all, _ = np.histogram(sizes, bins=edges)
+            h_in, _ = np.histogram(inside, bins=edges) if inside \
+                else (np.zeros(len(centers)), None)
+            self.size_hist.addItem(pg.BarGraphItem(
+                x=centers, height=h_all, width=0.9,
+                brush=(204, 204, 204, 130), pen=None))
+            self.size_hist.addItem(pg.BarGraphItem(
+                x=centers, height=h_in, width=0.9,
+                brush=(67, 99, 216, 220), pen=None))
+            for v in (self._size_lo, self._size_hi):
+                self.size_hist.addItem(pg.InfiniteLine(
+                    pos=v, angle=90,
+                    pen=pg.mkPen("r", width=1.2, style=Qt.DashLine)))
+            self.size_hist.setTitle(f"{len(inside)}/{len(sizes)} features selected")
+        self.size_label.setText(f"Size: {self._size_lo} to {self._size_hi} bins")
+
+    def _on_size_range(self, lo, hi):
+        self._size_lo, self._size_hi = int(lo), int(hi)
+        self._locked_sector = None
+        self._current_hover = None
+        self._update_size_visuals()
+        self._cluster_all()
+        self._render_main()
+        self._clear_histograms()
 
     def _on_bw_changed(self, value):
         self._bandwidth = float(value)
@@ -498,6 +566,7 @@ class OrientationMapWindow(QMainWindow):
                               if not cb.isChecked()],
             "weight": self.weight_combo.currentData(),
             "cmap": self._cmap_name,
+            "size_range": [self._size_lo, self._size_hi],
         }
 
     def apply_view_state(self, state):
@@ -518,6 +587,17 @@ class OrientationMapWindow(QMainWindow):
             self.cmap_combo.setCurrentText(cmap)
             self.cmap_combo.blockSignals(False)
             self._cmap_name = cmap
+        size_range = state.get("size_range")
+        if isinstance(size_range, (list, tuple)) and len(size_range) == 2:
+            self._size_lo = max(self._size_data_min, min(int(size_range[0]),
+                                                         self._size_data_max))
+            self._size_hi = max(self._size_lo, min(int(size_range[1]),
+                                                   self._size_data_max))
+            self.size_slider.blockSignals(True)
+            self.size_slider.setLow(self._size_lo)
+            self.size_slider.setHigh(self._size_hi)
+            self.size_slider.blockSignals(False)
+            self._update_size_visuals()
         w = state.get("weight")
         if w and self.weight_combo.findData(w) >= 0:
             self.weight_combo.blockSignals(True)
@@ -547,7 +627,7 @@ class OrientationMapWindow(QMainWindow):
         lo = float(self.contrast_lo.value()) if hasattr(self, "contrast_lo") else 0.0
         hi = float(self.contrast_hi.value()) if hasattr(self, "contrast_hi") else 100.0
         overlay, global_max, vmin, vmax = build_density_overlay(
-            self._tth_map, self._chi_map, self._by_ref,
+            self._tth_map, self._chi_map, self._visible_by_ref,
             self._active_refs, self._band_tol, self._cmap_name,
             low_pct=lo, high_pct=hi)
         self.img_item.setImage((overlay * 255).astype(np.ubyte), autoLevels=False)
@@ -576,10 +656,10 @@ class OrientationMapWindow(QMainWindow):
             self._draw_cluster_labels()
         if self._show_markers:
             for i, ref in enumerate(DEG_LABELS):
-                if ref not in self._active_refs or ref not in self._by_ref:
+                if ref not in self._active_refs or ref not in self._visible_by_ref:
                     continue
-                xs = [f["detector_x"] for f in self._by_ref[ref]]
-                ys = [f["detector_y"] for f in self._by_ref[ref]]
+                xs = [f["detector_x"] for f in self._visible_by_ref[ref]]
+                ys = [f["detector_y"] for f in self._visible_by_ref[ref]]
                 color = ARC_COLORS[i % len(ARC_COLORS)]
                 sc = pg.ScatterPlotItem(x=xs, y=ys, size=7,
                                         brush=pg.mkBrush(color),
@@ -722,7 +802,8 @@ class OrientationMapWindow(QMainWindow):
         ref_idx = DEG_LABELS.index(ref) if ref in DEG_LABELS else 0
         color = ARC_COLORS[ref_idx % len(ARC_COLORS)]
         all_pairs = [(f["chi_deg"], feature_weight(f))
-                     for f in self._by_ref.get(ref, []) if f.get("chi_deg") is not None]
+                     for f in self._visible_by_ref.get(ref, [])
+                     if f.get("chi_deg") is not None]
         cl_pairs = [(f["chi_deg"], feature_weight(f))
                     for f in cluster["features"] if f.get("chi_deg") is not None]
         if not all_pairs:
