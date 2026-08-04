@@ -1,0 +1,25 @@
+Instructions.txt
+We have a 2d Perovskite material scan at
+
+
+We also have xrf data in me7
+
+Based off of xrd-app
+I want a jupyter style python file # %%
+where I can have this specific workflow
+look at xrf map, select detection ranges of interest and have a bound, for each, (that we will use to filter heavier xrd data)
+
+so, we will filter all the data out where the xrf signatures of a certain intensity do not exist
+
+Since there is a xrf file for every xrd one, we link them.
+
+then,
+create a data structure like
+Index of material (Br, In, Pb) 
+X position
+Y Position
+Xrf Intensity
+XRD file link. (not copying the actual data, just linking to the file attributed to the xrf file
+
+use xrd-app for reference, we either want to manually label, or use a dictionary with an energy calibration (I don't have this yet, so leave it unfinished)
+

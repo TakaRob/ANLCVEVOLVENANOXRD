@@ -268,6 +268,42 @@ def _label_item(x, y, text, color, alpha=1.0):
 
 # ── Canvases ───────────────────────────────────────────────────────
 
+class _HeatmapDragViewBox(pg.ViewBox):
+    """ViewBox with optional sample-space rectangle selection."""
+
+    def __init__(self):
+        super().__init__()
+        self.drag_enabled = False
+        self._drag_cb = None
+        self._sel = None
+
+    def mouseDragEvent(self, ev, axis=None):
+        if not (self.drag_enabled and ev.button() == Qt.LeftButton):
+            super().mouseDragEvent(ev, axis)
+            return
+        ev.accept()
+        p0 = self.mapSceneToView(ev.buttonDownScenePos())
+        p1 = self.mapSceneToView(ev.scenePos())
+        x0, y0, x1, y1 = p0.x(), p0.y(), p1.x(), p1.y()
+        if ev.isStart():
+            self._sel = QGraphicsRectItem()
+            self._sel.setPen(QPen(_qcolor("cyan"), 2, Qt.DotLine))
+            self._sel.setBrush(QBrush(_qcolor("cyan", 0.12)))
+            self._sel.setZValue(9)
+            self.addItem(self._sel)
+        if self._sel is not None:
+            self._sel.setRect(min(x0, x1), min(y0, y1),
+                              abs(x1 - x0), abs(y1 - y0))
+        if ev.isFinish():
+            if self._sel is not None:
+                self.removeItem(self._sel)
+                self._sel = None
+            rx0, rx1 = int(np.floor(min(x0, x1) + 0.5)), int(np.ceil(max(x0, x1) + 0.5))
+            ry0, ry1 = int(np.floor(min(y0, y1) + 0.5)), int(np.ceil(max(y0, y1) + 0.5))
+            if rx1 > rx0 and ry1 > ry0 and self._drag_cb:
+                self._drag_cb(rx0, ry0, rx1, ry1)
+
+
 class HeatmapView(pg.GraphicsLayoutWidget):
     """Per-feature intensity heatmap (pyqtgraph rewrite of HeatmapCanvas)."""
 
@@ -278,7 +314,8 @@ class HeatmapView(pg.GraphicsLayoutWidget):
         # whatever window space it's given rather than pushing the window wider.
         self.setMinimumSize(200, 200)
         self.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
-        self.plot = self.addPlot(row=0, col=0)
+        self.vb = _HeatmapDragViewBox()
+        self.plot = self.addPlot(row=0, col=0, viewBox=self.vb)
         self.plot.setAspectLocked(True)
         self.plot.invertY(True)            # origin='upper': row 0 at top
         # Keep auto-range OFF: every render frames the view explicitly via
@@ -348,6 +385,17 @@ class HeatmapView(pg.GraphicsLayoutWidget):
     def set_click_callback(self, cb):
         self._click_cb = cb
 
+    def set_drag_callback(self, cb):
+        self.vb._drag_cb = cb
+
+    @property
+    def drag_enabled(self):
+        return self.vb.drag_enabled
+
+    @drag_enabled.setter
+    def drag_enabled(self, value):
+        self.vb.drag_enabled = bool(value)
+
     def set_hover_callback(self, cb):
         self._hover_cb = cb
 
@@ -416,7 +464,7 @@ class HeatmapView(pg.GraphicsLayoutWidget):
         self._hover_cb(row, col, intensity)
 
     def _on_click(self, ev):
-        if self._click_cb is None or ev.button() != Qt.LeftButton:
+        if self._click_cb is None or ev.button() != Qt.LeftButton or self.vb.drag_enabled:
             return
         pos = self._scene_to_view(ev.scenePos())
         if pos is None:

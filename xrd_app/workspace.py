@@ -10,9 +10,9 @@ side by side::
       Another Sample/    config.yaml + ...
 
 These settings live outside any single project — in ``~/.xrd-app/settings.json``
-— so the GUI can find and list projects before one is opened. The workspace is
-chosen once (first launch) and remembered; ``last_project`` lets the app reopen
-where you left off.
+— so the GUI can find and list projects before one is opened. The current and
+recent workspaces are remembered, while the launch directory is searched each
+session; ``last_project`` lets the app reopen where you left off.
 """
 
 from __future__ import annotations
@@ -26,6 +26,8 @@ from .config import (CONFIG_FILENAME, DataManager, ProjectConfig, default_config
 
 SETTINGS_DIR = Path.home() / ".xrd-app"
 SETTINGS_PATH = SETTINGS_DIR / "settings.json"
+# Captured before any file dialog or tab can affect the process directory.
+LAUNCH_DIRECTORY = Path.cwd().resolve()
 
 
 # ----- raw settings I/O ----------------------------------------------------
@@ -53,9 +55,34 @@ def set_workspace(path) -> Path:
     p = Path(path).resolve()
     p.mkdir(parents=True, exist_ok=True)
     s = load_settings()
+    previous = [s.get("workspace"), *s.get("recent_workspaces", [])]
     s["workspace"] = str(p)
+    s["recent_workspaces"] = [
+        str(candidate) for candidate in dict.fromkeys(previous)
+        if candidate and Path(candidate).resolve() != p
+    ][:9]
     save_settings(s)
     return p
+
+
+def get_launch_directory() -> Path:
+    """Directory from which the GUI process was launched."""
+    return LAUNCH_DIRECTORY
+
+
+def list_workspaces() -> list[Path]:
+    """Current, launch, and recently selected workspaces that still exist."""
+    s = load_settings()
+    candidates = [s.get("workspace"), str(LAUNCH_DIRECTORY),
+                  *s.get("recent_workspaces", [])]
+    out = []
+    for candidate in candidates:
+        if not candidate:
+            continue
+        path = Path(candidate).resolve()
+        if path.is_dir() and path not in out:
+            out.append(path)
+    return out
 
 
 # ----- last project --------------------------------------------------------
@@ -86,6 +113,19 @@ def list_projects(workspace: Optional[Path] = None) -> list[str]:
         return []
     return sorted(p.name for p in Path(ws).iterdir()
                   if p.is_dir() and is_project(p))
+
+
+def discover_projects() -> list[Path]:
+    """Projects in the launch, current, and recently selected workspaces."""
+    projects = []
+    for ws in list_workspaces():
+        if is_project(ws) and ws not in projects:
+            projects.append(ws)
+        for name in list_projects(ws):
+            root = (ws / name).resolve()
+            if root not in projects:
+                projects.append(root)
+    return projects
 
 
 def project_root(name: str, workspace: Optional[Path] = None) -> Path:

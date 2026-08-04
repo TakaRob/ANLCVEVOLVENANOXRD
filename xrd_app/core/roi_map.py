@@ -37,6 +37,38 @@ def _parse_key(key):
         return None
 
 
+def normalize_sample_crop(crop, n_rows: int, n_cols: int) -> tuple[int, int, int, int]:
+    """Clamp half-open sample-space bounds to the active binned grid."""
+    x0, y0, x1, y1 = normalize_roi(crop)
+    x0, x1 = min(x0, n_cols), min(x1, n_cols)
+    y0, y1 = min(y0, n_rows), min(y1, n_rows)
+    if x1 <= x0 or y1 <= y0:
+        raise ValueError("Sample crop does not overlap the spatial grid")
+    return x0, y0, x1, y1
+
+
+def raw_crop_to_bins(crop, bin_size: int, n_rows: int, n_cols: int):
+    """Convert half-open raw (1x1) sample bounds to overlapping binned cells."""
+    x0, y0, x1, y1 = normalize_roi(crop)
+    size = max(1, int(bin_size))
+    return normalize_sample_crop(
+        (x0 // size, y0 // size, (x1 + size - 1) // size, (y1 + size - 1) // size),
+        n_rows, n_cols,
+    )
+
+
+def apply_sample_crop(grid, crop):
+    """Return a same-size grid with finite values outside ``crop`` set to zero."""
+    values = np.array(grid, dtype=float, copy=True)
+    if crop is None:
+        return values
+    x0, y0, x1, y1 = normalize_sample_crop(crop, *values.shape)
+    outside = np.ones(values.shape, dtype=bool)
+    outside[y0:y1, x0:x1] = False
+    values[outside] = 0.0
+    return values
+
+
 def auto_roi_from_click(image, x: int, y: int, *, search_radius: int = 25,
                         fit_radius: int = 18, sigma_extent: float = 2.0):
     """Snap to a local maximum and bound its connected Gaussian-like footprint.
@@ -146,6 +178,21 @@ def _roi_groups(rois):
     return groups
 
 
+def _apply_profile_crops(profiles, crops, parsed, mapping_bins):
+    for profile, crop in zip(profiles, crops):
+        if crop is None:
+            continue
+        x0, y0, x1, y1 = crop
+        for key, (row, col) in parsed.items():
+            if y0 <= row < y1 and x0 <= col < x1:
+                continue
+            profile[key] = {
+                "intensity": 0.0, "integrated": 0.0, "mean": 0.0,
+                "n_pixels": 0, "n_frames": len(mapping_bins.get(key) or []) or 1,
+                "sample_crop_fill": True,
+            }
+
+
 def _sample_keys(source, keys, rois, mapping_bins, normalize_frames, profiles,
                  progress=None, progress_offset=0, progress_total=None):
     groups = _roi_groups(rois)
@@ -175,6 +222,8 @@ def sample_rois(
     grid_mapping: Optional[dict] = None,
     metric: str = "integrated",
     normalize_frames: bool = False,
+    sample_crop=None,
+    sample_crops=None,
     fast: bool = False,
     stride: int = 3,
     progress: Optional[Callable[[int, int], None]] = None,
@@ -203,6 +252,18 @@ def sample_rois(
     mapping_bins = (grid_mapping or {}).get("bins") or {}
     if mapping_bins and not set(keys).intersection(mapping_bins):
         raise ValueError("ROI source spatial bins do not overlap the grid mapping")
+    if sample_crops is not None and sample_crop is not None:
+        raise ValueError("Use sample_crop or sample_crops, not both")
+    requested_crops = sample_crops if sample_crops is not None else [sample_crop] * len(normalized)
+    if len(requested_crops) != len(normalized):
+        raise ValueError("sample_crops must contain one entry per detector ROI")
+    parsed_values = [rc for rc in parsed.values() if rc is not None]
+    n_rows = int((grid_mapping or {}).get("n_bin_rows") or
+                 (max((rc[0] for rc in parsed_values), default=-1) + 1))
+    n_cols = int((grid_mapping or {}).get("n_bin_cols") or
+                 (max((rc[1] for rc in parsed_values), default=-1) + 1))
+    crops = [None if crop is None else normalize_sample_crop(crop, n_rows, n_cols)
+             for crop in requested_crops]
     profiles = [{} for _ in normalized]
     stride = max(2, int(stride))
     regular = list(keys)
@@ -214,8 +275,10 @@ def sample_rois(
                      profiles, progress=progress)
         if any(not profile for profile in profiles):
             raise ValueError("ROI does not overlap readable detector data")
+        _apply_profile_crops(profiles, crops, parsed, mapping_bins)
         return [_result(roi, profile, grid_mapping, metric, normalize_frames,
-                        approximate=False) for roi, profile in zip(normalized, profiles)]
+                        approximate=False, sample_crop=crop)
+                for roi, profile, crop in zip(normalized, profiles, crops)]
 
     coarse = [key for key in regular
               if parsed[key][0] % stride == 0 and parsed[key][1] % stride == 0]
@@ -225,8 +288,10 @@ def sample_rois(
                      profiles, progress=progress)
         if any(not profile for profile in profiles):
             raise ValueError("ROI does not overlap readable detector data")
+        _apply_profile_crops(profiles, crops, parsed, mapping_bins)
         return [_result(roi, profile, grid_mapping, metric, normalize_frames,
-                        approximate=False) for roi, profile in zip(normalized, profiles)]
+                        approximate=False, sample_crop=crop)
+                for roi, profile, crop in zip(normalized, profiles, crops)]
 
     log(f"[roi-map] FAST PREVIEW: stride={stride}, coarse {len(coarse)}/{len(keys)} bins; "
         "small features between sampled cells may be missed")
@@ -247,7 +312,8 @@ def sample_rois(
         for seed in seeds:
             row, col = parsed[seed]
             margin = stride + 1
-            for key, rc in parsed.items():
+            for key in regular:
+                rc = parsed[key]
                 if abs(rc[0] - row) <= margin and abs(rc[1] - col) <= margin:
                     refine.add(key)
     refine.difference_update(coarse)
@@ -267,10 +333,11 @@ def sample_rois(
                 n_frames = len(mapping_bins.get(key) or []) or 1
                 profile[key] = {**floors, "n_pixels": 0,
                                 "n_frames": int(n_frames), "coarse_fill": True}
+    _apply_profile_crops(profiles, crops, parsed, mapping_bins)
     return [_result(roi, profile, grid_mapping, metric, normalize_frames,
-                    approximate=True, stride=stride,
+                    approximate=True, stride=stride, sample_crop=crop,
                     sampled_bins=total_reads, total_bins=len(keys))
-            for roi, profile in zip(normalized, profiles)]
+            for roi, profile, crop in zip(normalized, profiles, crops)]
 
 
 def sample_roi(source, roi, **kwargs) -> dict:
@@ -335,6 +402,9 @@ def to_shape_feature(result: dict, reflection: str = "manual ROI", *,
         "manual_roi": dict(roi),
         "roi_metric": metric,
     }
+    if result.get("sample_crop") is not None:
+        x0, y0, x1, y1 = result["sample_crop"]
+        feature["sample_crop"] = {"x0": x0, "y0": y0, "x1": x1, "y1": y1}
     if tth_map is not None and 0 <= det_y < tth_map.shape[0] and 0 <= det_x < tth_map.shape[1]:
         feature["ref_tth"] = round(float(tth_map[det_y, det_x]), 5)
     if beam_center is not None:

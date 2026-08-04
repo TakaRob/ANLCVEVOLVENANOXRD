@@ -62,6 +62,54 @@ def test_batch_rois_read_each_spatial_bin_once_and_match_individual_results():
         assert batch[index]["profile"] == individual["profile"]
 
 
+def test_sample_crop_zero_fills_outside_selection_and_preserves_full_grid():
+    source = _FakeSource()
+    result = roi_map.sample_roi(
+        source, (0, 0, 2, 2), sample_crop=(1, 0, 2, 1),
+        grid_mapping={"n_bin_rows": 2, "n_bin_cols": 2,
+                      "bins": {"0_0": [0], "0_1": [1, 2], "1_0": [3]}},
+    )
+
+    assert [request[0] for request in source.requests] == source.keys()
+    grid = roi_map.grid_array(result)
+    assert grid.shape == (2, 2)
+    assert grid[0, 1] == 40.0
+    assert grid[0, 0] == 0.0
+    assert grid[1, 0] == 0.0
+    assert result["sample_crop"] == (1, 0, 2, 1)
+
+
+def test_batch_supports_different_crop_for_each_roi():
+    source = _FakeSource()
+    results = roi_map.sample_rois(
+        source, [(0, 0, 2, 2), (2, 1, 5, 3)],
+        sample_crops=[(0, 0, 1, 1), None],
+        grid_mapping={"n_bin_rows": 2, "n_bin_cols": 2,
+                      "bins": {"0_0": [0], "0_1": [1, 2], "1_0": [3]}},
+    )
+
+    cropped = roi_map.grid_array(results[0])
+    full = roi_map.grid_array(results[1])
+    assert cropped[0, 0] > 0
+    assert cropped[0, 1] == 0
+    assert results[0]["sample_crop"] == (0, 0, 1, 1)
+    assert full[0, 0] > 0
+    assert full[0, 1] > 0
+    assert results[1]["sample_crop"] is None
+
+
+def test_raw_crop_conversion_and_display_mask_preserve_grid_size():
+    crop = roi_map.raw_crop_to_bins((3, 4, 10, 11), 3, 4, 5)
+    assert crop == (1, 1, 4, 4)
+
+    grid = np.arange(20, dtype=float).reshape(4, 5)
+    masked = roi_map.apply_sample_crop(grid, crop)
+    assert masked.shape == grid.shape
+    assert np.array_equal(masked[1:4, 1:4], grid[1:4, 1:4])
+    assert np.count_nonzero(masked[:1]) == 0
+    assert np.count_nonzero(masked[:, :1]) == 0
+
+
 def test_batch_distant_rois_uses_small_separate_reads():
     class Source:
         def __init__(self):

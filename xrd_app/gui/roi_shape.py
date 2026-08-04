@@ -44,6 +44,8 @@ class ROIShapeWindow(QMainWindow):
         self.source = None
         self.image = None
         self.roi = None
+        self.sample_crop_rect = None
+        self.sample_grid_rect = None
         self.result_path = None
         self.preview_feature = None
         self.pending = []
@@ -101,9 +103,38 @@ class ROIShapeWindow(QMainWindow):
             root.addWidget(self._header)
 
         split = QSplitter(Qt.Horizontal)
+        heatmap_host = QWidget()
+        hl = QVBoxLayout(heatmap_host)
+        hl.setContentsMargins(0, 0, 0, 0)
+        crop_row = QWidget(); cl = QHBoxLayout(crop_row); cl.setContentsMargins(0, 0, 0, 0)
+        self.crop_sample_cb = QCheckBox("Crop sample space")
+        self.crop_sample_cb.setToolTip(
+            "Drag a rectangle on the sample map. Outside cells become zero while the full grid size is retained.")
+        self.crop_sample_cb.toggled.connect(self._crop_toggled)
+        self.crop_coords = QComboBox(); self.crop_coords.addItems(["Raw coordinates", "Binned coordinates"])
+        self.crop_coords.setToolTip("Choose whether manual crop values use raw 1x1 or current binned coordinates.")
+        self.crop_coords.currentIndexChanged.connect(self._crop_coordinate_mode_changed)
+        self.clear_crop_btn = QPushButton("Clear crop")
+        self.clear_crop_btn.clicked.connect(self._clear_sample_crop)
+        self.crop_label = QLabel("No crop")
+        cl.addWidget(self.crop_sample_cb); cl.addWidget(self.crop_coords)
+        cl.addWidget(self.clear_crop_btn); cl.addWidget(self.crop_label); cl.addStretch()
+        hl.addWidget(crop_row)
+        crop_entry = QWidget(); ce = QHBoxLayout(crop_entry); ce.setContentsMargins(0, 0, 0, 0)
+        self.crop_inputs = []
+        for name in ("x0", "y0", "x1", "y1"):
+            field = QSpinBox(); field.setRange(0, 1_000_000); field.setPrefix(f"{name} ")
+            self.crop_inputs.append(field)
+            ce.addWidget(field)
+        self.apply_crop_btn = QPushButton("Apply crop")
+        self.apply_crop_btn.clicked.connect(self._apply_manual_crop)
+        ce.addWidget(self.apply_crop_btn)
+        hl.addWidget(crop_entry)
         self.heatmap = HeatmapView()
         self.heatmap.set_click_callback(self._heatmap_clicked)
-        split.addWidget(self.heatmap)
+        self.heatmap.set_drag_callback(self._sample_crop_selected)
+        hl.addWidget(self.heatmap, 1)
+        split.addWidget(heatmap_host)
 
         detector_host = QWidget()
         dl = QVBoxLayout(detector_host)
@@ -218,6 +249,161 @@ class ROIShapeWindow(QMainWindow):
             self.roi_sensitivity.setMaximum(0.95)
         self.roi_sensitivity.setValue(default)
 
+    def _active_grid_shape(self):
+        feature = self.preview_feature or {}
+        rows = int(feature.get("n_bin_rows", 0))
+        cols = int(feature.get("n_bin_cols", 0))
+        if rows and cols:
+            return rows, cols
+        try:
+            gm = io.validate_grid_mapping_bin_size(
+                self.dm.grid_mapping(bin_size=self.bin_size, scan=self.scan),
+                self.bin_size)
+            rows = int(gm.get("n_bin_rows", 0))
+            cols = int(gm.get("n_bin_cols", 0))
+            if rows and cols:
+                return rows, cols
+        except (FileNotFoundError, ValueError, TypeError, OSError):
+            pass
+        parsed = []
+        for key in self.spatial_keys:
+            try:
+                parsed.append(tuple(int(value) for value in key.split("_", 1)))
+            except (AttributeError, ValueError):
+                continue
+        if parsed:
+            return max(row for row, _ in parsed) + 1, max(col for _, col in parsed) + 1
+        grid = getattr(self.heatmap, "_grid_data", None)
+        if grid is not None and np.ndim(grid) == 2:
+            return int(grid.shape[0]), int(grid.shape[1])
+        return 0, 0
+
+    def _selected_entry(self):
+        row = self.pending_list.currentRow()
+        return self.pending[row] if 0 <= row < len(self.pending) else None
+
+    def _active_sample_crop(self, entry=None):
+        entry = entry or self._selected_entry()
+        raw_crop = entry.get("sample_crop_raw") if entry is not None else None
+        if raw_crop is None:
+            return None
+        rows, cols = self._active_grid_shape()
+        if not rows or not cols:
+            return None
+        return roi_map.raw_crop_to_bins(raw_crop, self.bin_size, rows, cols)
+
+    @staticmethod
+    def _crop_editable(entry):
+        return entry is not None and entry.get("status") in ("detected", "ready")
+
+    def _crop_toggled(self, checked):
+        self.heatmap.drag_enabled = checked and self._crop_editable(self._selected_entry())
+        self._update_crop_controls()
+
+    def _set_sample_crop(self, crop, *, raw_coordinates):
+        entry = self._selected_entry()
+        if entry is None:
+            raise ValueError("Select a detector ROI before assigning a sample crop")
+        if not self._crop_editable(entry):
+            raise ValueError("Saved ROI crops are locked")
+        rows, cols = self._active_grid_shape()
+        if not rows or not cols:
+            raise ValueError("Sample grid dimensions are not available yet")
+        if raw_coordinates:
+            roi_map.raw_crop_to_bins(crop, self.bin_size, rows, cols)
+            entry["sample_crop_raw"] = roi_map.normalize_roi(crop)
+        else:
+            binned = roi_map.normalize_sample_crop(crop, rows, cols)
+            entry["sample_crop_raw"] = tuple(value * self.bin_size for value in binned)
+        self._update_crop_controls()
+        self._draw_sample_crop()
+        self._render_feature()
+
+    def _sample_crop_selected(self, x0, y0, x1, y1):
+        try:
+            self._set_sample_crop((x0, y0, x1, y1), raw_coordinates=False)
+        except ValueError as exc:
+            self.status.setText(str(exc))
+            return
+        entry = self._selected_entry()
+        self.status.setText(
+            "Sample crop updated; displayed values were masked without deleting the preview. "
+            "Save will recompute this crop exactly."
+            if entry and entry.get("status") == "ready" else
+            "Sample crop selected; run shape finding to calculate ROI intensities.")
+
+    def _apply_manual_crop(self):
+        crop = tuple(field.value() for field in self.crop_inputs)
+        try:
+            self._set_sample_crop(crop, raw_coordinates=self.crop_coords.currentIndex() == 0)
+        except ValueError as exc:
+            self.status.setText(f"Invalid sample crop: {exc}")
+            return
+        self.crop_sample_cb.setChecked(True)
+        entry = self._selected_entry()
+        self.status.setText(
+            "Manual crop updated without deleting the preview; Save will recompute it exactly."
+            if entry and entry.get("status") == "ready" else
+            "Manual sample crop applied; run shape finding to calculate ROI intensities.")
+
+    def _clear_sample_crop(self):
+        entry = self._selected_entry()
+        if entry is None:
+            return
+        if not self._crop_editable(entry):
+            self.status.setText("Saved ROI crops are locked.")
+            return
+        entry["sample_crop_raw"] = None
+        self._draw_sample_crop()
+        self._update_crop_controls()
+        self._render_feature()
+
+    def _crop_coordinate_mode_changed(self, *_):
+        self._update_crop_controls()
+
+    def _update_crop_controls(self):
+        entry = self._selected_entry()
+        crop = self._active_sample_crop(entry)
+        editable = self._crop_editable(entry)
+        self.apply_crop_btn.setEnabled(editable)
+        self.clear_crop_btn.setEnabled(editable)
+        for field in self.crop_inputs:
+            field.setEnabled(editable)
+        self.heatmap.drag_enabled = self.crop_sample_cb.isChecked() and editable
+        if entry is None:
+            self.crop_label.setText("Select a detector ROI")
+            return
+        locked = " (locked)" if not editable else ""
+        if crop is None:
+            self.crop_label.setText(f"Full scan{locked}")
+            return
+        shown = entry["sample_crop_raw"] if self.crop_coords.currentIndex() == 0 else crop
+        units = "raw" if self.crop_coords.currentIndex() == 0 else f"{self.bin_size}x{self.bin_size} bins"
+        self.crop_label.setText(
+            f"x={shown[0]}:{shown[2]} y={shown[1]}:{shown[3]} ({units}){locked}")
+        for field, value in zip(self.crop_inputs, shown):
+            field.setValue(int(value))
+
+    def _draw_sample_crop(self):
+        if self.sample_crop_rect is not None:
+            self.sample_crop_rect.remove()
+            self.sample_crop_rect = None
+        crop = self._active_sample_crop()
+        if crop is not None:
+            x0, y0, x1, y1 = crop
+            self.sample_crop_rect = _RectItem(
+                self.heatmap.vb, x0 - 0.5, y0 - 0.5, x1 - 0.5, y1 - 0.5,
+                edge="cyan", face="cyan", alpha=0.08)
+
+    def _draw_sample_grid_outline(self, rows, cols):
+        if self.sample_grid_rect is not None:
+            self.sample_grid_rect.remove()
+            self.sample_grid_rect = None
+        if rows > 0 and cols > 0:
+            self.sample_grid_rect = _RectItem(
+                self.heatmap.vb, -0.5, -0.5, cols - 0.5, rows - 0.5,
+                edge="white", face="white", alpha=0.0)
+
     def _bin_changed(self, text):
         try:
             self.bin_size = int(text.split("x", 1)[0])
@@ -230,7 +416,17 @@ class ROIShapeWindow(QMainWindow):
         self.spatial_index = 0
         self._load_saved_features()
         self._load_detector_image()
+        self._update_crop_controls()
+        self._draw_sample_crop()
         self.bin_size_changed.emit(self.bin_size)
+
+    def _feature_crop_raw(self, feature):
+        crop = feature.get("sample_crop") or {}
+        try:
+            binned = tuple(int(crop[key]) for key in ("x0", "y0", "x1", "y1"))
+        except (KeyError, TypeError, ValueError):
+            return None
+        return tuple(value * self.bin_size for value in binned)
 
     def _load_saved_features(self):
         """Restore dedicated ROI catalogs for the active scan and bin size."""
@@ -265,6 +461,7 @@ class ROIShapeWindow(QMainWindow):
                     "catalog_path": path,
                     "preview_path": None,
                     "process": None,
+                    "sample_crop_raw": self._feature_crop_raw(feature),
                 })
         if len(paths) == 1:
             self.result_path = paths[0]
@@ -485,7 +682,7 @@ class ROIShapeWindow(QMainWindow):
         preview_dir = self.dm.metadata_scan_dir(self.scan) / "roi_previews"
         entry = {"roi": roi, "status": status, "rect": rect,
                  "preview_path": preview_dir / f"preview_{job_id}.json",
-                 "process": None, "score": score}
+                 "process": None, "score": score, "sample_crop_raw": None}
         self.pending.append(entry)
         return len(self.pending) - 1
 
@@ -585,6 +782,9 @@ class ROIShapeWindow(QMainWindow):
                 "--normalize-frames"]
         for entry in entries:
             args += ["--roi", ",".join(str(v) for v in entry["roi"])]
+            crop = self._active_sample_crop(entry)
+            args += ["--sample-crop", (
+                ",".join(str(value) for value in crop) if crop is not None else "none")]
         if self.fast_preview_cb.isChecked():
             args += ["--fast", "--stride", str(self.fast_stride.value())]
         if self.scan:
@@ -708,9 +908,10 @@ class ROIShapeWindow(QMainWindow):
         self.pending_list.clear()
         for i, entry in enumerate(self.pending, 1):
             roi = entry["roi"]
+            crop_text = "crop" if entry.get("sample_crop_raw") is not None else "full scan"
             item = QListWidgetItem(
                 f"{i}. x={roi[0]}:{roi[2]} y={roi[1]}:{roi[3]} "
-                f"[{entry['status']}]")
+                f"[{entry['status']}; {crop_text}]")
             if entry.get("status") == "saved":
                 item.setForeground(QColor("lime"))
             elif entry.get("status") == "detected":
@@ -742,9 +943,10 @@ class ROIShapeWindow(QMainWindow):
             else:
                 rect.set_color("#f0a030", "#f0a030", 0.2)
         self.roi_label.setText(", ".join(str(v) for v in self.roi))
-        if entry.get("feature"):
-            self.preview_feature = entry["feature"]
-            self._render_feature()
+        self.preview_feature = entry.get("feature")
+        self._update_crop_controls()
+        self._draw_sample_crop()
+        self._render_feature()
         self._load_detector_image()
 
     def _remove_pending(self):
@@ -788,7 +990,12 @@ class ROIShapeWindow(QMainWindow):
         self.pending.pop(row)
         self.roi = None
         self.roi_label.setText("not selected")
-        self._refresh_pending_list(select=max(0, row - 1))
+        self._refresh_pending_list(select=max(0, row - 1) if self.pending else None)
+        if not self.pending:
+            self.preview_feature = None
+            self._update_crop_controls()
+            self._draw_sample_crop()
+            self._render_feature()
 
     def _redraw_pending_rects(self):
         selected = self.pending_list.currentRow()
@@ -835,6 +1042,9 @@ class ROIShapeWindow(QMainWindow):
                 "--bin-size", str(self.bin_size), "--name", tag]
         for entry in ready:
             args += ["--roi", ",".join(str(v) for v in entry["roi"])]
+            crop = self._active_sample_crop(entry)
+            args += ["--sample-crop", (
+                ",".join(str(value) for value in crop) if crop is not None else "none")]
         if self.scan:
             args += ["--scan", str(self.scan)]
         cmd = [sys.executable, "-m", "xrd_app.cli", *args]
@@ -896,7 +1106,20 @@ class ROIShapeWindow(QMainWindow):
     def _render_feature(self):
         feature = self.preview_feature
         if feature is None:
-            self.heatmap.img.clear(); self.heatmap._grid_data = None
+            rows, cols = self._active_grid_shape()
+            self.heatmap.img.clear()
+            self.heatmap._grid_data = np.zeros((rows, cols), dtype=float) if rows and cols else None
+            self._draw_sample_grid_outline(rows, cols)
+            self._draw_sample_crop()
+            if rows and cols:
+                self.heatmap.fit_to_rect(-0.5, -0.5, cols, rows)
+                self.heatmap.plot.setTitle(
+                    f"Sample grid - awaiting ROI shape finding<br>"
+                    f"resolution {cols}x{rows} at {self.bin_size}x{self.bin_size}",
+                    color="w", size="10pt")
+            else:
+                self.heatmap.plot.setTitle("Sample grid dimensions unavailable", color="w")
+            self.heatmap.set_markers(None, None)
             return
         profile = feature.get("intensity_profile") or {}
         metric = "integrated"
@@ -915,6 +1138,8 @@ class ROIShapeWindow(QMainWindow):
             result["n_bin_rows"] = max(rows, default=-1) + 1
             result["n_bin_cols"] = max(cols, default=-1) + 1
         grid = roi_map.grid_array(result, metric)
+        crop = self._active_sample_crop()
+        grid = roi_map.apply_sample_crop(grid, crop)
         if grid.size and np.isfinite(grid).any():
             finite = grid[np.isfinite(grid)]
             vmin, vmax = float(np.min(finite)), float(np.max(finite))
@@ -924,14 +1149,20 @@ class ROIShapeWindow(QMainWindow):
             self.heatmap._grid_data = grid
             self.heatmap._grid_r_lo = self.heatmap._grid_c_lo = 0
             self.heatmap.fit_to_rect(-0.5, -0.5, grid.shape[1], grid.shape[0])
+        self._draw_sample_grid_outline(*grid.shape)
+        self._draw_sample_crop()
         center = feature.get("center_bin")
         try:
             center_rc = tuple(int(v) for v in center.split("_", 1))
         except (AttributeError, ValueError):
             center_rc = None
         self.heatmap.set_markers(center_rc, None)
+        resolution = f"{grid.shape[1]}x{grid.shape[0]}"
+        if crop is not None:
+            resolution += f"; crop {crop[2] - crop[0]}x{crop[3] - crop[1]}"
         self.heatmap.plot.setTitle(
-            f"ROI feature {feature.get('feature_id', '?')} - total ROI counts",
+            f"ROI feature {feature.get('feature_id', '?')} - total ROI counts<br>"
+            f"resolution {resolution} at {self.bin_size}x{self.bin_size}",
             color="w", size="10pt")
 
     def _heatmap_clicked(self, row, col):

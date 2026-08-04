@@ -12,6 +12,13 @@ from xrd_app import cli, workspace
 from xrd_app.config import DataManager, ProjectConfig
 
 
+@pytest.fixture(autouse=True)
+def _isolate_workspace_settings(tmp_path, monkeypatch):
+    settings_dir = tmp_path / ".xrd-app"
+    monkeypatch.setattr(workspace, "SETTINGS_DIR", settings_dir)
+    monkeypatch.setattr(workspace, "SETTINGS_PATH", settings_dir / "settings.json")
+
+
 @pytest.mark.parametrize(
     "scan",
     ["../Scan_0007", "/tmp/Scan_0007", r"..\Scan_0007", ".", ".."],
@@ -44,6 +51,43 @@ def test_workspace_project_creation_stays_contained_and_refuses_existing(tmp_pat
     with pytest.raises(FileExistsError, match="refusing to overwrite"):
         workspace.create_project("safe project", workspace=tmp_path)
     assert (root / "config.yaml").read_text() == original
+
+
+def test_project_discovery_combines_launch_current_and_recent_workspaces(tmp_path,
+                                                                        monkeypatch):
+    settings = tmp_path / "settings.json"
+    launch = tmp_path / "launch"
+    current = tmp_path / "current"
+    previous = tmp_path / "previous"
+    for root, name in ((launch, "from-launch"), (current, "from-current"),
+                       (previous, "from-previous")):
+        (root / name).mkdir(parents=True)
+        (root / name / "config.yaml").write_text(f"name: {name}\n")
+
+    monkeypatch.setattr(workspace, "SETTINGS_DIR", tmp_path)
+    monkeypatch.setattr(workspace, "SETTINGS_PATH", settings)
+    monkeypatch.setattr(workspace, "LAUNCH_DIRECTORY", launch)
+    workspace.set_workspace(previous)
+    workspace.set_workspace(current)
+
+    assert workspace.list_workspaces() == [current, launch, previous]
+    assert workspace.discover_projects() == [
+        current / "from-current",
+        launch / "from-launch",
+        previous / "from-previous",
+    ]
+
+
+def test_project_discovery_includes_launch_directory_when_it_is_a_project(tmp_path,
+                                                                           monkeypatch):
+    launch = tmp_path / "project"
+    launch.mkdir()
+    (launch / "config.yaml").write_text("name: launch project\n")
+    monkeypatch.setattr(workspace, "SETTINGS_DIR", tmp_path / ".settings")
+    monkeypatch.setattr(workspace, "SETTINGS_PATH", tmp_path / ".settings/settings.json")
+    monkeypatch.setattr(workspace, "LAUNCH_DIRECTORY", launch)
+
+    assert workspace.discover_projects() == [launch]
 
 
 @pytest.mark.parametrize(

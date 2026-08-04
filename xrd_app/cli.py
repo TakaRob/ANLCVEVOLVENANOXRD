@@ -530,7 +530,8 @@ def run_cvevolve(config_path, prompt_path, engine, cvevolve_dir, image, build, m
 @click.option('--root', default=None,
               help='Project root (default: last-opened project, or pick one in Setup)')
 @click.option('--scan', default=None, help='Initial scan (defaults to config/last-used)')
-@click.option('--bin-size', type=int, default=3, help='Initial bin size')
+@click.option('--bin-size', type=int, default=None,
+              help='Initial bin size (default: restore last-used, otherwise 3)')
 @click.option('--fresh', is_flag=True,
               help='Ignore saved state (last project + last tab/scan); start at Setup.')
 def gui(root, scan, bin_size, fresh):
@@ -1301,9 +1302,11 @@ def roi_detect(scan, algorithm, sensitivity, max_rois, output, root):
 @click.option('--normalize-frames/--sum-frames', default=False,
               help='Divide each spatial bin by its contributing frame count. Use '
                    'for intensity maps when true-position cells have unequal occupancy.')
+@click.option('--sample-crop', 'sample_crops', multiple=True,
+              help='Per-ROI sample rectangle X0,Y0,X1,Y1, or none; repeat in ROI order')
 @click.option('--root', default='.', help='Project root directory')
 def roi_shapes(bin_size, scan, rois, name, preview_output, fast, stride,
-               normalize_frames, root):
+               normalize_frames, sample_crops, root):
     """Batch detector ROIs into spatial maps with one pass over scan bins."""
     from .core import io, processing, roi_map
 
@@ -1320,6 +1323,24 @@ def roi_shapes(bin_size, scan, rois, name, preview_output, fast, stride,
         tag = safe_component(name, normalize=True, label="catalog name")
     except ValueError as exc:
         raise click.BadParameter(str(exc), param_hint='--name')
+    crops = []
+    for value in sample_crops:
+        if value.strip().lower() in ("none", "full"):
+            crops.append(None)
+            continue
+        try:
+            crop = tuple(int(v.strip()) for v in value.split(','))
+            if len(crop) != 4:
+                raise ValueError
+            crops.append(crop)
+        except ValueError:
+            raise click.BadParameter(
+                'expected X0,Y0,X1,Y1 or none', param_hint='--sample-crop')
+    if crops and len(crops) != len(detector_rois):
+        raise click.BadParameter(
+            'repeat once per --roi, using none for the full scan', param_hint='--sample-crop')
+    if not crops:
+        crops = [None] * len(detector_rois)
 
     dm = DataManager(root, scan=scan)
     h5 = dm.binned_h5(bin_size, scan=scan)
@@ -1345,7 +1366,7 @@ def roi_shapes(bin_size, scan, rois, name, preview_output, fast, stride,
     try:
         sampled = roi_map.sample_rois(
             source, detector_rois, grid_mapping=gm, metric="integrated",
-            normalize_frames=normalize_frames, fast=fast, stride=stride,
+            normalize_frames=normalize_frames, sample_crops=crops, fast=fast, stride=stride,
             progress=_make_progress("ROI intensity maps"), log=click.echo)
     except ValueError as exc:
         raise click.ClickException(str(exc)) from exc
@@ -1369,6 +1390,7 @@ def roi_shapes(bin_size, scan, rois, name, preview_output, fast, stride,
         "approximate": bool(fast and any(r.get("approximate") for r in sampled)),
         "stride": stride if fast else 1,
         "normalize_frames": bool(normalize_frames),
+        "sample_crops": [list(crop) if crop is not None else None for crop in crops],
         "intensity_definition": (
             "mean detector counts per contributing frame inside ROI per spatial bin"
             if normalize_frames else
@@ -1391,9 +1413,11 @@ def roi_shapes(bin_size, scan, rois, name, preview_output, fast, stride,
 @click.option('--name', required=True, help='Manual ROI catalog name')
 @click.option('--bin-size', type=int, default=3, help='Spatial bin size')
 @click.option('--scan', default=None, help='Scan number/name')
+@click.option('--sample-crop', 'sample_crops', multiple=True,
+              help='Per-ROI sample rectangle X0,Y0,X1,Y1, or none; repeat in ROI order')
 @click.option('--root', default='.', help='Project root directory')
 @click.pass_context
-def roi_save(ctx, rois, name, bin_size, scan, root):
+def roi_save(ctx, rois, name, bin_size, scan, sample_crops, root):
     """Recompute all ready ROIs exactly in one batch, then save the catalog."""
     import tempfile
     try:
@@ -1403,7 +1427,8 @@ def roi_save(ctx, rois, name, bin_size, scan, root):
     preview = Path(tempfile.gettempdir()) / f"xrd_app_roi_exact_{os.getpid()}.json"
     try:
         ctx.invoke(roi_shapes, bin_size=bin_size, scan=scan, rois=rois, name=tag,
-                   preview_output=str(preview), fast=False, stride=3, root=root)
+                   preview_output=str(preview), fast=False, stride=3,
+                   sample_crops=sample_crops, normalize_frames=False, root=root)
         import json
         from .core import roi_catalog
         with open(preview) as handle:
@@ -1501,15 +1526,17 @@ def batch(ctx, scans, all_scans, bin_size, algorithm, shape_algo, snr, grid_shap
 @click.option('--algorithm', default=None, help='Peak detector path OR bundled name')
 @click.option('--shape-algo', default='gaussian', help='Shape algorithm name (output label)')
 @click.option('--snr', type=float, default=4.0, help='SNR threshold for detection')
+@click.option('--workers', type=click.IntRange(min=1), default=None,
+              help='Peak detector worker processes (default: up to 4)')
 @click.option('--root', default='.', help='Project root directory')
 @click.pass_context
-def run_pipeline(ctx, bin_size, scan, algorithm, shape_algo, snr, root):
+def run_pipeline(ctx, bin_size, scan, algorithm, shape_algo, snr, workers, root):
     """Run Peak Finding then Shape Finding for one scan, back to back."""
     dm = DataManager(root, scan=scan)
     # Same naming peaks uses for its output set, so shapes can pick it up.
     algo = algorithm or Path(dm.detector_script(algorithm, bin_size=bin_size)).stem
     ctx.invoke(peaks, bin_size=bin_size, scan=scan, algorithm=algorithm,
-               snr=snr, root=root)
+               snr=snr, workers=workers, root=root)
     ctx.invoke(shapes, bin_size=bin_size, scan=scan, algorithm=shape_algo,
                peak_algo=algo, root=root)
     click.echo("\nPipeline complete: peaks → shapes")

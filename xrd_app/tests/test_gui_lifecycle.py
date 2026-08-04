@@ -7,6 +7,8 @@ import sys
 import time
 from types import SimpleNamespace
 
+import h5py
+import numpy as np
 import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -14,11 +16,16 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PyQt5.QtCore import QProcess, QThread, pyqtSignal
 from PyQt5.QtWidgets import (
     QApplication, QComboBox, QLabel, QListWidget, QMainWindow, QPlainTextEdit,
-    QProgressBar, QPushButton, QWidget,
+    QProgressBar, QPushButton, QSpinBox, QWidget,
 )
 
+from xrd_app import workspace
 from xrd_app.app import MainWindow
+from xrd_app.config import DataManager
 from xrd_app.gui.roi_shape import ROIShapeWindow
+
+from xrd_app.gui.device_map import QRangeSlider
+from xrd_app.gui.labeling import LabelingTool
 from xrd_app.gui import lifecycle
 from xrd_app.gui.lifecycle import dispose_widget, start_process, stop_process, stop_thread
 from xrd_app.tabs import _console
@@ -32,6 +39,33 @@ def _app():
     global _APP
     _APP = QApplication.instance() or QApplication([])
     return _APP
+
+
+def test_startup_restores_last_project_and_gui_state(tmp_path, monkeypatch):
+    _app()
+    project = tmp_path / "project"
+    metadata = project / "Metadata"
+    metadata.mkdir(parents=True)
+    (project / "config.yaml").write_text("name: restored project\n")
+    (metadata / "gui_state.json").write_text(json.dumps({
+        "active_scan": "Scan_0002",
+        "bin_size": 5,
+        "current_tab": 0,
+    }))
+    settings_dir = tmp_path / ".settings"
+    monkeypatch.setattr("xrd_app.workspace.SETTINGS_DIR", settings_dir)
+    monkeypatch.setattr("xrd_app.workspace.SETTINGS_PATH", settings_dir / "settings.json")
+    monkeypatch.setattr("xrd_app.app._discover_tabs", lambda only=None: [])
+    monkeypatch.setattr("xrd_app.app.DataManager.discover_scans",
+                        lambda self, selected_only=False: ["Scan_0001", "Scan_0002"])
+    workspace.set_last_project(project)
+
+    window = MainWindow()
+
+    assert window.project_root == str(project.resolve())
+    assert window.scan == "Scan_0002"
+    assert window.bin_size == 5
+    window.close()
 
 
 def test_tab_bin_context_persists_and_drives_scan_rebuild(tmp_path, monkeypatch):
@@ -78,6 +112,23 @@ def test_tab_bin_context_persists_and_drives_scan_rebuild(tmp_path, monkeypatch)
     assert built == [("Scan_0001", 3), ("Scan_0002", 5)]
     assert window._content[0]._embedded_window.current_bin_size() == 5
     window.close()
+
+
+def test_feature_size_slider_uses_logarithmic_mapping():
+    _app()
+    slider = QRangeSlider(1, 100, log_scale=True)
+    slider.resize(216, slider.height())  # 200 px track plus 8 px margins
+
+    assert slider._val_to_x(10) == 108
+    assert slider._x_to_val(108) == 10
+
+
+def test_range_slider_remains_linear_by_default():
+    _app()
+    slider = QRangeSlider(1, 100)
+    slider.resize(216, slider.height())
+
+    assert slider._x_to_val(108) in (50, 51)
 
 
 def test_dispose_widget_closes_before_deferred_delete():
@@ -186,6 +237,36 @@ def _roi_window():
     return window
 
 
+def test_labeling_finds_nearest_readable_built_bins_without_raw_frames(tmp_path):
+    binned = tmp_path / "Binned" / "Scan_0007"
+    binned.mkdir(parents=True)
+    with h5py.File(binned / "xrd_3x3_bins.h5", "w") as handle:
+        handle.create_dataset("0_0", data=np.ones((2, 2)))
+    with h5py.File(binned / "xrd_5x5_bins.h5", "w") as handle:
+        handle.create_dataset("metadata", data=np.ones(2))
+    (binned / "xrd_2x2_bins.h5").write_text("unreadable")
+
+    window = LabelingTool.__new__(LabelingTool)
+    window.dm = DataManager(tmp_path, scan=7)
+    window.bin_size = 1
+
+    assert window._available_binned_size(exclude=1) == 3
+
+    loaded = []
+
+    def load(size):
+        if size == 1:
+            raise RuntimeError("raw share unavailable")
+        loaded.append(size)
+        window.bin_size = size
+
+    window._load_bin_data_for_size = load
+    window._load_initial_bin_data()
+    assert loaded == [3]
+    assert window.bin_size == 3
+    assert "opened built 3x3" in window._startup_source_note
+
+
 def test_roi_job_controls_and_overlap_guard(monkeypatch):
     _app()
     window = _roi_window()
@@ -243,6 +324,136 @@ def test_roi_batch_buffers_split_progress_lines(monkeypatch):
 
     assert window.progress.value() == 25
     assert window.log.toPlainText() == "message"
+
+
+def test_roi_crop_grid_shape_uses_metadata_then_loaded_keys(monkeypatch):
+    _app()
+    window = _roi_window()
+    window.bin_size = 3
+    window.scan = "Scan_0203"
+    window.preview_feature = None
+    window.spatial_keys = []
+    window.heatmap = SimpleNamespace(_grid_data=None)
+    requested = []
+
+    class DM:
+        def grid_mapping(self, **kwargs):
+            requested.append(kwargs)
+            return "grid.json"
+
+    window.dm = DM()
+    monkeypatch.setattr(
+        "xrd_app.gui.roi_shape.io.validate_grid_mapping_bin_size",
+        lambda path, size: {"n_bin_rows": 20, "n_bin_cols": 30})
+    assert window._active_grid_shape() == (20, 30)
+    assert requested == [{"bin_size": 3, "scan": "Scan_0203"}]
+
+    monkeypatch.setattr(
+        "xrd_app.gui.roi_shape.io.validate_grid_mapping_bin_size",
+        lambda path, size: (_ for _ in ()).throw(FileNotFoundError()))
+    window.spatial_keys = ["0_0", "4_7", "bad"]
+    assert window._active_grid_shape() == (5, 8)
+
+
+def test_roi_new_feature_draws_full_grid_outline(monkeypatch):
+    _app()
+    window = _roi_window()
+    window.bin_size = 3
+    window.preview_feature = None
+    window.sample_grid_rect = None
+    drawn = []
+    window.heatmap = SimpleNamespace(
+        img=SimpleNamespace(clear=lambda: None), _grid_data=None,
+        fit_to_rect=lambda *args: drawn.append(("fit", args)),
+        plot=SimpleNamespace(setTitle=lambda *args, **kwargs: None),
+        set_markers=lambda *args: None,
+    )
+    monkeypatch.setattr(window, "_active_grid_shape", lambda: (20, 30))
+    monkeypatch.setattr(window, "_draw_sample_grid_outline",
+                        lambda rows, cols: drawn.append(("outline", (rows, cols))))
+    monkeypatch.setattr(window, "_draw_sample_crop", lambda: None)
+
+    window._render_feature()
+
+    assert window.heatmap._grid_data.shape == (20, 30)
+    assert ("outline", (20, 30)) in drawn
+    assert ("fit", (-0.5, -0.5, 30, 20)) in drawn
+
+
+def test_roi_manual_crop_interprets_raw_and_binned_coordinates(monkeypatch):
+    _app()
+    window = _roi_window()
+    window.bin_size = 3
+    entry = {"roi": (1, 2, 3, 4), "sample_crop_raw": None, "status": "detected"}
+    window.pending = [entry]
+    window.pending_list.addItem("ROI")
+    window.pending_list.setCurrentRow(0)
+    window.crop_coords = QComboBox()
+    window.crop_coords.addItems(["Raw coordinates", "Binned coordinates"])
+    window.crop_inputs = [QSpinBox() for _ in range(4)]
+    window.crop_label = QLabel()
+    window.apply_crop_btn = QPushButton()
+    window.clear_crop_btn = QPushButton()
+    window.crop_sample_cb = SimpleNamespace(
+        setChecked=lambda checked: None, isChecked=lambda: True)
+    window.heatmap = SimpleNamespace(vb=object(), drag_enabled=False)
+    window.sample_crop_rect = None
+    window.preview_feature = None
+    monkeypatch.setattr(window, "_active_grid_shape", lambda: (20, 30))
+    monkeypatch.setattr(window, "_draw_sample_crop", lambda: None)
+    monkeypatch.setattr(window, "_render_feature", lambda: None)
+
+    for field, value in zip(window.crop_inputs, (3, 6, 12, 15)):
+        field.setValue(value)
+    window._apply_manual_crop()
+    assert entry["sample_crop_raw"] == (3, 6, 12, 15)
+    assert window._active_sample_crop(entry) == (1, 2, 4, 5)
+
+    window.crop_coords.setCurrentIndex(1)
+    for field, value in zip(window.crop_inputs, (2, 3, 7, 9)):
+        field.setValue(value)
+    window._apply_manual_crop()
+    assert entry["sample_crop_raw"] == (6, 9, 21, 27)
+    assert window._active_sample_crop(entry) == (2, 3, 7, 9)
+
+
+def test_roi_ready_feature_recrops_without_clearing_scan(monkeypatch):
+    _app()
+    window = _roi_window()
+    entry = {
+        "roi": (1, 2, 3, 4), "sample_crop_raw": (3, 6, 12, 15),
+        "status": "ready", "feature": {"intensity_profile": {"0_0": {}}},
+    }
+    window.pending = [entry]
+    window.pending_list.addItem("ROI")
+    window.pending_list.setCurrentRow(0)
+    window.crop_coords = QComboBox()
+    window.crop_coords.addItems(["Raw coordinates", "Binned coordinates"])
+    window.crop_inputs = [QSpinBox() for _ in range(4)]
+    window.crop_label = QLabel()
+    window.apply_crop_btn = QPushButton()
+    window.clear_crop_btn = QPushButton()
+    window.crop_sample_cb = SimpleNamespace(isChecked=lambda: True)
+    window.heatmap = SimpleNamespace(drag_enabled=True)
+    window.status = QLabel()
+    monkeypatch.setattr(
+        window, "_active_sample_crop",
+        lambda selected=None: (1, 2, 4, 5)
+        if (selected or entry).get("sample_crop_raw") is not None else None)
+    monkeypatch.setattr(window, "_draw_sample_crop", lambda: None)
+    monkeypatch.setattr(window, "_render_feature", lambda: None)
+
+    window._update_crop_controls()
+    assert window.heatmap.drag_enabled
+    assert window.apply_crop_btn.isEnabled()
+    assert window.clear_crop_btn.isEnabled()
+    assert "locked" not in window.crop_label.text()
+
+    feature = entry["feature"]
+    window._clear_sample_crop()
+    assert entry["sample_crop_raw"] is None
+    assert entry["feature"] is feature
+    assert entry["status"] == "ready"
 
 
 def test_roi_heatmap_click_selects_requested_bin(monkeypatch):

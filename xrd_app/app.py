@@ -72,7 +72,7 @@ def _discover_tabs(only=None):
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, project_root=None, scan=None, bin_size=3, tabs=None, fresh=False):
+    def __init__(self, project_root=None, scan=None, bin_size=None, tabs=None, fresh=False):
         super().__init__()
         self._only_tabs = tabs
         self._init_scan = scan
@@ -644,7 +644,7 @@ def _harden_env_for_remote_x():
         os.environ.setdefault("QT_XCB_GL_INTEGRATION", "none")
 
 
-def launch_app(project_root=None, scan=None, bin_size=3, fresh=False):
+def launch_app(project_root=None, scan=None, bin_size=None, fresh=False):
     """Create the QApplication and run the single-window app."""
     import signal
     import sys

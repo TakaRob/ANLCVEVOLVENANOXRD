@@ -317,12 +317,13 @@ def _hex_rgb(hex_color):
 class QRangeSlider(QWidget):
     rangeChanged = pyqtSignal(int, int)
 
-    def __init__(self, lo=-180, hi=180, parent=None):
+    def __init__(self, lo=-180, hi=180, parent=None, log_scale=False):
         super().__init__(parent)
         self._min = lo
         self._max = hi
         self._lo = lo
         self._hi = hi
+        self._log_scale = log_scale
         self._dragging = None
         self.setFixedHeight(28)
         self.setMinimumWidth(100)
@@ -351,13 +352,20 @@ class QRangeSlider(QWidget):
     def _val_to_x(self, v):
         margin = 8
         w = self.width() - 2 * margin
-        frac = (v - self._min) / max(self._max - self._min, 1)
+        if self._log_scale and self._min > 0:
+            lo, hi = np.log10(self._min), np.log10(self._max)
+            frac = (np.log10(v) - lo) / max(hi - lo, 1e-12)
+        else:
+            frac = (v - self._min) / max(self._max - self._min, 1)
         return int(margin + frac * w)
 
     def _x_to_val(self, x):
         margin = 8
         w = self.width() - 2 * margin
-        frac = (x - margin) / max(w, 1)
+        frac = max(0.0, min(1.0, (x - margin) / max(w, 1)))
+        if self._log_scale and self._min > 0:
+            lo, hi = np.log10(self._min), np.log10(self._max)
+            return int(round(10 ** (lo + frac * (hi - lo))))
         return int(round(self._min + frac * (self._max - self._min)))
 
     def paintEvent(self, event):
@@ -448,6 +456,17 @@ class _ChiAxisItem(pg.AxisItem):
                 labels.append(str(int(round(wrapped))))
             else:
                 labels.append(f"{wrapped:g}")
+        return labels
+
+
+class _LogSizeAxisItem(pg.AxisItem):
+    """Feature-size histogram axis: plot log10 coordinates, label bin counts."""
+
+    def tickStrings(self, values, scale, spacing):
+        labels = []
+        for value in values:
+            size = 10 ** (value * scale)
+            labels.append(f"{size:.0f}" if size >= 1 else "")
         return labels
 
 
@@ -678,15 +697,18 @@ class DeviceMapWindow(QMainWindow):
 
         sg = QGroupBox("Feature size range")
         sgl = QVBoxLayout(sg)
-        self.size_hist = pg.PlotWidget()
+        self.size_hist = pg.PlotWidget(
+            plotItem=pg.PlotItem(axisItems={"bottom": _LogSizeAxisItem("bottom")}))
         self.size_hist.setBackground("w")
         self.size_hist.setFixedHeight(150)
-        self.size_hist.setLabel("bottom", "Feature size (# bins)")
-        self.size_hist.setLabel("left", "Count (log)")
+        self.size_hist.setLabel("bottom", "Feature area (# bins, log scale)")
+        self.size_hist.setLabel("left", "Features")
         self.size_hist.setMouseEnabled(False, False)
-        self.size_hist.setLogMode(y=True)
         sgl.addWidget(self.size_hist)
-        self.size_range_slider = QRangeSlider(self._size_data_min, self._size_data_max)
+        self.size_range_slider = QRangeSlider(
+            self._size_data_min, self._size_data_max, log_scale=True)
+        self.size_range_slider.setToolTip(
+            "Logarithmic feature-area range, matching the histogram above")
         self.size_range_slider.rangeChanged.connect(self._on_size_slider)
         self.size_range_slider.setEnabled(self._size_data_max > self._size_data_min)
         sgl.addWidget(self.size_range_slider)
@@ -1352,15 +1374,19 @@ class DeviceMapWindow(QMainWindow):
         inside = [s for s in sizes if self._size_lo <= s <= self._size_hi]
         h_in, _ = np.histogram(inside, bins=edges) if inside \
             else (np.zeros(len(centers)), None)
+        log_edges = np.log10(np.arange(0.5, max_size + 1.5))
+        log_centers = (log_edges[:-1] + log_edges[1:]) / 2
+        widths = 0.9 * np.diff(log_edges)
         self.size_hist.addItem(pg.BarGraphItem(
-            x=centers, height=h_all, width=0.9,
+            x=log_centers, height=h_all, width=widths,
             brush=(204, 204, 204, 130), pen=None))
         self.size_hist.addItem(pg.BarGraphItem(
-            x=centers, height=h_in, width=0.9,
+            x=log_centers, height=h_in, width=widths,
             brush=(67, 99, 216, 220), pen=None))
         for v in (self._size_lo, self._size_hi):
             self.size_hist.addItem(pg.InfiniteLine(
-                pos=v, angle=90, pen=pg.mkPen("r", width=1.2, style=Qt.DashLine)))
+                pos=np.log10(v), angle=90,
+                pen=pg.mkPen("r", width=1.2, style=Qt.DashLine)))
         pct = 100 * len(inside) / len(sizes)
         self.size_hist.setTitle(f"{len(inside)}/{len(sizes)} features ({pct:.0f}%) selected")
 
@@ -1455,6 +1481,7 @@ class DeviceMapWindow(QMainWindow):
         idx = self.chi_ref_combo.currentIndex()
         self._chi_hist_ref = None if idx == 0 else REFLECTIONS[idx - 1]
         self._draw_chi_histogram()
+        self.chi_hist.autoRange()
 
     def _on_chi_weight_changed(self):
         self._chi_weight = self.chi_weight_combo.currentData()

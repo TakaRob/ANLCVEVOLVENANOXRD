@@ -4,7 +4,8 @@ import numpy as np
 import pytest
 from click.testing import CliRunner
 
-from xrd_app.cli import _same_grid_lattice, bin, grid, main, make_bins, peaks, roi_shapes
+from xrd_app.cli import (_same_grid_lattice, bin, grid, main, make_bins, peaks,
+                         roi_shapes, run_pipeline)
 
 
 @pytest.mark.parametrize("command", sorted(main.commands))
@@ -30,9 +31,14 @@ def test_help_lists_workflow_and_defaults():
     peak_params = {param.name: param for param in peaks.params}
     assert peak_params["workers"].default is None
     assert "--workers" in runner.invoke(main, ["peaks", "--help"]).output
+    pipeline_params = {param.name: param for param in run_pipeline.params}
+    assert pipeline_params["workers"].default is None
+    assert "--workers" in runner.invoke(main, ["run-pipeline", "--help"]).output
     roi_params = {param.name: param for param in roi_shapes.params}
     assert roi_params["normalize_frames"].default is False
-    assert "--normalize-frames" in runner.invoke(main, ["roi-shapes", "--help"]).output
+    roi_help = runner.invoke(main, ["roi-shapes", "--help"]).output
+    assert "--normalize-frames" in roi_help
+    assert "--sample-crop" in roi_help
     for command in (bin, make_bins):
         params = {param.name: param for param in command.params}
         assert params["normalize_frames"].default is False

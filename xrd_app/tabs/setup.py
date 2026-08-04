@@ -25,8 +25,9 @@ TAB_META = {
     "takes_bin_size": False,
     "scan_dependent": False,
     "general": (
-        "Choose a workspace (the XRD-APP Directory holding all projects), create "
-        "or open a named project inside it, load scan data (a single .hdf5 → its "
+        "Choose a workspace (the XRD-APP Directory holding all projects), use "
+        "the directory where the GUI was launched, create or open a project, "
+        "load scan data (a single .hdf5 → its "
         "scan dir, or a Scans/ parent → all scans), and set calibration "
         "(tth.tiff now; a .poni→tth conversion button is reserved). Each project "
         "keeps its own Raw/Binned/Metadata/Labels; the active scan drives every "
@@ -119,6 +120,14 @@ class SetupTab(QWidget):
         self.ws_label = QLabel()
         self.ws_label.setStyleSheet("font-family: monospace;")
         ws_row.addWidget(self.ws_label, 1)
+        b_cwd = QPushButton("Use launch directory")
+        b_cwd.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.MinimumExpanding)
+        b_cwd.setMinimumHeight(40)
+        b_cwd.setToolTip(
+            f"Set the workspace to where xrd-app was launched:\n"
+            f"{workspace.get_launch_directory()}")
+        b_cwd.clicked.connect(self._use_launch_directory)
+        ws_row.addWidget(b_cwd)
         b_ws = QPushButton("Change…")
         b_ws.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.MinimumExpanding)
         b_ws.setMinimumHeight(40)
@@ -256,18 +265,32 @@ class SetupTab(QWidget):
         self._refresh_summary()
 
     def _refresh_projects(self):
-        """Populate the workspace label and the project picker."""
+        """Populate projects from the launch, current, and recent workspaces."""
         ws = workspace.get_workspace()
         self.ws_label.setText(str(ws) if ws else "(not set — click Change…)")
-        names = workspace.list_projects(ws)
+        roots = workspace.discover_projects()
+        labels = []
+        duplicate_names = {root.name for root in roots
+                           if sum(other.name == root.name for other in roots) > 1}
+        for root in roots:
+            label = root.name
+            if root.name in duplicate_names or root.parent != ws:
+                label = f"{root.name}  —  {root.parent}"
+            labels.append(label)
+
         self.proj_combo.blockSignals(True)
         self.proj_combo.clear()
-        self.proj_combo.addItems(names or ["(no projects yet)"])
-        # Select the currently open project, if it lives in the workspace.
+        if roots:
+            for label, root in zip(labels, roots):
+                self.proj_combo.addItem(label, str(root))
+        else:
+            self.proj_combo.addItem("(no projects found)", None)
         if self.project_root:
-            cur = Path(self.project_root).name
-            if cur in names:
-                self.proj_combo.setCurrentText(cur)
+            current = str(Path(self.project_root).resolve())
+            for index in range(self.proj_combo.count()):
+                if self.proj_combo.itemData(index) == current:
+                    self.proj_combo.setCurrentIndex(index)
+                    break
         self.proj_combo.blockSignals(False)
 
     def _refresh_summary(self):
@@ -323,8 +346,12 @@ class SetupTab(QWidget):
             else "none (use Programs → Create bins)"
 
     # ----- project actions --------------------------------------------
+    def _use_launch_directory(self):
+        workspace.set_workspace(workspace.get_launch_directory())
+        self._refresh_projects()
+
     def _choose_workspace(self):
-        start = str(workspace.get_workspace() or Path.home())
+        start = str(workspace.get_workspace() or workspace.get_launch_directory())
         path = _pick_directory(
             self, "Choose the XRD-APP Directory (workspace for all projects)", start)
         if path:
@@ -356,11 +383,9 @@ class SetupTab(QWidget):
         self._switch_to(root)
 
     def _open_selected(self):
-        name = self.proj_combo.currentText()
-        ws = workspace.get_workspace()
-        if not ws or name.startswith("("):
-            return
-        self._switch_to(workspace.project_root(name, ws))
+        root = self.proj_combo.currentData()
+        if root:
+            self._switch_to(Path(root))
 
     def _browse_project(self):
         start = str(workspace.get_workspace() or Path.home())

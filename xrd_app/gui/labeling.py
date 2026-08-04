@@ -22,6 +22,7 @@ Usage:
 
 import sys
 import os
+import re
 import json
 import csv
 import time
@@ -788,6 +789,9 @@ class LabelingTool(QMainWindow):
         self._available_algorithms = discover_algorithms(self.project_root, self.dm)
 
         self._build_ui()
+        if hasattr(self, "_startup_source_note"):
+            self.status_label.setText(self._startup_source_note)
+            self.bin_size_status.setText("built fallback")
 
         self.canvas.set_hover_callback(self._on_hover)
         self.canvas.set_annotation_change_callback(self._on_annotations_changed)
@@ -831,7 +835,47 @@ class LabelingTool(QMainWindow):
             "order": order, "boundaries": boundaries,
         }
 
-        self._load_bin_data_for_size(self.bin_size)
+        self._load_initial_bin_data()
+
+    def _load_initial_bin_data(self):
+        requested_size = self.bin_size
+        try:
+            self._load_bin_data_for_size(requested_size)
+        except (RuntimeError, FileNotFoundError, OSError) as error:
+            fallback = self._available_binned_size(exclude=requested_size)
+            if fallback is None:
+                raise
+            self._load_bin_data_for_size(fallback)
+            self._startup_source_note = (
+                f"{requested_size}x{requested_size} data unavailable ({error}); "
+                f"opened built {fallback}x{fallback} bins instead.")
+
+    def _available_binned_size(self, exclude=None):
+        """Return the nearest readable built bin size without consulting raw data."""
+        candidates = []
+        try:
+            binned_dir = self.dm.binned_dir()
+            paths = binned_dir.glob("xrd_*x*_bins.h5") if binned_dir.is_dir() else []
+            for path in paths:
+                match = re.fullmatch(r"xrd_(\d+)x\1_bins\.h5", path.name)
+                if not match:
+                    continue
+                size = int(match.group(1))
+                if size == exclude:
+                    continue
+                try:
+                    with h5py.File(path, "r") as handle:
+                        if any(isinstance(value, h5py.Dataset) and value.ndim == 2
+                               for value in handle.values()):
+                            candidates.append(size)
+                except OSError:
+                    continue
+        except OSError:
+            return None
+        if not candidates:
+            return None
+        target = int(exclude or self.bin_size)
+        return min(candidates, key=lambda size: (abs(size - target), size))
 
     def _ensure_raw_grid(self):
         """Lazily load raw scan grid data (shared across all fallback modes)."""

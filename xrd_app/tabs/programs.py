@@ -12,6 +12,7 @@ from PyQt5.QtWidgets import (
 )
 
 from ..config import DataManager, format_detector_label
+from ..core.processing import default_worker_count
 from ._console import ConsolePanel
 
 TAB_META = {
@@ -94,6 +95,15 @@ class ProgramsTab(QWidget):
         self.bins_status.setStyleSheet("color:#888; font-size:0.9em; padding-left:8px;")
         top.addWidget(self.bins_status)
         top.addStretch()
+        top.addWidget(QLabel("<b>Peak workers:</b>"))
+        self.peak_workers_spin = QSpinBox()
+        self.peak_workers_spin.setRange(1, 64)
+        self.peak_workers_spin.setValue(default_worker_count())
+        self.peak_workers_spin.setToolTip(
+            "Worker processes for Peak Finding, including chained Peak → Shape "
+            "runs. More workers use more memory and may contend for HDF5 I/O. "
+            "Binning remains single-process.")
+        top.addWidget(self.peak_workers_spin)
         lay.addLayout(top)
 
         # ---- Data prep: build bins --------------------------------------
@@ -164,8 +174,12 @@ class ProgramsTab(QWidget):
         # ---- Combined (peak + shape in one pass) ------------------------
         # Hidden: the peak → shape → territory chain is the supported path. The
         # box is still built (kept off the layout) so _run_combined/combined_algo
-        # keep working if re-enabled later.
-        comb_box = QGroupBox("Combined  (peak + shape in one per-frame pass · 1×1)")
+        # keep working if re-enabled later. It must be stored on self: with no
+        # parent and no layout, a local-only ref would be garbage-collected when
+        # __init__ returns, deleting the C++ QGroupBox and its child
+        # combined_algo list — which then crashes the next _refresh_algos().
+        comb_box = self._comb_box = QGroupBox(
+            "Combined  (peak + shape in one per-frame pass · 1×1)")
         cb = QHBoxLayout(comb_box)
         self.combined_algo = self._make_algo_list(
             "Combined per-frame algorithms. Ctrl/Shift-click to run several.")
@@ -439,7 +453,8 @@ class ProgramsTab(QWidget):
                     continue
                 jobs.append(["peaks", "--root", self.project_root,
                              "--scan", str(name), "--bin-size", str(bs),
-                             "--algorithm", algo])
+                             "--algorithm", algo, "--workers",
+                             str(self.peak_workers_spin.value())])
         notes = []
         if skipped:
             notes.append(
@@ -538,7 +553,8 @@ class ProgramsTab(QWidget):
                         continue
                     for sa in shape_algos:
                         args = ["run-pipeline", "--root", self.project_root,
-                                "--scan", str(name), "--bin-size", str(bs)]
+                                "--scan", str(name), "--bin-size", str(bs),
+                                "--workers", str(self.peak_workers_spin.value())]
                         if peak_algo:
                             args += ["--algorithm", peak_algo]
                         if sa:
