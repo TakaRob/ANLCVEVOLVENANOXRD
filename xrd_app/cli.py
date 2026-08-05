@@ -1988,6 +1988,64 @@ def predict(tracks_path, scans, bin_size, match_tol, rocking_path, repeat_pair, 
 
 
 # ─────────────────────────────────────────────────────────────────────
+# linked-xrd-track — bin XRF-cropped raw links and track detector peaks
+# ─────────────────────────────────────────────────────────────────────
+@main.command(name='linked-xrd-track')
+@click.option('--links', 'link_path', required=True, type=click.Path(path_type=Path),
+              help='XRF-to-XRD linker HDF5 from the prefilter notebook')
+@click.option('--material', required=True, help='Material selection in the linker (for example Br)')
+@click.option('--bin-width', type=click.FloatRange(min=0, min_open=True), required=True,
+              help='Physical sample-space width of each square bin')
+@click.option('--sample-roi', nargs=4, type=float, default=None,
+              metavar='X_MIN X_MAX Y_MIN Y_MAX', help='Restrict raw reads to a sample-space ROI')
+@click.option('--peak', 'peaks', nargs=2, type=int, multiple=True, metavar='X Y',
+              help='Detector peak seed in pixels; repeat for multiple peaks (default: auto-detect)')
+@click.option('--detector-sum-sample', type=click.IntRange(min=1), default=100,
+              help='Evenly spaced linked frames used to select detector peaks')
+@click.option('--auto-sensitivity', type=float, default=6.0,
+              help='MAD multiplier for automatic detector peak selection')
+@click.option('--auto-min-distance', type=click.IntRange(min=1), default=12,
+              help='Minimum detector-pixel separation between automatic peaks')
+@click.option('--max-auto-peaks', type=click.IntRange(min=1), default=12)
+@click.option('--track-radius', type=click.IntRange(min=1), default=12,
+              help='Detector-pixel search radius around each peak seed')
+@click.option('--com-radius', type=click.IntRange(min=1), default=4,
+              help='Detector-pixel radius integrated around each local maximum')
+@click.option('--max-frames', type=click.IntRange(min=1), default=5000,
+              help='Safety limit for raw frames read by this command')
+@click.option('--output', required=True, type=click.Path(path_type=Path),
+              help='Output tracking HDF5')
+def linked_xrd_track(link_path, material, bin_width, sample_roi, peaks,
+                     detector_sum_sample, auto_sensitivity, auto_min_distance,
+                     max_auto_peaks, track_radius, com_radius, max_frames, output):
+    """Track detector-peak intensity and COM through XRF-cropped sample bins.
+
+    The linker determines which raw XRD frames survive an XRF crop. This command
+    groups those links by measured sample X/Y, sums each spatial bin, and follows
+    fixed detector peaks using local-maximum and center-of-mass measurements.
+    """
+    from .core import linked_xrd
+
+    try:
+        result = linked_xrd.track(
+            link_path, material=material, bin_width=bin_width,
+            sample_roi=sample_roi, peak_centers=peaks,
+            detector_sum_sample=detector_sum_sample,
+            auto_sensitivity=auto_sensitivity,
+            auto_min_distance=auto_min_distance,
+            max_auto_peaks=max_auto_peaks, track_radius=track_radius,
+            com_radius=com_radius, max_frames=max_frames, log=click.echo,
+        )
+        out = linked_xrd.save_result(output, result)
+    except (FileNotFoundError, KeyError, OSError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(
+        f"Wrote {len(result['tracking']):,} measurements for "
+        f"{len(result['peak_centers'])} peaks to {out}"
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────
 # combined-device — fuse per-θ device maps into one spatial canvas
 # ─────────────────────────────────────────────────────────────────────
 @main.command(name='combined-device')

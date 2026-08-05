@@ -11,8 +11,8 @@
 # - one numbered ME7 file corresponds to the same-numbered XRD file
 # - points within each file correspond by local frame index
 #
-# Only narrow XRF slices are read when building the table. XRD detector images
-# are not read or copied; each selected point stores an XRD file/frame link.
+# Only XRF spectra are read here. Threshold decisions are saved as Boolean masks
+# aligned to global frame indices; the larger XRD detector images remain untouched.
 
 # %% Configuration
 from pathlib import Path
@@ -39,16 +39,19 @@ ENERGY_CALIBRATION = {
 SPECTRUM_FILE_STRIDE = 1
 SPECTRUM_POINT_STRIDE = 1
 OUTPUT_DIR = DATA_ROOT / "processed" / "xrf_prefilter"
+REGISTRATION_CACHE = OUTPUT_DIR / f"Scan_{SCAN:04d}_xrf_xrd_registration.npz"
 SPECTRUM_CACHE = OUTPUT_DIR / f"Scan_{SCAN:04d}_me7_spectrum.npz"
 INTENSITY_CACHE = OUTPUT_DIR / f"Scan_{SCAN:04d}_xrf_roi_intensities.npz"
 ROI_CONFIG_FILE = OUTPUT_DIR / f"Scan_{SCAN:04d}_xrf_rois.json"
 PEAK_TABLE_CSV = OUTPUT_DIR / f"Scan_{SCAN:04d}_me7_detected_peaks.csv"
 CUT_SUMMARY_CSV = OUTPUT_DIR / f"Scan_{SCAN:04d}_xrf_cut_summary.csv"
-OUTPUT_CSV = OUTPUT_DIR / f"Scan_{SCAN:04d}_xrf_xrd_links.csv"
+XRF_MASK_CACHE = OUTPUT_DIR / f"Scan_{SCAN:04d}_xrf_threshold_masks.npz"
+LINK_TABLE_H5 = OUTPUT_DIR / f"Scan_{SCAN:04d}_xrf_xrd_links.h5"
 
 # %% Imports
 import json
 import re
+import time
 
 import h5py
 import matplotlib.pyplot as plt
@@ -139,58 +142,96 @@ print(f"Matched ME7/XRD:     {len(common_numbers)} files")
 print(f"ME7-only numbers:    {sorted(me7_files.keys() - xrd_files.keys())}")
 print(f"XRD-only numbers:    {sorted(xrd_files.keys() - me7_files.keys())}")
 
-# %% Build the exact sequential ME7/XRD/position registration
-with h5py.File(position_file, "r") as handle:
-    position_group = handle["entry/data"]
-    x_position = np.asarray(position_group["X_Position"][:], dtype=float)
-    y_position_raw = np.asarray(position_group["Y_Position"][:], dtype=float)
+# %% Build or reload the exact sequential ME7/XRD/position registration
+# The raw scan-master and position reads are small. Opening every ME7/XRD file to
+# inspect its frame count is slow over /mnt/z, so persist that result after run one.
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+registration_signature = json.dumps({
+    "scan": SCAN,
+    "me7_files": [me7_files[number].name for number in common_numbers],
+    "xrd_files": [xrd_files[number].name for number in common_numbers],
+}, sort_keys=True)
 
-with h5py.File(SCAN_MASTER_FILE, "r") as handle:
-    theta_values = np.asarray(
-        handle["entry/instrument/bluesky/streams/baseline/sample_theta/value"][:],
-        dtype=float,
-    )
-scan_theta_deg = float(np.nanmean(theta_values))
+registration = None
+if REGISTRATION_CACHE.exists():
+    with np.load(REGISTRATION_CACHE, allow_pickle=False) as cached:
+        if str(cached["signature"]) == registration_signature:
+            registration = {key: cached[key] for key in cached.files if key != "signature"}
+            print(f"Loaded cached registration: {REGISTRATION_CACHE}")
 
-with POSITION_OFFSET_FILE.open() as stream:
-    position_offset = json.load(stream)
-offset_theta = np.asarray(position_offset["theta"], dtype=float)
-offset_y = np.asarray(position_offset["y_offset"], dtype=float)
-if offset_theta.shape != offset_y.shape or offset_theta.size == 0:
-    raise ValueError("position_offset.json theta and y_offset must be non-empty equal arrays")
-order = np.argsort(offset_theta)
-offset_theta = offset_theta[order]
-offset_y = offset_y[order]
-nearest = int(np.argmin(np.abs(offset_theta - scan_theta_deg)))
-if abs(offset_theta[nearest] - scan_theta_deg) <= 0.01:
-    y_offset = float(offset_y[nearest])
-else:
-    y_offset = float(np.interp(scan_theta_deg, offset_theta, offset_y))
+if registration is None:
+    with h5py.File(position_file, "r") as handle:
+        position_group = handle["entry/data"]
+        x_position = np.asarray(position_group["X_Position"][:], dtype=float)
+        y_position_raw = np.asarray(position_group["Y_Position"][:], dtype=float)
+
+    with h5py.File(SCAN_MASTER_FILE, "r") as handle:
+        theta_values = np.asarray(
+            handle["entry/instrument/bluesky/streams/baseline/sample_theta/value"][:],
+            dtype=float,
+        )
+    scan_theta_deg = float(np.nanmean(theta_values))
+
+    with POSITION_OFFSET_FILE.open() as stream:
+        position_offset = json.load(stream)
+    offset_theta = np.asarray(position_offset["theta"], dtype=float)
+    offset_y = np.asarray(position_offset["y_offset"], dtype=float)
+    if offset_theta.shape != offset_y.shape or offset_theta.size == 0:
+        raise ValueError("position_offset theta and y_offset must be non-empty equal arrays")
+    order = np.argsort(offset_theta)
+    offset_theta = offset_theta[order]
+    offset_y = offset_y[order]
+    nearest = int(np.argmin(np.abs(offset_theta - scan_theta_deg)))
+    if abs(offset_theta[nearest] - scan_theta_deg) <= 0.01:
+        y_offset = float(offset_y[nearest])
+    else:
+        y_offset = float(np.interp(scan_theta_deg, offset_theta, offset_y))
+
+    me7_counts = []
+    xrd_counts = []
+    for file_number in common_numbers:
+        with h5py.File(me7_files[file_number], "r") as handle:
+            me7_counts.append(int(handle[H5_DATASET].shape[0]))
+        with h5py.File(xrd_files[file_number], "r") as handle:
+            xrd_data = handle[H5_DATASET]
+            xrd_counts.append(int(xrd_data.shape[0]) if xrd_data.ndim == 3 else 1)
+
+    registration = {
+        "x_position": x_position,
+        "y_position_raw": y_position_raw,
+        "scan_theta_deg": np.asarray(scan_theta_deg),
+        "y_offset": np.asarray(y_offset),
+        "file_numbers": np.asarray(common_numbers),
+        "me7_counts": np.asarray(me7_counts),
+        "xrd_counts": np.asarray(xrd_counts),
+    }
+    np.savez_compressed(REGISTRATION_CACHE, signature=registration_signature, **registration)
+    print(f"Saved registration cache: {REGISTRATION_CACHE}")
+
+x_position = registration["x_position"].astype(float)
+y_position_raw = registration["y_position_raw"].astype(float)
+scan_theta_deg = float(registration["scan_theta_deg"])
+y_offset = float(registration["y_offset"])
 y_position = y_position_raw + y_offset
-print(f"Sample theta:        {scan_theta_deg:.6f} deg")
-print(f"Applied Y offset:    {y_offset:.3f} (corrected Y = raw Y + offset)")
 
 records = []
 global_start = 0
-for file_number in common_numbers:
-    me7_file = me7_files[file_number]
-    xrd_file = xrd_files[file_number]
-    with h5py.File(me7_file, "r") as handle:
-        me7_count = int(handle[H5_DATASET].shape[0])
-    with h5py.File(xrd_file, "r") as handle:
-        xrd_data = handle[H5_DATASET]
-        xrd_count = int(xrd_data.shape[0]) if xrd_data.ndim == 3 else 1
-    mapped_count = min(me7_count, xrd_count)
+for index, file_number in enumerate(registration["file_numbers"].astype(int)):
+    me7_count = int(registration["me7_counts"][index])
+    xrd_count = int(registration["xrd_counts"][index])
     records.append({
         "file_number": file_number,
-        "me7_file": me7_file,
-        "xrd_file": xrd_file,
+        "me7_file": me7_files[file_number],
+        "xrd_file": xrd_files[file_number],
         "me7_count": me7_count,
         "xrd_count": xrd_count,
-        "mapped_count": mapped_count,
+        "mapped_count": min(me7_count, xrd_count),
         "global_start": global_start,
     })
     global_start += xrd_count
+
+print(f"Sample theta:        {scan_theta_deg:.6f} deg")
+print(f"Applied Y offset:    {y_offset:.3f} (corrected Y = raw Y + offset)")
 
 total_xrd_frames = sum(record["xrd_count"] for record in records)
 total_mapped_frames = sum(record["mapped_count"] for record in records)
@@ -347,7 +388,8 @@ XRF_ROIS = {
     # },
     # "My pixel ROI": {"pixel_range": (800, 830), "minimum_counts": None},
 }
-FOCUS_PEAK = "Br"
+# Use "all", one name such as "Br", or multiple names such as ["Br", "Pb"].
+FOCUS_PEAK = "all"
 
 # Set True to reuse the last saved names, ranges, and minimum thresholds instead.
 LOAD_SAVED_ROI_CONFIG = False
@@ -370,8 +412,18 @@ for name, roi in XRF_ROIS.items():
     roi["pixel_range"] = (lo, hi)
     roi["energy_range_kev"] = (float(pixel_to_kev(lo)), float(pixel_to_kev(hi)))
     roi.setdefault("minimum_counts", None)
-if FOCUS_PEAK not in XRF_ROIS:
-    raise KeyError(f"FOCUS_PEAK {FOCUS_PEAK!r} is not present in XRF_ROIS")
+
+if FOCUS_PEAK == "all":
+    focus_peaks = list(XRF_ROIS)
+elif isinstance(FOCUS_PEAK, str):
+    focus_peaks = [FOCUS_PEAK]
+else:
+    focus_peaks = list(FOCUS_PEAK)
+unknown_focus_peaks = [name for name in focus_peaks if name not in XRF_ROIS]
+if unknown_focus_peaks:
+    raise KeyError(f"Unknown FOCUS_PEAK entries: {unknown_focus_peaks}")
+if not focus_peaks:
+    raise ValueError("FOCUS_PEAK must select at least one ROI")
 
 display(pd.DataFrame([
     {
@@ -399,45 +451,50 @@ ax.legend()
 ax.grid(alpha=0.2)
 plt.show()
 
-# %% 5. Enlarge the selected focus region
-focus_roi = XRF_ROIS[FOCUS_PEAK]
-focus_lo, focus_hi = focus_roi["pixel_range"]
-padding = max(10, focus_hi - focus_lo)
-region_lo = max(0, focus_lo - padding)
-region_hi = min(overview.size, focus_hi + padding)
-fig, ax = plt.subplots(figsize=(11, 4))
-ax.plot(
-    energy_axis_kev[region_lo:region_hi], overview[region_lo:region_hi],
-    color="black", linewidth=1,
+# %% 5. Enlarge the selected focus regions
+fig, axes = plt.subplots(
+    len(focus_peaks), 1, figsize=(11, 4 * len(focus_peaks)),
+    constrained_layout=True, squeeze=False,
 )
-ax.axvspan(*focus_roi["energy_range_kev"], color="tab:orange", alpha=0.25)
-ax.set(
-    title=f"{FOCUS_PEAK}: selected spectral region",
-    xlabel="calibrated energy (keV)", ylabel="summed counts", yscale="log",
-)
-ax.grid(alpha=0.2)
+for ax, name in zip(axes[:, 0], focus_peaks):
+    focus_roi = XRF_ROIS[name]
+    focus_lo, focus_hi = focus_roi["pixel_range"]
+    padding = max(10, focus_hi - focus_lo)
+    region_lo = max(0, focus_lo - padding)
+    region_hi = min(overview.size, focus_hi + padding)
+    ax.plot(
+        energy_axis_kev[region_lo:region_hi], overview[region_lo:region_hi],
+        color="black", linewidth=1,
+    )
+    ax.axvspan(*focus_roi["energy_range_kev"], color="tab:orange", alpha=0.25)
+    ax.set(
+        title=f"{name}: selected spectral region",
+        xlabel="calibrated energy (keV)", ylabel="summed counts", yscale="log",
+    )
+    ax.grid(alpha=0.2)
 plt.show()
 
 # %% 6. Integrate each named range at every scan position (cached)
 def read_roi_intensities(record):
-    """Read only the selected MCA slices for one ME7 scan line."""
+    """Read one ME7 file once, then integrate every selected ROI in memory."""
     count = record["mapped_count"]
-    values = {material: np.zeros(count, dtype=np.float64) for material in XRF_ROIS}
     with h5py.File(record["me7_file"], "r") as handle:
-        data = handle[H5_DATASET]
-        for channel in CHANNELS:
-            factors = None
-            if DEADTIME_CORRECTION:
+        # Files are gzip-chunked as one full 7x4096 spectrum per point. A narrow
+        # HDF5 slice still decompresses that full chunk, so one bulk read avoids
+        # repeating decompression for every channel and selected range.
+        spectra = handle[H5_DATASET][:count, CHANNELS, :].astype(np.float64)
+        if DEADTIME_CORRECTION:
+            for channel_index, channel in enumerate(CHANNELS):
                 factor_path = DT_FACTOR.format(channel1=channel + 1)
                 if factor_path in handle:
                     factors = np.asarray(handle[factor_path][:count], dtype=float)
-            for material, roi in XRF_ROIS.items():
-                lo, hi = roi["pixel_range"]
-                roi_counts = data[:count, channel, lo:hi].sum(axis=1, dtype=np.float64)
-                if factors is not None:
-                    roi_counts *= factors
-                values[material] += roi_counts
-    return values
+                    spectra[:, channel_index, :] *= factors[:, None]
+
+    return {
+        material: spectra[:, :, lo:hi].sum(axis=(1, 2), dtype=np.float64)
+        for material, roi in XRF_ROIS.items()
+        for lo, hi in [roi["pixel_range"]]
+    }
 
 
 intensity_signature = json.dumps({
@@ -467,10 +524,16 @@ if INTENSITY_CACHE.exists():
             print(f"Loaded cached ROI intensities: {INTENSITY_CACHE}")
 
 if intensity_chunks is None:
+    started = time.perf_counter()
     intensity_chunks = {material: [] for material in XRF_ROIS}
-    for record in records:
+    for record_index, record in enumerate(records, start=1):
         for material, values in read_roi_intensities(record).items():
             intensity_chunks[material].append(values)
+        if record_index == 1 or record_index % 10 == 0 or record_index == len(records):
+            print(
+                f"Integrated ME7 file {record_index}/{len(records)} "
+                f"({time.perf_counter() - started:.1f} s)"
+            )
     materials = list(XRF_ROIS)
     record_offsets = np.concatenate((
         [0], np.cumsum([record["mapped_count"] for record in records])
@@ -484,142 +547,171 @@ if intensity_chunks is None:
         record_offsets=record_offsets,
         signature=intensity_signature,
     )
-    print(f"Saved ROI intensity cache: {INTENSITY_CACHE}")
+    print(
+        f"Saved ROI intensity cache in {time.perf_counter() - started:.1f} s: "
+        f"{INTENSITY_CACHE}"
+    )
 
-# %% 7. Inspect the focus peak's count distribution and 1D spatial heatmap
-focus_values = np.concatenate(intensity_chunks[FOCUS_PEAK])
-fig, axes = plt.subplots(
-    2, 1, figsize=(13, 6), constrained_layout=True,
-    gridspec_kw={"height_ratios": [3, 1]},
-)
-axes[0].hist(focus_values, bins=150, log=True, color="tab:blue", alpha=0.85)
-axes[0].set(
-    title=f"{FOCUS_PEAK}: integrated-count distribution",
-    xlabel="integrated XRF counts per scan position", ylabel="scan positions",
-)
-heat = axes[1].imshow(
-    focus_values[np.newaxis, :], aspect="auto", interpolation="nearest",
-    cmap="viridis", extent=(0, len(focus_values), 0, 1),
-)
-axes[1].set(
-    title="1D acquisition-order heatmap", xlabel="scan position in acquisition order",
-    yticks=[],
-)
-fig.colorbar(heat, ax=axes[1], label="integrated counts", orientation="horizontal", pad=0.35)
-plt.show()
-print(
-    f"{FOCUS_PEAK}: min={focus_values.min():.3g}, "
-    f"median={np.median(focus_values):.3g}, "
-    f"p95={np.percentile(focus_values, 95):.3g}, max={focus_values.max():.3g}"
-)
-
-# %% 8. Define minimum counts, then report how much will be removed
-# Set thresholds by name after inspecting the plots above. None keeps all data.
+# %% 7. Define minimum counts and compare distribution with real space
+# Edit these values and rerun this cell. The dotted line moves right as the minimum
+# increases, and the corresponding below-threshold real-space positions turn white.
 MINIMUM_COUNTS = {
-    "Br": None,  # Example: 5000
-    "Pb": None,
+    "Br": 10,  # Example: 5000
+    "Pb": 5,
 }
 for name, minimum in MINIMUM_COUNTS.items():
     if name not in XRF_ROIS:
         raise KeyError(f"Threshold provided for unknown peak {name!r}")
     XRF_ROIS[name]["minimum_counts"] = minimum
 
-cut_rows = []
-for name, chunks in intensity_chunks.items():
-    values = np.concatenate(chunks)
+global_indices = np.concatenate([
+    record["global_start"] + np.arange(record["mapped_count"])
+    for record in records
+]).astype(int)
+
+fig, axes = plt.subplots(
+    len(focus_peaks), 2, figsize=(15, 5.5 * len(focus_peaks)),
+    constrained_layout=True, squeeze=False,
+)
+for row, name in enumerate(focus_peaks):
+    focus_values = np.concatenate(intensity_chunks[name])
+    focus_minimum = XRF_ROIS[name]["minimum_counts"]
+    focus_keep = (
+        np.ones(focus_values.size, dtype=bool)
+        if focus_minimum is None else focus_values >= focus_minimum
+    )
+
+    axes[row, 0].hist(
+        focus_values, bins=150, log=True, color="tab:blue", alpha=0.85,
+    )
+    if focus_minimum is not None:
+        axes[row, 0].axvline(
+            focus_minimum, color="tab:red", linestyle=":", linewidth=2,
+            label=f"minimum = {focus_minimum:g}",
+        )
+        axes[row, 0].legend()
+    axes[row, 0].set(
+        title=(f"{name}: scan positions vs integrated counts\n"
+               f"cut = {100 * (~focus_keep).mean():.2f}%"),
+        xlabel="integrated XRF counts per scan position", ylabel="scan positions",
+    )
+
+    # Draw every measured position white first, then overlay retained intensities.
+    axes[row, 1].scatter(
+        x_position[global_indices], y_position[global_indices],
+        c="white", edgecolors="none", s=3,
+    )
+    image = axes[row, 1].scatter(
+        x_position[global_indices[focus_keep]], y_position[global_indices[focus_keep]],
+        c=focus_values[focus_keep], cmap="viridis", edgecolors="none", s=3,
+    )
+    axes[row, 1].set_facecolor("white")
+    axes[row, 1].set(
+        title=f"{name}: integrated XRF counts in real space",
+        xlabel="X position (um)", ylabel="corrected Y position (um)",
+    )
+    axes[row, 1].set_aspect("equal")
+    if focus_keep.any():
+        fig.colorbar(image, ax=axes[row, 1], label="integrated XRF counts")
+plt.show()
+
+print("Focused XRF ROIs:")
+for name in focus_peaks:
+    values = np.concatenate(intensity_chunks[name])
     minimum = XRF_ROIS[name]["minimum_counts"]
     keep = np.ones(values.size, dtype=bool) if minimum is None else values >= minimum
+    print(
+        f"{name}: min={values.min():.3g}, median={np.median(values):.3g}, "
+        f"p95={np.percentile(values, 95):.3g}, max={values.max():.3g}; "
+        f"minimum_counts={minimum}; removed={100 * (~keep).mean():.2f}%"
+    )
+
+# %% 8. Save the cropped XRF-to-XRD link table
+# No detector images are copied. Each retained row points to one frame in a raw
+# XRD file, so downstream processing can load only positions that pass the cut.
+mask_names = list(XRF_ROIS)
+keep_masks = []
+cut_rows = []
+link_rows = []
+point_number = {name: 0 for name in mask_names}
+for name in mask_names:
+    minimum = XRF_ROIS[name]["minimum_counts"]
+    all_values = np.concatenate(intensity_chunks[name])
+    all_keep = (
+        np.ones(all_values.size, dtype=bool)
+        if minimum is None else all_values >= minimum
+    )
+    keep_masks.append(all_keep)
     cut_rows.append({
         "name": name,
         "minimum_counts": minimum,
-        "total_positions": int(values.size),
-        "retained_positions": int(keep.sum()),
-        "cut_positions": int((~keep).sum()),
-        "cut_percent": float(100.0 * (~keep).mean()),
+        "total_positions": int(all_values.size),
+        "retained_positions": int(all_keep.sum()),
+        "cut_positions": int((~all_keep).sum()),
+        "cut_percent": float(100.0 * (~all_keep).mean()),
     })
-cut_summary = pd.DataFrame(cut_rows)
-cut_summary.to_csv(CUT_SUMMARY_CSV, index=False)
-display(cut_summary)
-print(f"Wrote cut summary to {CUT_SUMMARY_CSV}")
 
-focus_minimum = XRF_ROIS[FOCUS_PEAK]["minimum_counts"]
-focus_keep = (
-    np.ones(focus_values.size, dtype=bool)
-    if focus_minimum is None else focus_values >= focus_minimum
-)
-fig, axes = plt.subplots(
-    2, 1, figsize=(13, 6), constrained_layout=True,
-    gridspec_kw={"height_ratios": [3, 1]},
-)
-axes[0].hist(focus_values, bins=150, log=True, color="tab:blue", alpha=0.85)
-if focus_minimum is not None:
-    axes[0].axvspan(focus_values.min(), focus_minimum, color="white", alpha=0.8)
-    axes[0].axvline(focus_minimum, color="tab:red", label="minimum")
-    axes[0].legend()
-axes[0].set(
-    title=f"{FOCUS_PEAK}: threshold removes {100 * (~focus_keep).mean():.2f}%",
-    xlabel="integrated XRF counts per scan position", ylabel="scan positions",
-)
-masked_heat = np.ma.masked_where(~focus_keep, focus_values)[np.newaxis, :]
-white_viridis = plt.get_cmap("viridis").copy()
-white_viridis.set_bad("white")
-heat = axes[1].imshow(
-    masked_heat, aspect="auto", interpolation="nearest", cmap=white_viridis,
-    extent=(0, len(focus_values), 0, 1),
-)
-axes[1].set(
-    title="Thresholded 1D heatmap; removed positions are white",
-    xlabel="scan position in acquisition order", yticks=[],
-)
-fig.colorbar(heat, ax=axes[1], label="integrated counts", orientation="horizontal", pad=0.35)
-plt.show()
-
-# %% 9. Build filtered XRD links from the minimum-count settings
-rows = []
-point_number = {material: 0 for material in XRF_ROIS}
-for record_index, record in enumerate(records):
-    start = record["global_start"]
-    for material, chunks in intensity_chunks.items():
-        intensities = chunks[record_index]
-        minimum = XRF_ROIS[material]["minimum_counts"]
-        keep = np.ones(len(intensities), dtype=bool)
-        if minimum is not None:
-            keep &= intensities >= minimum
+    for record_index, record in enumerate(records):
+        values = intensity_chunks[name][record_index]
+        keep = np.ones(values.size, dtype=bool) if minimum is None else values >= minimum
         for local_index in np.flatnonzero(keep):
-            global_index = start + int(local_index)
-            rows.append({
-                "material": material,
-                "point_index": point_number[material],
-                "x_position": float(x_position[global_index]),
-                "y_position": float(y_position[global_index]),
-                "y_position_raw": float(y_position_raw[global_index]),
-                "y_position_offset": y_offset,
-                "sample_theta_deg": scan_theta_deg,
-                "xrf_intensity": float(intensities[local_index]),
-                "xrf_roi_lo_kev": XRF_ROIS[material]["energy_range_kev"][0],
-                "xrf_roi_hi_kev": XRF_ROIS[material]["energy_range_kev"][1],
-                "xrf_file": str(record["me7_file"]),
-                "xrf_frame_index": int(local_index),
-                "xrd_file": str(record["xrd_file"]),
-                "xrd_frame_index": int(local_index),
-                "global_frame_index": global_index,
+            global_index = record["global_start"] + int(local_index)
+            link_rows.append({
+                "Material": name,
+                "Point": point_number[name],
+                "X": float(x_position[global_index]),
+                "Y": float(y_position[global_index]),
+                "XRF Intensity": float(values[local_index]),
+                "XRD File Link": str(record["xrd_file"]),
+                "XRD Frame Index": int(local_index),
+                "Global Frame Index": global_index,
             })
-            point_number[material] += 1
+            point_number[name] += 1
 
-columns = [
-    "material", "point_index", "x_position", "y_position", "y_position_raw",
-    "y_position_offset", "sample_theta_deg", "xrf_intensity",
-    "xrf_roi_lo_kev", "xrf_roi_hi_kev", "xrf_file", "xrf_frame_index",
-    "xrd_file", "xrd_frame_index", "global_frame_index",
-]
-filtered_points = pd.DataFrame(rows, columns=columns).set_index(
-    ["material", "point_index"]
-).sort_index()
-
-print(filtered_points.groupby(level="material").size().rename("retained_points"))
-display(filtered_points.head(20))
-
-# %% Save configuration and links only; no XRD image data is copied
+cut_summary = pd.DataFrame(cut_rows)
+link_table = pd.DataFrame(link_rows, columns=[
+    "Material", "Point", "X", "Y", "XRF Intensity", "XRD File Link",
+    "XRD Frame Index", "Global Frame Index",
+])
+cut_summary.to_csv(CUT_SUMMARY_CSV, index=False)
+np.savez_compressed(
+    XRF_MASK_CACHE,
+    names=np.asarray(mask_names),
+    keep_masks=np.stack(keep_masks),
+    global_frame_indices=global_indices,
+    minimum_counts=np.asarray([
+        np.nan if XRF_ROIS[name]["minimum_counts"] is None
+        else float(XRF_ROIS[name]["minimum_counts"])
+        for name in mask_names
+    ]),
+)
+string_dtype = h5py.string_dtype(encoding="utf-8")
+with h5py.File(LINK_TABLE_H5, "w") as handle:
+    table = handle.create_group("links")
+    table.create_dataset(
+        "Material", data=link_table["Material"].to_numpy(dtype=object),
+        dtype=string_dtype,
+    )
+    table.create_dataset("X", data=link_table["X"].to_numpy(dtype=float))
+    table.create_dataset("Y", data=link_table["Y"].to_numpy(dtype=float))
+    table.create_dataset(
+        "XRD File Link", data=link_table["XRD File Link"].to_numpy(dtype=object),
+        dtype=string_dtype,
+    )
+    table.create_dataset(
+        "XRD Frame Index", data=link_table["XRD Frame Index"].to_numpy(dtype=np.int64),
+    )
+    table.create_dataset(
+        "Global Frame Index",
+        data=link_table["Global Frame Index"].to_numpy(dtype=np.int64),
+    )
+    table.create_dataset(
+        "XRF Intensity", data=link_table["XRF Intensity"].to_numpy(dtype=float),
+    )
+    table.create_dataset("Point", data=link_table["Point"].to_numpy(dtype=np.int64))
+    handle.attrs["scan"] = SCAN
+    handle.attrs["sample_theta_deg"] = scan_theta_deg
+    handle.attrs["y_position_offset"] = y_offset
 with ROI_CONFIG_FILE.open("w") as stream:
     json.dump({
         "scan": SCAN,
@@ -629,39 +721,10 @@ with ROI_CONFIG_FILE.open("w") as stream:
         "focus_peak": FOCUS_PEAK,
         "rois": XRF_ROIS,
     }, stream, indent=2)
-filtered_points.to_csv(OUTPUT_CSV)
-print(f"Wrote ROI configuration to {ROI_CONFIG_FILE}")
-print(f"Wrote {len(filtered_points):,} links to {OUTPUT_CSV}")
 
-# %% 10. Spatial maps after filtering; removed/no-data positions are white
-fig, axes = plt.subplots(1, len(XRF_ROIS), figsize=(7 * len(XRF_ROIS), 5),
-                         constrained_layout=True)
-for ax, material in zip(np.atleast_1d(axes), XRF_ROIS):
-    all_values = np.concatenate(intensity_chunks[material])
-    global_indices = np.concatenate([
-        record["global_start"] + np.arange(record["mapped_count"])
-        for record in records
-    ]).astype(int)
-    minimum = XRF_ROIS[material]["minimum_counts"]
-    keep = np.ones(all_values.size, dtype=bool)
-    if minimum is not None:
-        keep &= all_values >= minimum
 
-    # White underlay preserves the full scanned footprint as explicit no-data.
-    ax.scatter(
-        x_position[global_indices], y_position[global_indices],
-        c="white", edgecolors="none", s=3,
-    )
-    image = ax.scatter(
-        x_position[global_indices[keep]], y_position[global_indices[keep]],
-        c=all_values[keep], s=3, cmap="viridis", edgecolors="none",
-    )
-    ax.set_facecolor("white")
-    ax.set(
-        title=f"{material}: retained {keep.mean() * 100:.2f}%",
-        xlabel="X position (um)", ylabel="corrected Y position (um)",
-    )
-    ax.set_aspect("equal")
-    if keep.any():
-        fig.colorbar(image, ax=ax, label="integrated XRF counts")
-plt.show()
+display(cut_summary)
+print(link_table.groupby("Material").size().rename("linked_xrd_frames"))
+display(link_table.head(20))
+print(f"Wrote {len(link_table):,} cropped XRF-to-XRD links to {LINK_TABLE_H5}")
+print("Raw XRD detector images were not copied.")

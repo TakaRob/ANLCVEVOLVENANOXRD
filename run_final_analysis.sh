@@ -11,12 +11,17 @@
 # Example:
 #   nohup ./run_final_analysis.sh > run_final_analysis.log 2>&1 &
 #
+# ROOT defaults to the directory this script lives in. If your bins live in a
+# sub-project (e.g. .../ANLCVEVOLVENANOXRD/Scans179-226Perovskite), point ROOT
+# at that sub-dir, NOT the parent:
+#   ROOT=/full/path/Scans179-226Perovskite ./run_final_analysis.sh
+#
 # Optional overrides:
-#   XRD_APP=/path/to/xrd-app DETECTOR=name SNR=4 WORKERS=4 LINK_TOLERANCE=5
+#   ROOT=/path/to/project XRD_APP=/path/to/xrd-app DETECTOR=name SNR=4 WORKERS=4 LINK_TOLERANCE=5
 
 set -uo pipefail
 
-ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="${ROOT:-$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)}"
 XRD_APP="${XRD_APP:-xrd-app}"
 DETECTOR="${DETECTOR:-5x5_tophat_band_adaptive_snr}"
 SNR="${SNR:-4}"
