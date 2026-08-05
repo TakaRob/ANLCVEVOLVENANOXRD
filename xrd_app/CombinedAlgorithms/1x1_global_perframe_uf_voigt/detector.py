@@ -27,10 +27,10 @@ Trade-offs vs the hybrid (this is intentionally a distinct algorithm):
 ``run_full_pipeline`` is kept unchanged below for per-bin / CVEvolve scoring and
 as a fallback path.
 """
-import argparse, csv, importlib.util, json, os, time
+import os
+import time
 import multiprocessing as mp
 from collections import defaultdict
-from pathlib import Path
 import h5py, numpy as np, scipy.ndimage as ndi
 
 def _fmt_dur(seconds):
@@ -727,58 +727,3 @@ def run_full_scan(bins_h5_path, tth_map, degs, deg_labels, grid_mapping,
         if progress is not None:
             progress(n_frames, n_frames)
         return by_bin
-
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--center-bin", required=True)
-    parser.add_argument("--bins-h5", default=BINS_H5_DEFAULT)
-    parser.add_argument("--two-theta", default="tth.tiff")
-    parser.add_argument("--reflections", default="reflections.py")
-    parser.add_argument("--grid-mapping", default="grid_mapping.json")
-    parser.add_argument("--output", default="detections.csv")
-    parser.add_argument("--labels", default=None)
-    parser.add_argument("--spatial-radius", type=int, default=5)
-    parser.add_argument("--downsample", type=int, default=1)
-    args = parser.parse_args()
-    spec = importlib.util.spec_from_file_location("reflections", args.reflections)
-    ref_mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(ref_mod)
-    import tifffile
-    tth_map = tifffile.imread(args.two_theta)
-    with open(args.grid_mapping) as f: grid_mapping = json.load(f)
-    validated = run_full_pipeline(args.center_bin, args.bins_h5, tth_map,
-                                  ref_mod.degs, ref_mod.deg_labels, grid_mapping,
-                                  spatial_radius=args.spatial_radius,
-                                  downsample=args.downsample)
-    with open(args.output, "w", newline="") as f:
-        writer = csv.writer(f)
-        writer.writerow(["reflection", "x", "y"])
-        for label, pts in validated.items():
-            for x, y in pts: writer.writerow([label, x, y])
-    total = sum(len(pts) for pts in validated.values())
-    print(f"Detected {total} spatially-validated peaks at center bin {args.center_bin}")
-    if args.labels:
-        with open(args.labels) as f: labels = json.load(f)
-        labels = {k: v for k, v in labels.items() if not k.startswith("__")}
-        import math
-        det_pts = [p for pts in validated.values() for p in pts]
-        gt_pts = [p for pts in labels.values() for p in pts]
-        if not gt_pts and not det_pts: print("F1 score: 1.0000")
-        elif not gt_pts or not det_pts: print("F1 score: 0.0000")
-        else:
-            pairs = []
-            for gi, (gx, gy) in enumerate(gt_pts):
-                for pi_, (px, py) in enumerate(det_pts):
-                    d = math.hypot(gx-px, gy-py)
-                    if d <= 40: pairs.append((d, gi, pi_))
-            pairs.sort()
-            ugt, upd = set(), set(); tp = 0
-            for _, gi, pi_ in pairs:
-                if gi not in ugt and pi_ not in upd:
-                    ugt.add(gi); upd.add(pi_); tp += 1
-            prec = tp/len(det_pts) if det_pts else 0
-            rec = tp/len(gt_pts) if gt_pts else 0
-            f1 = 2*prec*rec/(prec+rec) if (prec+rec) > 0 else 0
-            print(f"F1 score: {f1:.4f}")
-
-if __name__ == "__main__":
-    main()

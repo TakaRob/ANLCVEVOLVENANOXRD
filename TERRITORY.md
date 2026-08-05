@@ -72,9 +72,9 @@ xrd-app shapes --bin-size 1 --grid-link      # force the OLD grid linking (for c
 
 Binned sizes (≥2×2) keep grid linking by default (backlash is averaged out
 there). Coordinate mode needs the real position CSV; without one it degrades to
-grid linking with a note. The grid-repair deskew options
-(`grid --deskew-method faithful/perrow_offset`, `shapes --algorithm
-gaussian_deskew`) remain in the CLI for comparison but are no longer the default.
+grid linking with a note. For regular grids, the current choices are
+`positions_xy`, `faithful`, `faithful_native`, and `commanded`; use
+`territory-grid` for irregular physical cells.
 
 ## Build the truth (per scan, once)
 
@@ -88,10 +88,10 @@ xrd-app shapes --bin-size 1 --variant territory --algorithm territory  # link ov
 Artifacts written (the `_territory` tag keeps them beside the grid results):
 
 ```
-Metadata/<scan>/grid_mapping_1x1_territory.json   # territories: centroid/area/count/neighbors/polygon
+Metadata/<scan>/grid_mapping_1x1_territory.h5   # territories: centroid/area/count/neighbors/polygon
 Binned/<scan>/xrd_1x1_bins_territory.h5
-Labels/<scan>/<det>_peaks_1x1_territory.json
-Labels/<scan>/territory_shapes_1x1_territory.json # ← the source-of-truth catalog
+Labels/<scan>/<det>_peaks_1x1_territory.h5
+Labels/<scan>/territory_shapes_1x1_territory.h5  # source-of-truth catalog
 ```
 
 ## Compare the fast 1×1 catalog to the truth

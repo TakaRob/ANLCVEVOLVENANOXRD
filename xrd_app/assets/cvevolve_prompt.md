@@ -29,9 +29,9 @@ Inspect the files supplied in the CVEvolve `data_dir`. The development set inclu
 
 - **`bin_annotations.json`**: Ground-truth peaks grouped by bin and reflection.
 - **`empty_bins.json`**: Reviewed bins containing no peaks.
-- **`grid_mapping.json`**: Grid and bin metadata when available.
+- **`grid_mapping.h5`**: Grid and bin metadata when available.
 - **`tth.tiff`**: Per-pixel 2-theta map.
-- **`reflections.py`**: Valid reflection names and expected 2-theta values.
+- **`reflections.json`**: Valid reflection names and expected 2-theta values, when supplied.
 - **`baseline.py`**: Baseline per-bin peak detector, when supplied. Use it as a starting reference and try to outperform it.
 - **`evaluate.py`**: Development evaluation harness, when supplied.
 
@@ -51,7 +51,15 @@ Use the supplied `evaluate.py` harness and inspect `--help` before running it. A
 
 ## 5. Algorithm contract
 
-Follow the callable or command-line contract implemented by the supplied `baseline.py` and `evaluate.py`. Preserve required argument names and output formats so the evaluator can run the candidate unchanged.
+The final candidate is imported directly into xrd-app's production binned peak pipeline. It must remain a self-contained Python module that implements all five callables used by `xrd_app.core.processing`:
+
+- `precompute_tth(tth_map)`
+- `radial_median_subtract(image, tth_data)`
+- `fast_tophat(image, size=15)`
+- `build_tth_band_masks(tth_map, degs, deg_labels, tth_tolerance=0.4)`
+- `detect_in_band(tophat, cleaned, band_mask, label, **threshold_options)`
+
+Use the supplied `baseline.py` and `evaluate.py` as the exact signature and output reference. Preserve these names and compatible arguments. A successful xrd-app GUI run validates this API and automatically copies the final winner from the CVEvolve report into the project's `Algorithms/PeakAlgorithms/<name>/detector.py` catalog entry. Do not write `top_algorithms.json` or copy candidates manually.
 
 A typical peak output contains:
 

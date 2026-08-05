@@ -21,7 +21,7 @@ from PyQt5.QtWidgets import (
 
 from xrd_app import workspace
 from xrd_app.app import MainWindow
-from xrd_app.config import DataManager
+from xrd_app.config import DataManager, ProjectConfig, default_config
 from xrd_app.gui.roi_shape import ROIShapeWindow
 
 from xrd_app.gui.device_map import QRangeSlider
@@ -30,6 +30,7 @@ from xrd_app.gui import lifecycle
 from xrd_app.gui.lifecycle import dispose_widget, start_process, stop_process, stop_thread
 from xrd_app.tabs import _console
 from xrd_app.tabs._console import JobConsole
+from xrd_app.tabs.cvevolve_dialog import CVEvolveDialog
 
 
 _APP = None
@@ -39,6 +40,38 @@ def _app():
     global _APP
     _APP = QApplication.instance() or QApplication([])
     return _APP
+
+
+def test_cvevolve_dialog_forwards_generated_prompt(tmp_path, monkeypatch):
+    _app()
+    config_data = default_config("test", tmp_path)
+    config_data["scan"] = {"number": 203, "name": "Scan_0203"}
+    config = ProjectConfig(tmp_path, data=config_data)
+    config.create_tree()
+    config.save()
+    cvevolve = tmp_path / "CVEvolve"
+    config = cvevolve / "config.yaml"
+    prompt = cvevolve / "prompt.md"
+    holdout_prompt = cvevolve / "holdout_test_prompt.md"
+    config.write_text("name: test\n")
+    prompt.write_text("task")
+    holdout_prompt.write_text("holdout task")
+    dialog = CVEvolveDialog(tmp_path, scan="203", bin_size=3)
+    observed = {}
+    monkeypatch.setattr(dialog.console, "run",
+                        lambda args, **kwargs: observed.update(args=args, kwargs=kwargs))
+
+    dialog._run()
+
+    assert observed["args"][observed["args"].index("--prompt") + 1] == str(prompt)
+    assert observed["args"][observed["args"].index("--holdout-test-prompt") + 1] == str(holdout_prompt)
+    assert observed["kwargs"]["on_finished"] == dialog._on_run_finished
+
+    dialog._on_run_finished(0)
+    assert observed["args"][:3] == ["register-cvevolve", "--root", str(tmp_path.resolve())]
+    assert observed["args"][observed["args"].index("--bin-size") + 1] == "3"
+    assert observed["kwargs"]["clear"] is False
+    dialog.close()
 
 
 def test_startup_restores_last_project_and_gui_state(tmp_path, monkeypatch):
@@ -453,6 +486,38 @@ def test_roi_ready_feature_recrops_without_clearing_scan(monkeypatch):
     window._clear_sample_crop()
     assert entry["sample_crop_raw"] is None
     assert entry["feature"] is feature
+    assert entry["status"] == "ready"
+
+
+def test_roi_saved_full_scan_can_be_cropped_and_resaved(monkeypatch):
+    _app()
+    window = _roi_window()
+    window.bin_size = 3
+    entry = {
+        "roi": (1, 2, 3, 4), "sample_crop_raw": None, "status": "saved",
+        "feature": {"intensity_profile": {"0_0": {}}},
+    }
+    window.pending = [entry]
+    window.pending_list.addItem("ROI")
+    window.pending_list.setCurrentRow(0)
+    window.crop_coords = QComboBox()
+    window.crop_coords.addItems(["Raw coordinates", "Binned coordinates"])
+    window.crop_inputs = [QSpinBox() for _ in range(4)]
+    window.crop_label = QLabel()
+    window.apply_crop_btn = QPushButton()
+    window.clear_crop_btn = QPushButton()
+    window.crop_sample_cb = SimpleNamespace(isChecked=lambda: True)
+    window.heatmap = SimpleNamespace(drag_enabled=False)
+    monkeypatch.setattr(window, "_active_grid_shape", lambda: (20, 30))
+    monkeypatch.setattr(window, "_draw_sample_crop", lambda: None)
+    monkeypatch.setattr(window, "_render_feature", lambda: None)
+
+    window._update_crop_controls()
+    assert window.apply_crop_btn.isEnabled()
+    assert "locked" not in window.crop_label.text()
+
+    window._set_sample_crop((3, 6, 12, 15), raw_coordinates=True)
+    assert entry["sample_crop_raw"] == (3, 6, 12, 15)
     assert entry["status"] == "ready"
 
 

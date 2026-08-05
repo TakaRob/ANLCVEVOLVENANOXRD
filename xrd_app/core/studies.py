@@ -30,14 +30,14 @@ REGISTRY_NAME = "studies.json"
 # defining they are (rsm/rocking/combined are study-only; features is shared).
 PRIMARY_ARTIFACTS = (
     "rsm.npz", "rocking_curves.csv", "combined_device.npz",
-    "tracks.json", "features.csv",
+    "tracks.h5", "features.csv",
 )
 
 # logical artifact name -> the file (relative to the study dir) that proves it ran
 ARTIFACT_FILES = {
     "features": "features.csv",
     "device_map": "device_map.csv",
-    "tracks": "tracks.json",
+    "tracks": "tracks.h5",
     "rocking": "rocking_curves.csv",
     "prediction": "prediction_report.md",
     "combined_device": "combined_device.npz",
@@ -75,8 +75,7 @@ def is_study_dir(path) -> bool:
 def read_meta(study_dir) -> dict:
     """Best-effort provenance (bin_size, scans, thetas, grid) from sidecar JSONs.
 
-    Reads the ``.summary.json`` files the pipeline already writes plus
-    ``tracks.json`` — no heavy array loads. Missing fields are simply absent.
+    Reads small summary sidecars and HDF5 track metadata without loading arrays.
     """
     d = Path(study_dir)
     meta: dict = {}
@@ -97,7 +96,9 @@ def read_meta(study_dir) -> dict:
         if cdv.get("n_tracks") is not None:
             meta["n_tracks"] = cdv["n_tracks"]
 
-    tracks = _load_json(d / "tracks.json")
+    from . import result_store
+    tracks_path = d / "tracks.h5"
+    tracks = result_store.metadata(tracks_path) if tracks_path.exists() else None
     if tracks:
         if tracks.get("bin_size") is not None:
             meta["bin_size"] = tracks["bin_size"]
@@ -252,8 +253,9 @@ def load_rocking_curves(study_dir) -> List[dict]:
 
 
 def load_tracks(study_dir) -> List[dict]:
-    """Read the full track list (with per-θ members) from ``tracks.json``."""
-    data = _load_json(Path(study_dir) / "tracks.json")
+    """Read the full HDF5 track list with per-theta members."""
+    from . import result_store
+    data = result_store.load(Path(study_dir) / "tracks.h5")
     return (data or {}).get("tracks", []) if isinstance(data, dict) else []
 
 

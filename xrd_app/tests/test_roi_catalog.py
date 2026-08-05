@@ -16,7 +16,7 @@ def _feature(x0, feature_id=1):
 
 
 def test_save_all_uses_dedicated_catalog_invisible_to_shape_verify(tmp_path):
-    path = tmp_path / "manual_roimap_3x3.json"
+    path = tmp_path / "manual_roimap_3x3.h5"
     result = roi_catalog.save_previews(
         path, [_feature(10), _feature(20)], scan="Scan_0037", bin_size=3,
         name="manual")
@@ -31,7 +31,7 @@ def test_save_all_uses_dedicated_catalog_invisible_to_shape_verify(tmp_path):
 
 
 def test_save_all_merges_by_roi_and_remove_updates_catalog(tmp_path):
-    path = tmp_path / "manual_roimap_3x3.json"
+    path = tmp_path / "manual_roimap_3x3.h5"
     roi_catalog.save_previews(path, [_feature(10)], scan="Scan_0037",
                               bin_size=3, name="manual")
     updated = _feature(10)

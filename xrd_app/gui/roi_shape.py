@@ -294,7 +294,7 @@ class ROIShapeWindow(QMainWindow):
 
     @staticmethod
     def _crop_editable(entry):
-        return entry is not None and entry.get("status") in ("detected", "ready")
+        return entry is not None and entry.get("status") in ("detected", "ready", "saved")
 
     def _crop_toggled(self, checked):
         self.heatmap.drag_enabled = checked and self._crop_editable(self._selected_entry())
@@ -315,6 +315,9 @@ class ROIShapeWindow(QMainWindow):
         else:
             binned = roi_map.normalize_sample_crop(crop, rows, cols)
             entry["sample_crop_raw"] = tuple(value * self.bin_size for value in binned)
+        if entry.get("status") == "saved":
+            entry["status"] = "ready"
+        self._refresh_pending_list(select=self.pending_list.currentRow())
         self._update_crop_controls()
         self._draw_sample_crop()
         self._render_feature()
@@ -354,6 +357,9 @@ class ROIShapeWindow(QMainWindow):
             self.status.setText("Saved ROI crops are locked.")
             return
         entry["sample_crop_raw"] = None
+        if entry.get("status") == "saved":
+            entry["status"] = "ready"
+        self._refresh_pending_list(select=self.pending_list.currentRow())
         self._draw_sample_crop()
         self._update_crop_controls()
         self._render_feature()

@@ -12,8 +12,8 @@ def _feature(chi, area=1, intensity=1, rocking=0, strain=0):
         "chi_deg": chi,
         "n_bins": area,
         "peak_intensity": intensity,
-        "rocking_fwhm": rocking,
-        "strain_breadth": strain,
+        "chi_fwhm": rocking,
+        "tth_fwhm": strain,
     }
 
 

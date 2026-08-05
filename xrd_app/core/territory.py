@@ -345,7 +345,7 @@ def build_territory_mapping(
     }
 
     if output is not None:
-        io.atomic_write_json(output, result, indent=None)
+        io.save_grid_mapping(output, result)
         size_kb = Path(output).stat().st_size / 1024
         log(f"Wrote {output} ({size_kb:.0f} KB)")
 

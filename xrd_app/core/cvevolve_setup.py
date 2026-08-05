@@ -32,20 +32,21 @@ def _assets_dir() -> Path:
 
 
 def default_hutch_db(config_path, name: Optional[str] = None) -> Path:
-    """Canonical Hutch SQLite path for a config: ``<cfg_dir>/hutch/<name>.db``.
-
-    ``name`` defaults to the config's ``name`` field, then the config stem. Kept
-    in one place so the CLI (which writes it) and the GUI (which reads it for the
-    live table view) resolve the same path.
-    """
+    """Resolve the configured Hutch DB or ``<cfg_dir>/hutch/<name>.db``."""
     config_path = Path(config_path)
+    data = {}
     if name is None:
         try:
             with open(config_path) as f:
                 data = yaml.safe_load(f) or {}
             name = data.get("name")
         except (OSError, yaml.YAMLError):
-            name = None
+            pass
+        hutch = data.get("hutch")
+        configured = hutch.get("db_path") if isinstance(hutch, dict) else None
+        if configured:
+            path = Path(configured).expanduser()
+            return path if path.is_absolute() else config_path.parent / path
         name = name or config_path.stem
     return config_path.parent / "hutch" / f"{name}.db"
 
@@ -79,6 +80,25 @@ def scaffold_project(dest_dir, name: str, force: bool = False) -> Dict[str, list
     return {"written": written, "skipped": skipped}
 
 
+def config_mount_dirs(config_path) -> list[Path]:
+    """Return host directories referenced by a CVEvolve config."""
+    config_path = Path(config_path).resolve()
+    with open(config_path) as f:
+        data = yaml.safe_load(f) or {}
+    paths = [config_path.parent]
+    workspace = data.get("workspace")
+    if isinstance(workspace, dict):
+        for key in ("root_dir", "data_dir", "holdout_data_dir"):
+            if workspace.get(key):
+                path = Path(workspace[key]).expanduser()
+                paths.append(path if path.is_absolute() else config_path.parent / path)
+    hutch = data.get("hutch")
+    if isinstance(hutch, dict) and hutch.get("db_path"):
+        path = Path(hutch["db_path"]).expanduser()
+        paths.append((path if path.is_absolute() else config_path.parent / path).parent)
+    return list(dict.fromkeys(path.resolve() for path in paths))
+
+
 def set_hutch(config_path, enabled: bool, db_path=None) -> Path:
     """Enable/disable Hutch in an existing config; return the resolved DB path.
 
@@ -96,8 +116,9 @@ def set_hutch(config_path, enabled: bool, db_path=None) -> Path:
                  "daemon_url": None, "strict": False}
     hutch["enabled"] = bool(enabled)
 
-    resolved = db_path or hutch.get("db_path") or default_hutch_db(config_path)
-    resolved = Path(resolved)
+    resolved = Path(db_path).expanduser() if db_path else default_hutch_db(config_path)
+    if not resolved.is_absolute():
+        resolved = config_path.parent / resolved
     hutch["db_path"] = str(resolved)
     data["hutch"] = hutch
 

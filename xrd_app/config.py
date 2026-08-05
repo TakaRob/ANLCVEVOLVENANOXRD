@@ -401,28 +401,25 @@ class DataManager:
                    variant: Optional[str] = None) -> Path:
         algo = safe_component(algo, label="algorithm name")
         tag = f"_{safe_component(variant, label='variant')}" if variant else ""
-        return self.labels_dir(scan) / f"{algo}_peaks_{bin_size}x{bin_size}{tag}.json"
+        return self.labels_dir(scan) / f"{algo}_peaks_{bin_size}x{bin_size}{tag}.h5"
 
     def shapes_json(self, algo: str, bin_size: int, scan: object = None,
                     variant: Optional[str] = None) -> Path:
         algo = safe_component(algo, label="algorithm name")
         tag = f"_{safe_component(variant, label='variant')}" if variant else ""
-        return self.labels_dir(scan) / f"{algo}_shapes_{bin_size}x{bin_size}{tag}.json"
+        return self.labels_dir(scan) / f"{algo}_shapes_{bin_size}x{bin_size}{tag}.h5"
 
     def hd_map_json(self, algo: str, bin_size: int, scan: object = None,
                     variant: Optional[str] = None) -> Path:
-        """High-def (1×1) intensity map sampled beneath a binned feature map.
-
-        ``<algo>_hdmap_<NxN>[_<tag>].json`` alongside the shapes catalog it was
-        built from (``bin_size`` is that source feature-map bin, e.g. 3)."""
+        """High-def (1x1) intensity map sampled beneath a binned feature map."""
         algo = safe_component(algo, label="algorithm name")
         tag = f"_{safe_component(variant, label='variant')}" if variant else ""
-        return self.labels_dir(scan) / f"{algo}_hdmap_{bin_size}x{bin_size}{tag}.json"
+        return self.labels_dir(scan) / f"{algo}_hdmap_{bin_size}x{bin_size}{tag}.h5"
 
     def roi_map_json(self, name: str, bin_size: int, scan: object = None) -> Path:
         """Dedicated ROI > Shape catalog, intentionally separate from shapes."""
         tag = safe_component(name, normalize=True, label="catalog name")
-        return self.labels_dir(scan) / f"{tag}_roimap_{bin_size}x{bin_size}.json"
+        return self.labels_dir(scan) / f"{tag}_roimap_{bin_size}x{bin_size}.h5"
 
     def manual_labels_json(self, scan: object = None) -> Path:
         return self.labels_dir(scan) / "manual_labels.json"
@@ -565,7 +562,7 @@ class DataManager:
         return proj if proj.exists() else self._asset("tth.tiff")
 
     def reflection_source(self, scan: object = None) -> Optional[Path]:
-        """The user-selected JSON or legacy Python reflection source, if any.
+        """The user-selected JSON reflection source, if any.
 
         Stored per scan under ``data_sources.reflections_by_scan`` and chosen via
         the host header "Reflections:" selector or Setup → Load reflections….
@@ -593,18 +590,13 @@ class DataManager:
         self.set_reflection_source(None, scan)
 
     def reflections_json(self, scan: object = None) -> Path:
-        """Resolve JSON data for editors, independent of legacy pipeline modules."""
+        """Resolve reflection JSON for editors and pipeline consumers."""
         chosen = self.reflection_source(scan)
         if chosen is not None:
-            json_path = chosen if chosen.suffix.lower() == ".json" else chosen.with_suffix(".json")
-            if json_path.exists():
-                return json_path
+            return chosen
         configured = self.config.get("data_sources", "reflections")
         if configured:
-            path = self._abs(configured)
-            json_path = path if path.suffix.lower() == ".json" else path.with_suffix(".json")
-            if json_path.exists():
-                return json_path
+            return self._abs(configured)
         per_scan = self.metadata_scan_dir(scan) / "reflections.json"
         if per_scan.exists():
             return per_scan
@@ -612,31 +604,8 @@ class DataManager:
         return project if project.exists() else self._asset("reflections.json")
 
     def reflections(self, override: Optional[str] = None, scan: object = None) -> Path:
-        """Resolve reflections with JSON canonical and Python compatibility.
-
-        Explicit/per-scan/configured sources retain their selected format. Local
-        resolution prefers per-scan JSON, project JSON, then equivalent legacy
-        Python files, followed by the bundled JSON default.
-        """
-        if override:
-            return self._abs(override)
-        chosen = self.reflection_source(scan)
-        if chosen is not None:
-            return chosen
-        configured = self.config.get("data_sources", "reflections")
-        if configured:
-            return self._abs(configured)
-        scan_dir = self.metadata_scan_dir(scan)
-        candidates = [
-            scan_dir / "reflections.json",
-            self.metadata_dir / "reflections.json",
-            scan_dir / "reflections.py",
-            self.metadata_dir / "reflections.py",
-        ]
-        for path in candidates:
-            if path.exists():
-                return path
-        return self._asset("reflections.json")
+        """Resolve reflection JSON: override, selected, configured, scan, project, bundled."""
+        return self._abs(override) if override else self.reflections_json(scan)
 
     def grid_mapping(self, override: Optional[str] = None, bin_size: Optional[int] = None,
                      scan: object = None, variant: Optional[str] = None) -> Path:
@@ -648,9 +617,9 @@ class DataManager:
                 return self._abs(configured)
         sdir = self.metadata_scan_dir(scan)
         tag = f"_{safe_component(variant, label='variant')}" if variant else ""
-        if bin_size is not None:
-            return sdir / f"grid_mapping_{bin_size}x{bin_size}{tag}.json"
-        return sdir / f"grid_mapping{tag}.json"
+        stem = (f"grid_mapping_{bin_size}x{bin_size}{tag}"
+                if bin_size is not None else f"grid_mapping{tag}")
+        return sdir / f"{stem}.h5"
 
     def unbinned_archive_h5(self, override: Optional[str] = None,
                             scan: object = None) -> Path:
@@ -687,21 +656,6 @@ class DataManager:
         """
         name = self.scan_name_of(scan) if scan is not None else self.scan_name
         return self.metadata_scan_dir(scan) / f"{name}_xrf_points.npz"
-
-    # ----- compatibility shims for the embedded legacy GUIs -----------
-    # The viewer/device_map/orientation modules were written against the old
-    # DataManager API (results_dir / holdout_dir / bins_h5). Keep thin aliases
-    # so they resolve correctly against the new project tree unchanged.
-    def results_dir(self, scan: object = None) -> Path:
-        return self.labels_dir(scan)
-
-    @property
-    def holdout_dir(self) -> Path:
-        return self.metadata_dir
-
-    def bins_h5(self, bin_size: int, override: Optional[str] = None,
-                scan: object = None, variant: Optional[str] = None) -> Path:
-        return self.binned_h5(bin_size, override, scan, variant=variant)
 
     # ----- detector / algorithm libraries -----------------------------
     @staticmethod

@@ -82,13 +82,10 @@ def slow_mount_warning(path) -> Optional[str]:
 # Generic loaders
 # ─────────────────────────────────────────────────────────────────────
 def load_module(path: Union[str, Path]):
-    """Dynamically import a .py file as a module (detector / reflections).
+    """Dynamically import a detector or algorithm Python module.
 
-    The file's own directory is placed on ``sys.path`` during import so a
-    detector can import sibling modules. The shared ``NoiseReduction/`` library
-    (``xrd_app/NoiseReduction``) is also added, so any detector — wherever it
-    lives in the flattened algorithm library — can still
-    ``from noise_reduction_algorithms import ...``.
+    The file's own directory and packaged algorithm libraries are placed on
+    ``sys.path`` during import so detectors can import sibling/base modules.
     """
     import sys
     path = Path(path).resolve()
@@ -98,16 +95,13 @@ def load_module(path: Union[str, Path]):
     source = path.read_bytes()
     identity = str(path).encode() + b"\0" + source
     module_name = f"_xrd_dynamic_{path.stem}_{hashlib.sha256(identity).hexdigest()[:16]}"
-    # Shared library dirs so a detector can import sibling/library modules no
-    # matter where it lives: its own dir, the flat PeakAlgorithms/ root (so an
-    # automated algo in its own sub-folder can import a base detector), and the
-    # NoiseReduction/ library.
+    # Shared library dirs let detectors import sibling/library modules no matter
+    # where they live, including a base detector from an automated sub-folder.
     pkg = Path(__file__).resolve().parent.parent
     dirs = [str(path.parent)]
     if path.name == "detector.py":
         dirs.append(str(path.parent.parent))
-    for extra in (pkg / "PeakAlgorithms", pkg / "CombinedAlgorithms",
-                  pkg / "NoiseReduction"):
+    for extra in (pkg / "PeakAlgorithms", pkg / "CombinedAlgorithms"):
         if extra.is_dir():
             dirs.append(str(extra))
     added = [d for d in dirs if d not in sys.path]
@@ -273,24 +267,98 @@ def validate_scan(info: dict, expected_shape: Optional[list] = None) -> list:
 
 
 def load_reflections(path: Union[str, Path]):
-    """Load reflection JSON or a legacy Python module; return angles and labels."""
-    path = Path(path)
-    if path.suffix.lower() == ".json":
-        from .reflections import read_json
+    """Load canonical reflection JSON; return angles and labels."""
+    from .reflections import read_json
 
-        reflections = read_json(path)
-        return ([float(r["two_theta"]) for r in reflections],
-                [str(r["name"]) for r in reflections])
-    mod = load_module(path)
-    return mod.degs, mod.deg_labels
+    path = Path(path)
+    if path.suffix.lower() != ".json":
+        raise ValueError(f"Reflection source must be JSON: {path}")
+    reflections = read_json(path)
+    return ([float(r["two_theta"]) for r in reflections],
+            [str(r["name"]) for r in reflections])
+
+
+def save_grid_mapping(path, mapping: dict) -> Path:
+    """Atomically persist a grid mapping as compact HDF5 arrays."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    metadata = {key: value for key, value in mapping.items()
+                if key not in ("bins", "frame_map", "xrd_files", "territories")}
+    bins = mapping.get("bins") or {}
+    keys = list(bins)
+    offsets = [0]
+    members = []
+    for key in keys:
+        members.extend(int(value) for value in bins[key])
+        offsets.append(len(members))
+    strings = h5py.string_dtype("utf-8")
+    kwargs = {"compression": "gzip", "compression_opts": 1, "shuffle": True}
+    try:
+        with h5py.File(tmp, "w") as handle:
+            handle.attrs["format"] = "xrd-app-grid"
+            handle.attrs["schema_version"] = 1
+            handle.attrs["metadata_json"] = json.dumps(metadata, separators=(",", ":"))
+            handle.create_dataset("xrd_files", data=np.asarray(
+                [str(value) for value in mapping.get("xrd_files", [])], dtype=object),
+                dtype=strings, compression="gzip", compression_opts=1)
+            frame_map = np.asarray(mapping.get("frame_map", []), dtype=np.int64).reshape(-1, 2)
+            handle.create_dataset("frame_map", data=frame_map,
+                                  **(kwargs if frame_map.size else {}))
+            handle.create_dataset("bin_keys", data=np.asarray(keys, dtype=object),
+                                  dtype=strings, compression="gzip", compression_opts=1)
+            handle.create_dataset("bin_offsets", data=np.asarray(offsets, dtype=np.int64),
+                                  **kwargs)
+            member_array = np.asarray(members, dtype=np.int64)
+            handle.create_dataset("bin_frames", data=member_array,
+                                  **(kwargs if member_array.size else {}))
+            territories = mapping.get("territories") or {}
+            if territories:
+                handle.create_dataset("territory_keys", data=np.asarray(
+                    list(territories), dtype=object), dtype=strings,
+                    compression="gzip", compression_opts=1)
+                handle.create_dataset("territory_json", data=np.asarray([
+                    json.dumps(territories[key], separators=(",", ":"))
+                    for key in territories
+                ], dtype=object), dtype=strings, compression="gzip", compression_opts=1)
+        os.replace(tmp, path)
+    except Exception:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
+    return path
 
 
 def load_grid_mapping(grid_mapping: Union[str, Path, dict]) -> dict:
-    """Accept a path or an already-loaded dict; return the grid-mapping dict."""
+    """Accept an HDF5 path or an already-loaded grid mapping."""
     if isinstance(grid_mapping, dict):
         return grid_mapping
-    with open(grid_mapping) as f:
-        return json.load(f)
+    path = Path(grid_mapping)
+    with h5py.File(path, "r") as handle:
+        if str(handle.attrs.get("format", "")) != "xrd-app-grid":
+            raise ValueError(f"Unsupported grid mapping HDF5: {path}")
+        result = json.loads(str(handle.attrs.get("metadata_json", "{}")))
+        result["xrd_files"] = [value.decode() if isinstance(value, bytes) else str(value)
+                               for value in handle["xrd_files"][:]]
+        result["frame_map"] = handle["frame_map"][:].astype(int).tolist()
+        keys = [value.decode() if isinstance(value, bytes) else str(value)
+                for value in handle["bin_keys"][:]]
+        offsets = handle["bin_offsets"][:]
+        frames = handle["bin_frames"][:]
+        result["bins"] = {
+            key: frames[int(offsets[index]):int(offsets[index + 1])].astype(int).tolist()
+            for index, key in enumerate(keys)
+        }
+        if "territory_keys" in handle:
+            territory_keys = [value.decode() if isinstance(value, bytes) else str(value)
+                              for value in handle["territory_keys"][:]]
+            result["territories"] = {
+                key: json.loads(value.decode() if isinstance(value, bytes) else str(value))
+                for key, value in zip(territory_keys, handle["territory_json"][:])
+            }
+        return result
 
 
 def validate_grid_mapping_bin_size(grid_mapping, expected_bin_size) -> dict:
@@ -611,7 +679,7 @@ def assign_grid_from_positions(frame_x, frame_y, frame_map=None,
     # acquisition direction (ref_col) can point opposite to the physical axis the
     # previous coordinate system used, which would mirror the device map. Anchor
     # row & column direction to the serpentine reconstruction's signs (what the
-    # legacy positions_xy grid used) — correlation *sign* is robust even though
+    # positions_xy grid used) — correlation *sign* is robust even though
     # that lattice's size is not — so the device map keeps its orientation.
     serp_row, serp_col, _, _ = build_scan_grid(frame_x, n_total)
     if _corr(grid_row, rowv) * _corr(serp_row, rowv) < 0:
@@ -888,16 +956,15 @@ def generate_grid_mapping(
         position), oriented by the real (X, Y). The canonical system.
       - ``positions_xy``: turn-counted position snap — used for *irregular* scans
         (file index ≠ scan row) when a real position CSV is available.
-      - ``serpentine``: legacy X-only grid by turn-counting (``--rawgrid`` bypass,
-        or the CSV has no ``Y_Position``).
+      - ``serpentine``: X-only grid by turn-counting when the position source has
+        no ``Y_Position``.
       - ``synthetic``: a regular serpentine raster from ``n_cols`` (last resort).
 
     ``deskew_method`` selects how frames map to the lattice. ``"auto"`` (default)
     picks ``"positions_xy"`` at 1×1 (both axes snapped to true (X, Y) — skew-free,
     avoids the file-index-row bowtie) and ``"faithful"`` at coarser bins. Explicit
     options: ``"positions_xy"``, ``"faithful"``/``"faithful_native"`` (file-index
-    rows, true-Y columns), ``"commanded"`` (align columns by rank), or
-    ``"perrow_offset"`` (DEPRECATED; see :mod:`xrd_app.core.deskew_legacy`).
+    rows, true-Y columns), or ``"commanded"`` (align columns by rank).
 
     A CSV we recreated ourselves (tagged with :data:`RECREATED_CSV_MARKER`) is not
     treated as real positions — it routes to ``file_per_row``. The chosen source is
@@ -933,12 +1000,6 @@ def generate_grid_mapping(
                 grid_row, grid_col, n_rows, n_cols = assign_grid_from_positions(
                     frame_x, frame_y, frame_map=frame_map, force_xy=True, log=log)
                 coordinate_source = "positions_xy"
-            elif fpr and deskew_method == "perrow_offset":
-                from .deskew_legacy import assign_grid_perrow_offset
-                log("Computing scan grid (DEPRECATED perrow_offset method) ...")
-                grid_row, grid_col, n_rows, n_cols = assign_grid_perrow_offset(
-                    frame_x, frame_y, frame_map, log=log)
-                coordinate_source = "perrow_offset_deprecated"
             elif fpr and deskew_method in ("faithful", "faithful_native"):
                 col_mode = "native" if deskew_method == "faithful_native" else "square"
                 log(f"Computing coordinate-faithful scan grid ({col_mode}, "
@@ -1025,9 +1086,7 @@ def generate_grid_mapping(
     }
 
     if output is not None:
-        # Atomic write so a ctrl+C / crash can't leave a truncated grid mapping
-        # (which `build_bins` later reads) behind.
-        atomic_write_json(output, result, indent=None)
+        save_grid_mapping(output, result)
         size_kb = Path(output).stat().st_size / 1024
         log(f"Wrote {output} ({size_kb:.0f} KB)")
 
@@ -1642,7 +1701,7 @@ class _ArchiveSource(BinImageSource):
 class _RawSource(BinImageSource):
     """Bin raw frames on demand — used when no binned h5 exists.
 
-    Bins are resolved from a saved ``grid_mapping_NxN.json`` when present,
+    Bins are resolved from a saved ``grid_mapping_NxN.h5`` when present,
     otherwise built in-memory from the scan positions (or a synthesized raster).
     """
 
@@ -1768,7 +1827,7 @@ def open_bin_source(dm, bin_size, scan=None, n_cols=None, grid_mapping=None,
             f"variant {variant!r}: {gm}")
     if grid_mapping and grid_variant:
         variant = grid_variant
-    h5 = dm.bins_h5(bin_size, scan=scan, variant=variant)
+    h5 = dm.binned_h5(bin_size, scan=scan, variant=variant)
     archive = dm.unbinned_archive_h5(scan=scan)
     if gm and Path(gm).exists():
         validate_grid_mapping_bin_size(gm, bin_size)

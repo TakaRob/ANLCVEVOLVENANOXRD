@@ -100,7 +100,7 @@ def test_roi_catalog_names_normalize_inside_scan_labels(tmp_path, name, tag):
 
     output = dm.roi_map_json(name, 3)
 
-    assert output == tmp_path / "Labels" / "Scan_0007" / f"{tag}_roimap_3x3.json"
+    assert output == tmp_path / "Labels" / "Scan_0007" / f"{tag}_roimap_3x3.h5"
 
 
 @pytest.mark.parametrize("constructor", ["peaks_json", "shapes_json", "hd_map_json"])
@@ -128,12 +128,13 @@ def test_roi_save_uses_normalized_name_for_output_and_persistence(tmp_path, monk
         ["roi-save", "--roi", "1,2,3,4", "--name", "../grain (001)!",
          "--scan", "7", "--root", str(tmp_path)],
     )
-    output = tmp_path / "Labels" / "Scan_0007" / "grain_001_roimap_3x3.json"
+    output = tmp_path / "Labels" / "Scan_0007" / "grain_001_roimap_3x3.h5"
 
     assert result.exit_code == 0, result.output
     assert output.exists()
-    assert json.loads(output.read_text())["name"] == "grain_001"
-    assert not (tmp_path / "grain (001)!_roimap_3x3.json").exists()
+    from xrd_app.core import roi_catalog
+    assert roi_catalog.load(output)["name"] == "grain_001"
+    assert not (tmp_path / "grain (001)!_roimap_3x3.h5").exists()
 
 
 @pytest.mark.parametrize("configured", ["../outside", "/tmp/outside", r"..\outside"])

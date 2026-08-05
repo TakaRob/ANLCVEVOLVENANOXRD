@@ -29,8 +29,8 @@ def feature_area(feature):
 
 def feature_spread(feature):
     """Combined rocking/strain spread, floored to one for weighting."""
-    spread = (float(feature.get("rocking_fwhm") or 0.0) +
-              float(feature.get("strain_breadth") or 0.0))
+    spread = (float(feature.get("chi_fwhm") or 0.0) +
+              float(feature.get("tth_fwhm") or 0.0))
     return spread if spread > 0 else 1.0
 
 

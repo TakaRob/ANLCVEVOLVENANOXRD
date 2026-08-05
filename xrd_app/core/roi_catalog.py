@@ -4,16 +4,19 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from . import io
+from . import result_store
 
 
 def load(path) -> dict:
     path = Path(path)
     if not path.exists():
         return {}
-    import json
-    with open(path) as handle:
-        data = json.load(handle)
+    data = result_store.load(path)
+    return data if isinstance(data, dict) else {}
+
+
+def _metadata(path) -> dict:
+    data = result_store.metadata(path)
     return data if isinstance(data, dict) else {}
 
 
@@ -23,8 +26,10 @@ def discover(labels_dir, bin_size: int) -> list[Path]:
     if not labels_dir.is_dir():
         return []
     paths = []
-    for path in labels_dir.glob(f"*_roimap_{int(bin_size)}x{int(bin_size)}.json"):
-        data = load(path)
+    candidates = labels_dir.glob(
+        f"*_roimap_{int(bin_size)}x{int(bin_size)}.h5")
+    for path in candidates:
+        data = _metadata(path)
         try:
             matches_bin = int(data.get("bin_size", -1)) == int(bin_size)
         except (TypeError, ValueError):
@@ -60,7 +65,7 @@ def save_previews(path, preview_features, *, scan, bin_size, name) -> dict:
         "n_features": len(features),
         "features": features,
     }
-    io.atomic_write_json(path, result)
+    result_store.save(path, result)
     return result
 
 
@@ -83,5 +88,5 @@ def remove_feature(path, roi) -> dict:
         feature["feature_id"] = index
     data["features"] = features
     data["n_features"] = len(features)
-    io.atomic_write_json(path, data)
+    result_store.save(path, data)
     return data

@@ -17,7 +17,7 @@ that answer them. Pair it with `CLAUDE.md` (science context) and
 ## Operating mode
 
 - **You run the tools; the researcher reads conclusions.** Run CLI commands,
-  read the JSON/CSV outputs, compute the number, and report it in their
+  read the HDF5/CSV outputs, compute the number, and report it in their
   vocabulary (peaks, shapes, reflections, orientation, intensity). Don't make
   them look at raw JSON unless they ask.
 - **Never launch the GUI to answer a data question** (`xrd-app gui` blocks and
@@ -33,7 +33,7 @@ that answer them. Pair it with `CLAUDE.md` (science context) and
   ```bash
   xrd-app status                 # project, scan, frame shape, which inputs resolve ✓/✗
   xrd-app status --bin-size 1    # repeat per bin size of interest (1,3,4,5)
-  xrd-app lineage                # every result JSON in Labels/<scan>/ + its provenance
+  xrd-app lineage                # every result catalog in Labels/<scan>/ + its provenance
   ls Labels/*/                   # the actual result files on disk
   ```
 
@@ -41,13 +41,12 @@ that answer them. Pair it with `CLAUDE.md` (science context) and
 
 ```
 raw HDF5 frames
-  └─ grid   → Metadata/<scan>/grid_mapping_<N>x<N>.json   (frame → spatial bin)
-  └─ bin    → Binned/<scan>/xrd_<N>x<N>_bins.h5           (summed CCD per bin)
-  └─ peaks  → Labels/<scan>/<algo>_peaks_<N>x<N>.json     (Phase 1: per-bin detections)
-  └─ shapes → Labels/<scan>/<algo>_shapes_<N>x<N>.json    (Phase 2: linked, validated)
-              + Labels/<scan>/feature_catalog_<N>x<N>.json (kept shapes, viewer format)
-              + Labels/<scan>/kept_peaks_<N>x<N>.csv        (the shapes, as a table)
-              + Labels/<scan>/filtered_peaks_<N>x<N>.csv     (rejected clusters)
+  └─ grid   → Metadata/<scan>/grid_mapping_<N>x<N>[_variant].h5 (frame → spatial bin)
+  └─ bin    → Binned/<scan>/xrd_<N>x<N>_bins.h5                 (summed CCD per bin)
+  └─ peaks  → Labels/<scan>/<algo>_peaks_<N>x<N>.h5             (Phase 1: per-bin detections)
+  └─ shapes → Labels/<scan>/<algo>_shapes_<N>x<N>.h5            (Phase 2: linked, validated)
+              + Labels/<scan>/kept_peaks_<N>x<N>.csv             (the shapes, as a table)
+              + Labels/<scan>/filtered_peaks_<N>x<N>.csv         (rejected clusters)
 ```
 
 - A **peak** is a single-bin detection (may be noise). A **shape** is a peak
@@ -63,7 +62,7 @@ raw HDF5 frames
 
 ## Where the answers live (result-file schemas)
 
-### `<algo>_peaks_<N>x<N>.json` (Phase 1)
+### `<algo>_peaks_<N>x<N>.h5` (Phase 1)
 Top level: `n_peaks`, `n_bins_with_peaks`, `detector`, `snr`, `bin_size`,
 `peaks_by_bin: {"<row>_<col>": [peak, ...]}`. Each **peak**:
 | field | meaning |
@@ -74,7 +73,7 @@ Top level: `n_peaks`, `n_bins_with_peaks`, `detector`, `snr`, `bin_size`,
 | `cleaned_intensity` | peak height after background subtraction |
 | `integrated_intensity` | integrated counts (if present) |
 
-### `<algo>_shapes_<N>x<N>.json` (Phase 2) — the main analysis object
+### `<algo>_shapes_<N>x<N>.h5` (Phase 2) — the main analysis object
 Top level: `n_kept` (= number of shapes), `n_filtered`, `link_tolerance`,
 `bin_size`, `kept: [feature, ...]`, `filtered: [...]`. Each **feature/shape**:
 | field | meaning — answers… |
@@ -97,10 +96,10 @@ Top level: `n_kept` (= number of shapes), `n_filtered`, `link_tolerance`,
 > Legacy field names: `chi_fwhm` was once `rocking_fwhm`; `tth_fwhm` was once
 > `strain_breadth`. `core/aggregate.py` accepts both — prefer the new names.
 
-### `feature_catalog_<N>x<N>.json`
-The `kept` shapes only, in the viewer/device-map format (same fields). This is
-what the Device and Orientation maps are built from. `core/aggregate.py` turns
-these into two tabular views you can compute yourself when needed:
+### Feature sources
+There is no separate feature catalog. Device and Orientation maps read features
+from a shapes catalog's `kept` list or a combined catalog's `features` list.
+`core/aggregate.py` turns these into two tabular views you can compute when needed:
 - **feature rows** — one row per shape (the per-feature fields above, plus
   `mean_intensity`, `sum_integrated`).
 - **device-map rows** — one row per (feature, bin): `row, col, intensity,
@@ -113,38 +112,36 @@ the active scan, paths, and `detector.shape`.
 
 ## Question → recipe
 
-Run the command, then read the field. Prefer `jq` or a small `python3 -c`/pandas
-read; **summarize, don't dump** (these files can be large). Always quote paths
+Run the command, then read the field with `xrd_app.core.result_store.load` or a
+small Python/pandas read; **summarize, don't dump** (these files can be large). Always quote paths
 (the project path has spaces).
 
 | Researcher asks… | How to answer |
 |---|---|
-| "How many features/shapes in scan 203?" | `n_kept` in `<algo>_shapes_3x3.json` (or count `kept`). |
-| "How many raw peaks before filtering?" | `n_peaks` / `n_bins_with_peaks` in `<algo>_peaks_*.json`. |
+| "How many features/shapes in scan 203?" | `n_kept` in `<algo>_shapes_3x3.h5` (or count `kept`). |
+| "How many raw peaks before filtering?" | `n_peaks` / `n_bins_with_peaks` in `<algo>_peaks_*.h5`. |
 | "Breakdown by reflection / phase?" | group `kept[].reflection` and count. |
 | "How large are the features?" | distribution of `n_bins` (and `spatial_extent` length); report min/median/max. |
 | "Which is the strongest / brightest?" | max `peak_intensity` over `kept`; report its `reflection`, `center_row/col`. |
 | "What's the orientation, and how spread out?" | `chi_deg` per feature; spread = `chi_fwhm` (per feature) or the stdev of `chi_deg` across features. |
 | "Any strain / radial broadening?" | `tth_fwhm` distribution — **caveat it's uncalibrated breadth, not strain**. |
-| "Map intensity across the sample." | build device-map rows (per-bin `intensity`) from `feature_catalog`; describe hot regions by `row,col`. |
-| "Compare two algorithms / two scans." | read both result JSONs, diff `n_kept`, per-reflection counts, intensity stats. |
+| "Map intensity across the sample." | build device-map rows (per-bin `intensity`) from shapes `kept` or combined `features`; describe hot regions by `row,col`. |
+| "Compare two algorithms / two scans." | read both result catalogs, diff `n_kept`, per-reflection counts, intensity stats. |
 | "Which detector is best?" | `xrd-app detectors --kind peak\|shape\|combined` — holdout F1/F2 table (**F2 is the primary metric**). |
 | "How big is the scan / how many frames?" | `xrd-app status` or `Raw/scans.json` (`n_frames`, `n_files`, `shape`). |
 | "What's been run already / where did this file come from?" | `xrd-app lineage` (provenance: detector, snr, link tolerance, peak source). |
-| "Did detection use the right settings?" | `snr`, `link_tolerance`, `detector` in the result JSON top level + `lineage`. |
+| "Did detection use the right settings?" | `snr`, `link_tolerance`, `detector` in the result metadata + `lineage`. |
 
-Example reads (adapt names from `ls Labels/<scan>/`):
+Example read (adapt the name from `ls Labels/<scan>/`):
 ```bash
-# counts + per-reflection breakdown from a shapes file
-jq '{shapes:.n_kept, filtered:.n_filtered,
-     by_reflection:(.kept|group_by(.reflection)|map({(.[0].reflection):length})|add)}' \
-  "Labels/Scan_0203/gaussian_shapes_3x3.json"
-
-# size + intensity + orientation summary with pandas
+# counts, size, intensity, and orientation from a shapes catalog
 python3 -c '
-import json,statistics as st
-d=json.load(open("Labels/Scan_0203/gaussian_shapes_3x3.json"))["kept"]
-print("shapes:",len(d))
+import statistics as st
+from xrd_app.core.result_store import load
+data=load("Labels/Scan_0203/gaussian_shapes_3x3.h5")
+d=data["kept"]
+print("shapes/filtered:",data["n_kept"],data["n_filtered"])
+print("by reflection:",{r:sum(f["reflection"]==r for f in d) for r in sorted({f["reflection"] for f in d})})
 print("n_bins  min/med/max:",min(f["n_bins"] for f in d),
       st.median(f["n_bins"] for f in d),max(f["n_bins"] for f in d))
 chi=[f["chi_deg"] for f in d if f.get("chi_deg") is not None]
@@ -178,7 +175,7 @@ Ask before computing when the answer depends on it (otherwise pick a sensible
 default and say which you used):
 - **Which scan and which bin size?** (default to the config scan; 3×3 is the
   common working size — confirm.)
-- **Which algorithm's results?** (multiple `*_shapes_*.json` may exist — list
+- **Which algorithm's results?** (multiple `*_shapes_*.h5` may exist — list
   them with `lineage` and ask, or use the most recent.)
 - **Shapes (validated) or raw peaks?** Default: shapes.
 - **All features or a specific reflection / region of the sample?**

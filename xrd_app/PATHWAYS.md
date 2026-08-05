@@ -1,7 +1,7 @@
 # PATHWAYS.md — how xrd-app moves data from raw frames to the device views
 
 This is the data-flow map for the **non-GUI** half of `xrd_app/`: what every
-stage reads, computes, and writes, the exact structure of every JSON / HDF5 /
+stage reads, computes, and writes, the exact structure of every HDF5 / JSON /
 NPZ artifact, the `core/` functions that produce them, and the `xrd-app`
 command that drives each one. It complements — and defers to — `TERMINOLOGY.md`
 for vocabulary and `CLAUDE.md` for architecture. Nothing here describes the GUI;
@@ -19,10 +19,10 @@ From `TERMINOLOGY.md` — these are *not* synonyms:
 
 | Term | What it is | Stage | Lives in |
 |---|---|---|---|
-| **peak** | one raw detection inside **one** spatial bin (coordinate + intensity/SNR) | Phase 1 (detection) | `*_peaks_NxN.json` → `peaks_by_bin` |
+| **peak** | one raw detection inside **one** spatial bin (coordinate + intensity/SNR) | Phase 1 (detection) | `*_peaks_NxN.h5` → `peaks_by_bin` |
 | **member** | a peak after it has been linked into a cluster (in-memory tuple) | Phase 2 (linking) | `processing.py` only |
-| **feature** | a linked cluster of members across adjacent bins that passed the profile filter — **the physical Bragg spot** | Phase 3 (characterization) | `*_shapes_NxN.json` `kept`, `feature_catalog_*.json` |
-| **shape** | the *stage name* for a verified feature (Phase-2 "shape finding") — same object as a feature | — | `ShapeAlgorithms/`, `xrd-app shapes`, `*_shapes_*.json` |
+| **feature** | a linked cluster of members across adjacent bins that passed the profile filter — **the physical Bragg spot** | Phase 3 (characterization) | shapes `kept` or combined `features` in HDF5 |
+| **shape** | the *stage name* for a verified feature (Phase-2 "shape finding") — same object as a feature | — | `ShapeAlgorithms/`, `xrd-app shapes`, `*_shapes_*.h5` |
 
 Read "a shape" as "a verified feature." Use **feature** for the record, **shape**
 for the stage / CLI / files.
@@ -40,10 +40,10 @@ Everything resolves through `config.ProjectConfig` and `config.DataManager`
   config.yaml            ProjectConfig — data_sources, scans, bins, paths
   Raw/       scans.json (registry) + linked calibration
   Binned/    <scan>/xrd_NxN_bins[_<variant>].h5     ← pre-summed detector images per bin
-  Metadata/  reflections.json/.py, tth.tiff, gui_state.json, xrf_elements.json
-             <scan>/grid_mapping_NxN[_<variant>].json, reflections.*, reflection_sum.npz, *_xrf*.npz
-  Labels/    <scan>/*_peaks_*.json, *_shapes_*.json, feature_catalog_*.json,
-                    *_hdmap_*.json, *_combined_*.json, catalog_lineage.json, *.csv
+  Metadata/  reflections.json, tth.tiff, gui_state.json, xrf_elements.json
+             <scan>/grid_mapping_NxN[_<variant>].h5, reflections.json, reflection_sum.npz, *_xrf*.npz
+  Labels/    <scan>/*_peaks_*.h5, *_shapes_*.h5, *_hdmap_*.h5,
+                    *_combined_*.h5, catalog_lineage.json, *.csv
   Figures/   PNG exports
   CVEvolve/  optimizer sessions + optional Hutch databases
   Study/     multi-scan rocking-study outputs (aggregate → track → rocking → predict → combined-device, RSM, qspace/)
@@ -84,17 +84,17 @@ Every builder appends `tag = f"_{variant}" if variant else ""`:
 
 | method | produces |
 |---|---|
-| `grid_mapping(bin_size, scan, variant)` | `Metadata/<scan>/grid_mapping_NxN[_variant].json` |
+| `grid_mapping(bin_size, scan, variant)` | `Metadata/<scan>/grid_mapping_NxN[_variant].h5` |
 | `binned_h5(bin_size, scan, variant)` | `Binned/<scan>/xrd_NxN_bins[_variant].h5` |
-| `peaks_json(algo, bin_size, scan, variant)` | `Labels/<scan>/<algo>_peaks_NxN[_variant].json` |
-| `shapes_json(algo, bin_size, scan, variant)` | `Labels/<scan>/<algo>_shapes_NxN[_variant].json` |
-| `hd_map_json(algo, bin_size, scan, variant)` | `Labels/<scan>/<algo>_hdmap_NxN[_variant].json` |
+| `peaks_json(algo, bin_size, scan, variant)` | `Labels/<scan>/<algo>_peaks_NxN[_variant].h5` |
+| `shapes_json(algo, bin_size, scan, variant)` | `Labels/<scan>/<algo>_shapes_NxN[_variant].h5` |
+| `hd_map_json(algo, bin_size, scan, variant)` | `Labels/<scan>/<algo>_hdmap_NxN[_variant].h5` |
 | `xrf_product(scan)` | `Metadata/<scan>/<scan>_xrf.npz` |
 
-**Variants seen in the wild** (the `variant`/`tag` string): `faithful`,
-`faithful_native`, `rawgrid`, `territory`, `coord`, `perrowOffset151x235`,
-`preHybrid156x221`. They flow uniformly through grid-mapping → binned-h5 →
-peaks → shapes so a deskew experiment stays self-consistent across stages.
+Current grid methods are `positions_xy`, `faithful`, `faithful_native`, and
+`commanded`; `territory` identifies irregular physical cells. Variant tags flow
+uniformly through grid mapping → binned HDF5 → peaks → shapes so an experiment
+stays self-consistent across stages.
 
 Resolved inputs: `raw_scan_dir()`, `xrd_frames_dir()` (`…/XRD`),
 `socketserver_dir()` (`…/SOCKETSERVER`, real positions), `me7_dir()` (XRF),
@@ -114,24 +114,25 @@ raw HDF5 frames  ──scan-detect──▶  Raw/scans.json
        │
  (SOCKETSERVER)  ──create-positions──▶  positions CSV (real X,Y per frame)
        │
-       ├── grid ─────────────▶  Metadata/<scan>/grid_mapping_NxN.json   (frame → bin)
-       │        territory-grid ▶  grid_mapping_1x1_territory.json         (frame → territory)
+       ├── grid ─────────────▶  Metadata/<scan>/grid_mapping_NxN.h5   (frame → bin)
+       │        territory-grid ▶  grid_mapping_1x1_territory.h5         (frame → territory)
        │
        ├── bin ──────────────▶  Binned/<scan>/xrd_NxN_bins.h5           (one summed image per bin)
        │        reflection-sum ▶ Metadata/<scan>/reflection_sum.npz      (grand sum, for 2θ histogram)
        │
-       ├── peaks  (Phase 1) ─▶  Labels/<scan>/<algo>_peaks_NxN.json     (peaks_by_bin)
+       ├── peaks  (Phase 1) ─▶  Labels/<scan>/<algo>_peaks_NxN.h5     (peaks_by_bin)
        │
-       └── shapes (Phase 2/3)▶  Labels/<scan>/<algo>_shapes_NxN.json    (kept / filtered features)
+       └── shapes (Phase 2/3)▶  Labels/<scan>/<algo>_shapes_NxN.h5    (kept / filtered features)
                     │
-                    ├──▶ feature_catalog_*.json  (curated feature lists; catalogs.py)
-                    │
+                     │    features are shapes `kept` (or combined `features`)
+                     │
+
        ┌────────────┴───────── downstream views ─────────────────────────┐
        │                        │                          │              │
    DEVICE VIEW            HD DEVICE VIEW            TERRITORIAL VIEW   ROCKING STUDY
    combined / aggregate   hd-device-map            territory-build    aggregate→track→
-   device_map.csv         *_hdmap_NxN.json         territory_shapes   rocking→predict→
-   *_combined_NxN.json                             + scan-table       combined-device (Study/)
+   device_map.csv         *_hdmap_NxN.h5         territory_shapes   rocking→predict→
+   *_combined_NxN.h5                             + scan-table       combined-device (Study/)
 ```
 
 Canonical order (per scan): `init → scan-detect → link → grid → bin → peaks →
@@ -139,9 +140,9 @@ shapes`. `xrd-app run-pipeline` runs peaks+shapes back to back; `xrd-app
 make-bins` runs grid+bin; `xrd-app batch` runs grid→bin→peaks→shapes over many
 scans; `xrd-app territory-build` runs the whole skew-free branch.
 
-Provenance travels **inside** each result JSON as a `lineage` block
-(`core/lineage.py`), and for plain-list files in the per-scan sidecar
-`catalog_lineage.json` (`core/catalogs.py`). See §8.
+Provenance travels **inside** each result HDF5 as a `lineage` block
+(`core/lineage.py`) and is read without loading numerical payloads. The per-scan
+`catalog_lineage.json` sidecar remains for non-numerical/manual records. See §8.
 
 ---
 
@@ -200,9 +201,9 @@ are reconstructed, not measured.
 `io.generate_grid_mapping(xrd_dir, pos_csv, bin_size, scan_number, output, ...)`
 is the writer. It (a) builds a fine per-frame grid from positions/layout, then
 (b) groups `bin_size × bin_size` fine cells into bins
-(`io.build_bin_mapping`), and writes JSON.
+(`io.build_bin_mapping`), and writes HDF5. Loaded mappings expose this dictionary:
 
-**`grid_mapping_NxN[_variant].json` structure:**
+**`grid_mapping_NxN[_variant].h5` logical structure:**
 ```jsonc
 {
   "bin_size":         3,
@@ -224,20 +225,17 @@ The two-level indirection is the heart of the app: **bin key → global frame
 index (`bins`) → `[file, frame]` (`frame_map`) → `xrd_files[file]`.** Everything
 that needs raw pixels for a bin walks this chain.
 
-**`coordinate_source` values** (set inside `generate_grid_mapping`, and mapped to
-a deskew method by `io.deskew_method_for_source`):
-- `file_per_row` — real positions on a clean one-file-per-row raster: rows = file
-  index, cols = within-file commanded rank oriented by real (X,Y). Default.
-- `positions_xy` — turn-counted snap of **both** axes to true (X,Y); for
-  irregular scans or auto-selected at `bin_size==1`.
-- `positions_faithful` / `positions_faithful_native` —
-  `io.assign_grid_coordinate_faithful(column_mode="square"|"native")`: rows =
-  exact file index, cols snapped to true fast-axis position (`square` = ~square
-  pixels for viewing; `native` = frames-per-row count for detection/recall).
-- `serpentine` — legacy X-only turn-counting (`--rawgrid`, or CSV has no
-  `Y_Position`).
-- `synthetic` — regular boustrophedon raster from `n_cols` (last resort, no
-  positions).
+**Current `coordinate_source` values** (set inside `generate_grid_mapping`, and
+mapped to a grid method by `io.deskew_method_for_source`):
+- `positions_xy` — snap both measured axes without clipping; default at 1×1 and
+  suitable for irregular scans that still need a rectangular grid.
+- `positions_faithful` / `positions_faithful_native` — exact file-index rows and
+  measured fast-axis columns, using an approximately square display lattice or
+  native frame density; selected by `faithful` / `faithful_native`.
+- `file_per_row` — file-index rows and commanded within-file rank; selected by
+  `commanded` when backlash makes encoder columns misleading.
+- `territory_xy` — irregular true-position cells with physical adjacency, built
+  by `territory-grid` rather than `grid`.
 
 Supporting builders in `io.py`: `assign_grid_from_positions`,
 `assign_grid_coordinate_faithful`, `build_scan_grid` (serpentine turn-counting),
@@ -275,8 +273,9 @@ Reading bin images (built h5 *or* raw frames, transparently):
 ## 6. Reflections & the grand-sum image
 
 ### Reflections (`core/reflections.py`)
-The reflection bands define where peaks are expected. Edited as JSON, compiled
-to a `.py` the pipeline imports.
+The reflection bands define where peaks are expected. They are stored and loaded
+from `reflections.json`; `core/reflections.py` is the source module implementing
+that contract and the bundled defaults.
 
 **`reflections.json`** — a plain list:
 ```json
@@ -292,12 +291,11 @@ to a `.py` the pipeline imports.
 | (111) | 13.00831 | | 21.30 | 21.29655 |
 | (002) | 15.01266 | | 22.60 / 26.16 | 22.59817 / 26.16205 |
 
-- `reflections.read_json` / `write_json` / `generate_py` / `save`. The generated
-  `reflections.py` exposes `degs`, `deg_labels`, `widths`;
+- `reflections.read_json` / `write_json` / `save` manage the file;
   `io.load_reflections(path)` returns `(degs, deg_labels)`.
 - **Resolution order** (in `DataManager`): per-scan selection →
-  `data_sources.reflections` → `Metadata/<scan>/reflections.py` → project
-  `Metadata/reflections.py` → bundled asset. Re-tuned per scan (offset/scale drift).
+  `data_sources.reflections` → `Metadata/<scan>/reflections.json` → project
+  `Metadata/reflections.json` → bundled JSON asset. Re-tuned per scan (offset/scale drift).
 
 ### Grand-sum image — `xrd-app reflection-sum` (`core/reflection_sum.py`)
 `reflection_sum.compute_and_save(dm, scan)` sums **every** bin (= every frame)
@@ -331,7 +329,7 @@ band. Peaks are sorted by SNR, de-duplicated within 15 px, capped at
  "cleaned_intensity":2204.7}   // cleaned_intensity = max in ±3px of the bg-subtracted image
 ```
 
-**`<algo>_peaks_NxN.json`:**
+**`<algo>_peaks_NxN.h5`:**
 ```jsonc
 { "bin_size":3, "detector":"5x5_tophat_band_adaptive_snr", "snr":4.0,
   "n_peaks":7966, "n_bins_with_peaks":2747,
@@ -370,7 +368,7 @@ bin_size, link_tolerance=5, shape_path=…)` loads the shape module
   "feature_id":1 }     // 1-based, assigned to kept only, after sorting
 ```
 
-**`<algo>_shapes_NxN.json`:**
+**`<algo>_shapes_NxN.h5`:**
 ```jsonc
 { "bin_size":3, "link_tolerance":5, "n_kept":185, "n_filtered":844,
   "kept":[feature, …], "filtered":[feature, …],
@@ -384,7 +382,7 @@ bin_size, link_tolerance=5, shape_path=…)` loads the shape module
 ### Combined per-frame  (`xrd-app run-combined`)
 `processing.run_combined(...)` runs a `CombinedAlgorithms/*.py` detector that does
 peak+shape in **one per-frame pass** (no separate binning), writing
-`Labels/<scan>/<algo>_combined_NxN.json`:
+`Labels/<scan>/<algo>_combined_NxN.h5`:
 ```jsonc
 { "algorithm":"…", "bin_size":1, "n_features":N,
   "by_bin": { "0_0":{"(111)":[[374,752]], "(012)":[[191,194]]}, … },   // {bin:{reflection:[[x,y]]}}
@@ -407,18 +405,15 @@ from the segment **after** the kind keyword so an algo name like
 
 | kind | filename | payload |
 |---|---|---|
-| peaks | `<algo>_peaks_NxN[_tag].json` | dict, `peaks_by_bin` + `lineage` |
-| shapes | `<algo>_shapes_NxN[_tag].json` | dict, `kept`/`filtered` + `lineage` |
-| combined | `<algo>_combined_NxN[_tag].json` | dict, `features` |
-| feature | `feature_catalog_NxN[_tag].json` | **plain list** of feature dicts (no in-file lineage) |
+| peaks | `<algo>_peaks_NxN[_tag].h5` | `peaks_by_bin` + `lineage` |
+| shapes | `<algo>_shapes_NxN[_tag].h5` | `kept`/`filtered` + `lineage` |
+| combined | `<algo>_combined_NxN[_tag].h5` | `features` + `lineage` |
 
-A **feature catalog** is a curated/exported plain list (e.g. the `_ONLY`,
-`_NOVEL` files) — the same feature records, but a bare JSON array. Because a
-plain list can't carry a `lineage` block, its provenance lives in the sidecar
-manifest.
+There is no separate feature-catalog format. Features live under shapes `kept`
+or combined `features`.
 
 Key functions: `list_catalogs(dir, kind, bin_size)`, `available_bins(dir)`,
-`feature_sources(dir, bin_size)` (shapes+combined+feature),
+`feature_sources(dir, bin_size)` (shapes+combined),
 `default_feature_source(dir, bin_size)`, `load_features_any(path)` →
 `(kept, filtered)` **regardless of on-disk kind** (this is the universal reader
 every downstream view uses), `append_features(path, feats)` (assigns
@@ -427,7 +422,7 @@ every downstream view uses), `append_features(path, feats)` (assigns
 `lineage_key=(kind,algo,tag)`), `best_grid_mapping(...)`.
 
 ### Lineage — provenance
-- **In-file** (`core/lineage.py`): every peaks/shapes/combined JSON carries a
+- **In-file** (`core/lineage.py`): every peaks/shapes/combined HDF5 carries a
   `lineage` dict. `peak_lineage` → `{stage:"peaks", scan, bin_size, created,
   app_version, peak_algorithm, detector_file, snr}`; `shape_lineage` adds
   `shape_algorithm`, `link_tolerance`, `peak_source_file`, and nests the upstream
@@ -446,15 +441,14 @@ every downstream view uses), `append_features(path, feats)` (assigns
 Bundled with the package (not per-project); each dir has a `catalog.json`.
 
 - Discovery/loading: `io.load_module(path)` dynamically imports a `.py` and puts
-  `PeakAlgorithms/`, `CombinedAlgorithms/`, `NoiseReduction/` on `sys.path` so
-  algorithms can `from noise_reduction_algorithms import …`. `DataManager`
-  reads each `catalog.json`: `list_detectors(bin_size)`, `best_detector(bin_size)`
+  `PeakAlgorithms/` and `CombinedAlgorithms/` on `sys.path` for sibling/base
+  imports. `DataManager` reads each `catalog.json`: `list_detectors(bin_size)`, `best_detector(bin_size)`
   (highest `holdout_f1`, excludes per-frame), `detector_script(override,bin_size)`,
   and the `list_/resolve_/best_` equivalents for shapes and combined.
   `xrd-app detectors [--kind peak|shape|combined]` lists them.
 - Noise models (`core/algorithms.py`): `gaussian`, `split_gaussian`,
   `skewed_gaussian`, `fourier_lowpass` background models + `reduce_noise(...)` →
-  `(cleaned, background, fit_info)`. Mirror of `NoiseReduction/`.
+  `(cleaned, background, fit_info)`.
 - Freezing a tuned detector — `xrd-app save-algorithm` (`core/save_algorithm.py`):
   `save_algorithm(base, sensitivity, bin_size, noise_reduction, …, kind, source)`
   writes a runnable `PeakAlgorithms/<stem>.py` (or `<stem>/detector.py` for
@@ -464,7 +458,11 @@ Bundled with the package (not per-project); each dir has a `catalog.json`.
 
 Holdout scoring (`build-holdout`, `core/holdout.py`) and CVEvolve
 (`cvevolve-init`/`run-cvevolve`, `core/cvevolve_setup.py`) sit on top of this
-library; CVEvolve optimizes **mean F2** (recall-weighted), not F1.
+library; CVEvolve optimizes **mean F2** (recall-weighted), not F1. Completed
+sessions export `reports/best_candidate.py`; `register-cvevolve` validates that
+module's production detector API, copies it into the project-owned
+`Algorithms/PeakAlgorithms/<name>/detector.py`, and updates `catalog.json`. The
+GUI runs this registration automatically after CVEvolve exits successfully.
 
 ---
 
@@ -488,7 +486,7 @@ is optimized against.
   1×1 bridge must map frame→tid through the grid `bins[]`.)*
 
 `xrd-app territory-grid` → `territory.build_territory_mapping(xrd_dir, pos_csv,
-target_size, scan_number)` → `Metadata/<scan>/grid_mapping_1x1_territory.json`:
+target_size, scan_number)` → `Metadata/<scan>/grid_mapping_1x1_territory.h5`:
 ```jsonc
 { "bin_size":1, "coordinate_source":"territory_xy", "positions_real":true,
   "target_size":9, "step":…, "n_rows":179,"n_cols":188,"n_bin_rows":179,"n_bin_cols":188,
@@ -503,7 +501,7 @@ target_size, scan_number)` → `Metadata/<scan>/grid_mapping_1x1_territory.json`
 `xrd-app territory-build` chains the whole branch:
 `territory-grid → bin --variant territory → peaks --variant territory → shapes
 --algorithm territory`. The `shapes` step links across `territories[*].neighbors`
-and writes **`territory_shapes_1x1_territory.json`** (same `kept`/`filtered`
+and writes **`territory_shapes_1x1_territory.h5`** (same `kept`/`filtered`
 schema as §7, but `center_row`/`center_col` are real fractional positions and
 `spatial_extent` holds `"<tid>_0"` keys).
 
@@ -511,7 +509,7 @@ schema as §7, but `center_row`/`center_col` are real fractional positions and
 frame_y)` keeps **one frame per cell** but replaces grid adjacency with Delaunay
 adjacency (`coordinate_source="coord_xy"`), so linking is by true position, not
 by skewed grid keys. The `shapes` command writes these as
-`…_shapes_1x1_coord.json` / `territory_shapes_1x1_coord.json`.
+`…_shapes_1x1_coord.h5` / `territory_shapes_1x1_coord.h5`.
 
 **Per-scan territorial summary — `xrd-app scan-table`** (`core/scan_table.py`):
 one row per scan (or per reflection) for a chosen bin/catalog: feature count,
@@ -528,7 +526,7 @@ Preferred χ, χ ± range, Fill %, Total`. Writes `Study/scan_summary.csv`.
 
 Two related artifacts:
 
-1. **Per-scan combined map** — `xrd-app run-combined` → `<algo>_combined_NxN.json`
+1. **Per-scan combined map** — `xrd-app run-combined` → `<algo>_combined_NxN.h5`
    (§7). `by_bin` gives `{reflection:[[x,y]]}` per spatial bin — the direct
    device layer for one scan.
 2. **Aggregated tidy tables** — `xrd-app aggregate` (`core/aggregate.py`) walks
@@ -559,11 +557,11 @@ feature's **detector peak**.
 
 `xrd-app hd-device-map` →
 `hd_map.sample_hd_intensity(features, source, bin_size, win=4, cell_xy=…)` over a
-source N×N shapes/feature catalog, sampling a 1×1 `io.BinImageSource`. It writes
-`Labels/<scan>/<algo>_hdmap_NxN.json`:
+source N×N shapes or combined catalog, sampling a 1×1 `io.BinImageSource`. It writes
+`Labels/<scan>/<algo>_hdmap_NxN.h5`:
 ```jsonc
 { "kind":"hd_map", "scan":"Scan_0203", "bin_size":3, "win":4,
-  "source_catalog":"gaussian_shapes_3x3.json",
+  "source_catalog":"gaussian_shapes_3x3.h5",
   "n_bin_rows_1x1":…, "n_bin_cols_1x1":…, "positions_real":true,
   "features":[ { "feature_id":1, "reflection":"(111)", "chi_deg":-153.9, "ref_tth":13.00831,
                  "detector_x":464, "detector_y":325,
@@ -591,7 +589,7 @@ steps below. `core/studies.py` discovers/registers `Study/` dirs
 ### a) tracks — `xrd-app track` (`core/tracking.py`)
 `tracking.build_tracks(features, match_tol=2.0, min_theta=2)` groups features
 across θ (same reflection + spatial proximity within `match_tol` bins, greedy
-strongest-first) — the θ-axis analog of spatial Union-Find. → `Study/tracks.json`:
+strongest-first) — the θ-axis analog of spatial Union-Find. → `Study/tracks.h5`:
 ```jsonc
 { "bin_size":"3","match_tol":"2.0","min_theta":"2","n_tracks":705,
   "tracks":[ { "track_id":0,"reflection":"(001)","ref_tth":7.51,
@@ -650,7 +648,7 @@ tracks)` fuses the per-θ `device_map` rows into one spatial canvas. →
   theta_at_max/is_recurrent`).
 
 `intensity_key` ∈ `integrated` (default) / `intensity` selects the driving
-column. This is distinct from the per-scan `*_combined_NxN.json` (§7/§11) — that
+column. This is distinct from the per-scan `*_combined_NxN.h5` (§7/§11) — that
 is one scan's peak+shape map; this is all θ fused.
 
 ---
@@ -698,20 +696,20 @@ integrates per-element ROIs. `save_npz(...)` → `Metadata/<scan>/<scan>_xrf.npz
 | `scan-detect` | `io.discover_scans` / `validate_scan` | `Raw/scans.json` |
 | `create-positions` | `positions.build_positions_csv[_from_h5]` | positions CSV |
 | `convert-poni` | `geometry.convert_poni_file` | `Metadata/tth.tiff` |
-| `grid` | `io.generate_grid_mapping` | `Metadata/<scan>/grid_mapping_NxN[_v].json` |
+| `grid` | `io.generate_grid_mapping` | `Metadata/<scan>/grid_mapping_NxN[_v].h5` |
 | `bin` / `make-bins` | `io.build_bins` (+ `generate_grid_mapping`) | `Binned/<scan>/xrd_NxN_bins[_v].h5` |
 | `reflection-sum` | `reflection_sum.compute_and_save` | `Metadata/<scan>/reflection_sum.npz` |
-| `peaks` | `processing.run_peaks` | `Labels/<scan>/<algo>_peaks_NxN[_v].json` |
-| `shapes` | `processing.run_shapes` | `Labels/<scan>/<algo>_shapes_NxN[_v].json` |
-| `run-combined` | `processing.run_combined` | `Labels/<scan>/<algo>_combined_NxN.json` |
+| `peaks` | `processing.run_peaks` | `Labels/<scan>/<algo>_peaks_NxN[_v].h5` |
+| `shapes` | `processing.run_shapes` | `Labels/<scan>/<algo>_shapes_NxN[_v].h5` |
+| `run-combined` | `processing.run_combined` | `Labels/<scan>/<algo>_combined_NxN.h5` |
 | `run-pipeline` | `run_peaks` + `run_shapes` | peaks + shapes |
 | `batch` | grid→bin→peaks→shapes | all of the above, many scans |
-| `territory-grid` | `territory.build_territory_mapping` | `grid_mapping_1x1_territory.json` |
-| `territory-build` | territory-grid→bin→peaks→shapes | `territory_shapes_1x1_territory.json` |
-| `hd-device-map` | `hd_map.sample_hd_intensity` | `Labels/<scan>/<algo>_hdmap_NxN.json` |
+| `territory-grid` | `territory.build_territory_mapping` | `grid_mapping_1x1_territory.h5` |
+| `territory-build` | territory-grid→bin→peaks→shapes | `territory_shapes_1x1_territory.h5` |
+| `hd-device-map` | `hd_map.sample_hd_intensity` | `Labels/<scan>/<algo>_hdmap_NxN.h5` |
 | `scan-table` | `scan_table.scan_table_rows` | `Study/scan_summary.csv` |
 | `aggregate` | `aggregate.aggregate` | `Study/features.csv`, `device_map.csv`, `study.db` |
-| `track` | `tracking.build_tracks` | `Study/tracks.json` + `.csv` |
+| `track` | `tracking.build_tracks` | `Study/tracks.h5` + `.csv` |
 | `rocking` | `rocking.fit_tracks` | `Study/rocking_curves.csv` |
 | `predict` | `prediction.build_report` | `Study/prediction_report.{md,json}` |
 | `combined-device` | `combined_device.build_combined` | `Study/combined_device.npz` + summary |

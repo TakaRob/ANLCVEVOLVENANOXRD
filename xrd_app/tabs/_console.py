@@ -58,13 +58,14 @@ class JobConsole(QWidget):
     def is_running(self) -> bool:
         return self._proc is not None and self._proc.state() != QProcess.NotRunning
 
-    def run(self, args, cwd=None, on_finished=None, header=None, env=None):
+    def run(self, args, cwd=None, on_finished=None, header=None, env=None, clear=True):
         """Run ``[python, -m, xrd_app.cli, *args]`` (args is the CLI arg list).
 
         ``on_finished(exit_code)`` is invoked once when the process exits (e.g.
         to refresh a status label after the job completes). ``header`` is an
         optional note printed above the command (it survives the log clear).
         ``env`` adds transient environment values without displaying them.
+        Set ``clear=False`` to append a follow-up command to the current log.
         """
         if self.is_running():
             self._append("\n[a job is already running — cancel it first]\n")
@@ -72,7 +73,8 @@ class JobConsole(QWidget):
         self._queue = None
         self._on_finished_cb = on_finished
         self.progress.setValue(0)
-        self.log.clear()
+        if clear:
+            self.log.clear()
         if header:
             self._append(header if header.endswith("\n") else header + "\n")
         self._start(args, cwd, env=env)

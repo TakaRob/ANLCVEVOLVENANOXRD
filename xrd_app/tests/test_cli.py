@@ -6,6 +6,7 @@ from click.testing import CliRunner
 
 from xrd_app.cli import (_same_grid_lattice, bin, grid, main, make_bins, peaks,
                          roi_shapes, run_pipeline)
+from xrd_app.core import catalogs, io
 
 
 @pytest.mark.parametrize("command", sorted(main.commands))
@@ -13,6 +14,38 @@ def test_every_command_help_succeeds(command):
     result = CliRunner().invoke(main, [command, "--help"])
 
     assert result.exit_code == 0, result.output
+
+
+def test_run_cvevolve_uses_default_prompt_and_non_tty_container(monkeypatch, tmp_path):
+    config_dir = tmp_path / "external session"
+    config_dir.mkdir()
+    config = config_dir / "config.yaml"
+    prompt = config_dir / "prompt.md"
+    holdout_prompt = config_dir / "holdout_test_prompt.md"
+    data_dir = tmp_path / "external data"
+    config.write_text(
+        f"workspace:\n  root_dir: {config_dir / 'sessions'}\n"
+        f"  data_dir: {data_dir}\n  holdout_data_dir: {data_dir}\n"
+    )
+    prompt.write_text("task")
+    holdout_prompt.write_text("holdout task")
+    calls = []
+    monkeypatch.setattr("xrd_app.cli.shutil.which", lambda engine: f"/usr/bin/{engine}")
+    monkeypatch.setattr("subprocess.call", lambda command: calls.append(command) or 0)
+
+    result = CliRunner().invoke(main, [
+        "run-cvevolve", "--config", str(config), "--engine", "podman",
+        "--root", str(tmp_path / "project"),
+    ])
+
+    assert result.exit_code == 0, result.output
+    command = calls[0]
+    assert "-i" in command
+    assert "-it" not in command
+    assert ["--prompt", str(prompt.resolve())] == command[-4:-2]
+    assert command[-2:] == ["--holdout-test-prompt", str(holdout_prompt.resolve())]
+    assert f"{config_dir.resolve()}:{config_dir.resolve()}" in command
+    assert f"{data_dir.resolve()}:{data_dir.resolve()}" in command
 
 
 def test_help_lists_workflow_and_defaults():
@@ -94,7 +127,7 @@ def test_lineage_missing_explicit_target_fails(tmp_path):
     )
 
     assert result.exit_code == 1
-    assert "Result JSON not found" in result.stderr
+    assert "Result catalog not found" in result.stderr
 
 
 def _project_config(tmp_path):
@@ -108,11 +141,11 @@ def _project_config(tmp_path):
 
 def test_shapes_rejects_wrong_bin_from_peaks(tmp_path):
     _project_config(tmp_path)
-    peaks_path = tmp_path / "foreign_peaks.json"
-    peaks_path.write_text(json.dumps({
+    peaks_path = tmp_path / "foreign_peaks.h5"
+    catalogs.save_result(peaks_path, {
         "lineage": {"stage": "peaks", "scan": "Scan_0203", "bin_size": 3},
         "peaks_by_bin": {},
-    }))
+    })
 
     result = CliRunner().invoke(main, [
         "shapes", "--root", str(tmp_path), "--scan", "203", "--bin-size", "5",
@@ -123,14 +156,16 @@ def test_shapes_rejects_wrong_bin_from_peaks(tmp_path):
     assert "bin 3x3 != 5x5" in result.stderr
 
 
-def test_fast_roi_shapes_missing_h5_uses_fallback_without_building(monkeypatch, tmp_path):
+@pytest.mark.parametrize("fast_args", [[], ["--fast"]])
+def test_roi_shapes_missing_h5_uses_fallback_without_building(
+        monkeypatch, tmp_path, fast_args):
     _project_config(tmp_path)
     metadata = tmp_path / "Metadata" / "Scan_0203"
     metadata.mkdir(parents=True)
-    (metadata / "grid_mapping_3x3.json").write_text(json.dumps({
+    io.save_grid_mapping(metadata / "grid_mapping_3x3.h5", {
         "bin_size": 3, "n_bin_rows": 1, "n_bin_cols": 1,
-        "bins": {"0_0": [0]},
-    }))
+        "xrd_files": [], "frame_map": [], "bins": {"0_0": [0]},
+    })
     (metadata / "tth.tiff").touch()
 
     class Source:
@@ -151,7 +186,7 @@ def test_fast_roi_shapes_missing_h5_uses_fallback_without_building(monkeypatch, 
 
     result = CliRunner().invoke(main, [
         "roi-shapes", "--root", str(tmp_path), "--scan", "203", "--bin-size", "3",
-        "--roi", "0,0,2,2", "--name", "preview", "--fast",
+        "--roi", "0,0,2,2", "--name", "preview", *fast_args,
         "--preview-output", str(tmp_path / "preview.json"),
     ])
 
@@ -163,10 +198,10 @@ def test_roi_shapes_passes_frame_normalization(monkeypatch, tmp_path):
     _project_config(tmp_path)
     metadata = tmp_path / "Metadata" / "Scan_0203"
     metadata.mkdir(parents=True)
-    (metadata / "grid_mapping_3x3.json").write_text(json.dumps({
+    io.save_grid_mapping(metadata / "grid_mapping_3x3.h5", {
         "bin_size": 3, "n_bin_rows": 1, "n_bin_cols": 1,
-        "bins": {"0_0": [0, 1]},
-    }))
+        "xrd_files": [], "frame_map": [], "bins": {"0_0": [0, 1]},
+    })
     (metadata / "tth.tiff").touch()
 
     class Source:

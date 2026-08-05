@@ -35,7 +35,7 @@ from PyQt5.QtWidgets import (
 )
 
 from ..config import DataManager
-from ..core import scan_table as st
+from ..core import catalogs, scan_table as st
 from . import palette
 from .lifecycle import start_process, stop_process
 
@@ -54,8 +54,8 @@ def _load_territory_mapping(dm: DataManager, scan, bin_size) -> dict | None:
     gm_path = dm.grid_mapping(bin_size=1, variant="territory", scan=scan)
     if not Path(gm_path).exists():
         return None
-    with open(gm_path) as f:
-        gm = json.load(f)
+    from ..core import io
+    gm = io.load_grid_mapping(gm_path)
     return gm if gm.get("territories") else None
 
 
@@ -66,14 +66,13 @@ def _load_shapes(dm: DataManager, scan, catalog=None) -> list:
     else:
         path = dm.shapes_json("territory", 1, scan, variant="territory")
         if not Path(path).exists():
-            # Fall back to any territorial shapes file in the labels dir.
             ldir = dm.labels_dir(scan)
-            hits = sorted(ldir.glob("*_shapes*territory*.json")) if ldir.is_dir() else []
+            hits = [candidate for candidate in catalogs.list_catalogs(ldir, "shapes", 1)
+                    if catalogs.catalog_variant(candidate, ldir) == "territory"]
             if not hits:
                 return []
             path = hits[-1]
-    with open(path) as f:
-        data = json.load(f)
+    data = catalogs.load_result(path) or {}
     return data.get("kept", [])
 
 

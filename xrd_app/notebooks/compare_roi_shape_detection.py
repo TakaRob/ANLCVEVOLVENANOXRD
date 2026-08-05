@@ -48,7 +48,7 @@ PROJECT = REPO_ROOT / "TakaTest" / "TakaProject"
 SCAN = "Scan_0203"
 BIN_SIZE = 3
 PEAK_ALGORITHM = "5x5_tophat_band_adaptive_snr"
-TERRITORY_SHAPES = "territory_shapes_1x1_territory.json"
+TERRITORY_SHAPES = "territory_shapes_1x1_territory.h5"
 
 DETECTOR_MATCH_PX = 8.0
 MIN_BINS = 12
@@ -69,11 +69,11 @@ LABELS = PROJECT / "Labels" / SCAN
 METADATA = PROJECT / "Metadata" / SCAN
 BINNED = PROJECT / "Binned" / SCAN
 PATHS = {
-    "shapes3": LABELS / f"gaussian_shapes_{BIN_SIZE}x{BIN_SIZE}.json",
-    "peaks3": LABELS / f"{PEAK_ALGORITHM}_peaks_{BIN_SIZE}x{BIN_SIZE}.json",
-    "grid3": METADATA / f"grid_mapping_{BIN_SIZE}x{BIN_SIZE}.json",
+    "shapes3": LABELS / f"gaussian_shapes_{BIN_SIZE}x{BIN_SIZE}.h5",
+    "peaks3": LABELS / f"{PEAK_ALGORITHM}_peaks_{BIN_SIZE}x{BIN_SIZE}.h5",
+    "grid3": METADATA / f"grid_mapping_{BIN_SIZE}x{BIN_SIZE}.h5",
     "shapes_t": LABELS / TERRITORY_SHAPES,
-    "grid_t": METADATA / "grid_mapping_1x1_territory.json",
+    "grid_t": METADATA / "grid_mapping_1x1_territory.h5",
     "h5": BINNED / f"xrd_{BIN_SIZE}x{BIN_SIZE}_bins.h5",
 }
 for name, path in PATHS.items():
@@ -81,16 +81,13 @@ for name, path in PATHS.items():
         raise FileNotFoundError(f"Missing {name}: {path}")
 
 
-def load_json(path):
-    with path.open() as stream:
-        return json.load(stream)
+from xrd_app.core import io, result_store
 
-
-shapes3 = load_json(PATHS["shapes3"])
-peaks3 = load_json(PATHS["peaks3"])
-grid3 = load_json(PATHS["grid3"])
-shapes_t = load_json(PATHS["shapes_t"])
-grid_t = load_json(PATHS["grid_t"])
+shapes3 = result_store.load(PATHS["shapes3"])
+peaks3 = result_store.load(PATHS["peaks3"])
+grid3 = io.load_grid_mapping(PATHS["grid3"])
+shapes_t = result_store.load(PATHS["shapes_t"])
+grid_t = io.load_grid_mapping(PATHS["grid_t"])
 print(f"3x3 shapes: {shapes3['n_kept']}; territorial shapes: {shapes_t['n_kept']}")
 print(f"Detector: {peaks3['detector']}; detection SNR: {peaks3['snr']}")
 

@@ -6,24 +6,9 @@ Full pipeline for 1x1 (un-binned) XRD data:
 2. Link detections at matching detector positions across neighboring spatial bins
 3. Fit Voigt profile to intensity vs. spatial distance; keep features that fit well
 4. Output spatially-validated peaks only
-
-Usage:
-    python baseline.py \
-        --center-bin 30_50 \
-        --bins-h5 /home/takaji/xrd_1x1_bins.h5 \
-        --two-theta tth.tiff \
-        --reflections reflections.py \
-        --grid-mapping grid_mapping.json \
-        --output detections.csv \
-        --spatial-radius 5
 """
 
-import argparse
-import csv
-import importlib.util
-import json
 from collections import defaultdict
-from pathlib import Path
 
 import h5py
 import numpy as np
@@ -470,63 +455,3 @@ def compute_f1(detections, labels, tolerance=40):
     if prec + rec == 0:
         return 0.0
     return 2 * prec * rec / (prec + rec)
-
-
-def main():
-    parser = argparse.ArgumentParser(
-        description="Baseline: per-frame detection + spatial linking + Voigt filtering")
-    parser.add_argument("--center-bin", required=True, help="Center bin key, e.g. '30_50'")
-    parser.add_argument("--bins-h5", default=BINS_H5_DEFAULT)
-    parser.add_argument("--two-theta", default="tth.tiff")
-    parser.add_argument("--reflections", default="reflections.py")
-    parser.add_argument("--grid-mapping", default="grid_mapping.json")
-    parser.add_argument("--output", default="detections.csv")
-    parser.add_argument("--labels", default=None)
-    parser.add_argument("--spatial-radius", type=int, default=5)
-    parser.add_argument("--link-tolerance", type=float, default=5.0)
-    parser.add_argument("--min-feature-bins", type=int, default=2)
-    parser.add_argument("--downsample", type=int, default=1,
-                        help="Dev-mode pixel downsample factor (1 = full resolution)")
-    args = parser.parse_args()
-
-    spec = importlib.util.spec_from_file_location("reflections", args.reflections)
-    ref_mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(ref_mod)
-    degs = ref_mod.degs
-    deg_labels = ref_mod.deg_labels
-
-    import tifffile
-    tth_map = tifffile.imread(args.two_theta)
-
-    with open(args.grid_mapping) as f:
-        grid_mapping = json.load(f)
-
-    validated = run_full_pipeline(
-        args.center_bin, args.bins_h5, tth_map, degs, deg_labels,
-        grid_mapping,
-        spatial_radius=args.spatial_radius,
-        link_tolerance=args.link_tolerance,
-        min_feature_bins=args.min_feature_bins,
-        downsample=args.downsample,
-    )
-
-    with open(args.output, "w", newline="") as f:
-        writer = csv.writer(f)
-        writer.writerow(["reflection", "x", "y"])
-        for label, pts in validated.items():
-            for x, y in pts:
-                writer.writerow([label, x, y])
-
-    total = sum(len(pts) for pts in validated.values())
-    print(f"Detected {total} spatially-validated peaks at center bin {args.center_bin}")
-
-    if args.labels:
-        with open(args.labels) as f:
-            labels = json.load(f)
-        labels = {k: v for k, v in labels.items() if not k.startswith("__")}
-        f1 = compute_f1(validated, labels)
-        print(f"F1 score: {f1:.4f}")
-
-
-if __name__ == "__main__":
-    main()

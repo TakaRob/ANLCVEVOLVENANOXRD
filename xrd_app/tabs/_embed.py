@@ -1,4 +1,4 @@
-"""Helpers for embedding legacy QMainWindow GUIs as tab content."""
+"""Helpers for embedding packaged QMainWindow GUIs as tab content."""
 
 from __future__ import annotations
 
@@ -84,7 +84,7 @@ def is_territory_catalog(path) -> bool:
 def embed_window(win) -> QWidget:
     """Wrap a constructed QMainWindow in a container suitable for a tab.
 
-    A QMainWindow embeds fine as a child widget; all four legacy GUIs keep their
+    A QMainWindow embeds fine as a child widget; all four packaged GUIs keep their
     content in the central widget, so nothing is lost. We retain a reference on
     the container so the window is not garbage-collected.
     """
@@ -269,7 +269,7 @@ class LineageCatalogTab(QWidget):
     def _results_dir(self):
         try:
             return DataManager(self._project_root,
-                               scan=self._scan).results_dir(self._scan)
+                               scan=self._scan).labels_dir(self._scan)
         except Exception:
             return None
 
@@ -339,8 +339,8 @@ class LineageCatalogTab(QWidget):
         rd = self._results_dir()
         start = str(rd) if rd else (self._project_root or "")
         path, _ = QFileDialog.getOpenFileName(
-            self, "Select a feature catalog JSON", start,
-            "Catalog JSON (*_shapes_*.json *_combined_*.json feature_catalog_*.json *.json)")
+            self, "Select a feature catalog", start,
+            "HDF5 catalogs (*.h5)")
         if not path:   # cancelled → revert the combo to the current selection
             i = self._feat_combo.findData(self._feature)
             self._feat_combo.setCurrentIndex(max(0, i))

@@ -125,8 +125,8 @@ if RUN_PEAKS:
         snr=SNR_THRESHOLD,
         variant=VARIANT,
     )
-    # Save and register the peak catalog atomically.
-    io.atomic_write_json(peak_path, peaks)
+    # Save and register the typed peak catalog atomically.
+    catalogs.save_result(peak_path, peaks)
     catalogs.record_catalog(dm.labels_dir(), peak_path.name, peaks["lineage"])
 else:
     # Reject a peak catalog from another scan, bin size, or source variant.
@@ -136,8 +136,7 @@ else:
         expected_bin_size=1,
         expected_variant=VARIANT,
     )
-    with open(peak_path) as handle:
-        peaks = json.load(handle)
+    peaks = catalogs.load_result(peak_path)
 print(f"Peaks: {peaks.get('n_peaks', 0)} -> {peak_path}")
 
 # %% Run or load physical-neighbor shape linking
@@ -164,11 +163,11 @@ if RUN_SHAPES:
         bin_size=1,
         shape_algorithm=shape_name,
         link_tolerance=LINK_TOLERANCE,
-        peak_source=lineage.from_peaks_data(peaks, fallback_file=peak_path.name),
+        peak_source=lineage.from_peaks_data(peaks),
         peak_source_file=peak_path.name,
     )
-    # Save and register the territorial shape catalog atomically.
-    io.atomic_write_json(shape_path, shapes)
+    # Save and register the typed territorial shape catalog atomically.
+    catalogs.save_result(shape_path, shapes)
     catalogs.record_catalog(dm.labels_dir(), shape_path.name, shapes["lineage"])
 else:
     # Reject a shape catalog that does not match this territorial source.
@@ -178,8 +177,7 @@ else:
         expected_bin_size=1,
         expected_variant=VARIANT,
     )
-    with open(shape_path) as handle:
-        shapes = json.load(handle)
+    shapes = catalogs.load_result(shape_path)
 print(f"Shapes: {shapes.get('n_kept', len(shapes.get('kept', [])))} -> {shape_path}")
 
 # %% Reduce shape features to one value per territory

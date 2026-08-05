@@ -5,7 +5,7 @@ summed image / 2θ map on the left and the histogram on the right. Reflections
 are edited in an Excel-like table (Name, Bragg 2θ, Width); a "2θ reflections"
 checkbox loads the saved set into the table and overlays colored arcs on both
 the image and the histogram (matching the View/Label GUI). On Create the set is
-written (per-scan reflections.json + generated reflections.py) plus a PNG.
+written as per-scan reflections.json plus a PNG.
 """
 
 from __future__ import annotations
@@ -268,7 +268,7 @@ class ReflectionDialog(QDialog):
         brow.addWidget(self.default_cb)
         save_refl_btn = QPushButton("Save reflections")
         save_refl_btn.setToolTip(
-            "Write reflections.json + reflections.py (per scan, and — when "
+            "Write reflections.json (per scan, and — when "
             "'Set as project default' is on — the project default too)")
         save_refl_btn.clicked.connect(self._save_reflections)
         brow.addWidget(save_refl_btn)
@@ -938,7 +938,7 @@ class ReflectionDialog(QDialog):
         """Fill the table with a whole-detector set (clamped to the tth map when
         loaded); it's an ordinary set — the user Saves to apply it."""
         tth_map = self._tth if getattr(self, "_tth", None) is not None else None
-        self._fill_table(refl_io.whole_frame_reflections(tth_map))
+        self._fill_table(refl_io.whole_frame_reflections())
         self.status.setText(
             f"filled one unlimited-width reflection "
             f"('{refl_io.WHOLE_FRAME_LABEL}') — Save to apply")

@@ -138,10 +138,10 @@ def configure(project_root=".", bin_size=3, scan=None):
     global _DM, _BIN_SIZE, RESULTS_DIR, HOLDOUT_DIR, DETECTOR_PATH, H5_PATH
     _DM = DataManager(project_root, scan=scan)
     _BIN_SIZE = bin_size
-    RESULTS_DIR = _DM.results_dir()
-    HOLDOUT_DIR = _DM.holdout_dir
+    RESULTS_DIR = _DM.labels_dir()
+    HOLDOUT_DIR = _DM.metadata_dir
     DETECTOR_PATH = _DM.detector_script(bin_size=bin_size)
-    H5_PATH = _DM.bins_h5(bin_size)
+    H5_PATH = _DM.binned_h5(bin_size)
 
 
 def load_module(path):
@@ -173,8 +173,8 @@ def _fmt_num(v, prec=1):
 
 # ── Catalog discovery + selectable loaders ─────────────────────────
 # Two catalog kinds live in Labels/<scan>/ for a given bin size:
-#   Scan Catalog    = a peak set     "<algo>_peaks_<NxN>.json"   (Peak Finding)
-#   Feature Catalog = a shape output "<algo>_shapes_<NxN>.json"  (Shape Finding)
+#   Scan Catalog    = a peak set     "<algo>_peaks_<NxN>.h5"   (Peak Finding)
+#   Feature Catalog = a shape output "<algo>_shapes_<NxN>.h5"  (Shape Finding)
 # A shapes file records, in its lineage, the peaks file it was derived from.
 
 # Discovery + lineage delegate to core.catalogs (handles bin-in-middle names,
@@ -212,7 +212,7 @@ peaks_to_features = catalogs.peaks_to_features
 
 
 def load_features_from_peaks(path):
-    """(features, []) from a ``*_peaks_*.json`` rendered as point-features."""
+    """Return a peaks HDF5 catalog rendered as point features."""
     return catalogs.load_features_any(path)
 
 
@@ -287,7 +287,9 @@ class _HeatmapDragViewBox(pg.ViewBox):
         x0, y0, x1, y1 = p0.x(), p0.y(), p1.x(), p1.y()
         if ev.isStart():
             self._sel = QGraphicsRectItem()
-            self._sel.setPen(QPen(_qcolor("cyan"), 2, Qt.DotLine))
+            pen = QPen(_qcolor("cyan"), 1, Qt.DotLine)
+            pen.setCosmetic(True)
+            self._sel.setPen(pen)
             self._sel.setBrush(QBrush(_qcolor("cyan", 0.12)))
             self._sel.setZValue(9)
             self.addItem(self._sel)
@@ -500,7 +502,10 @@ class _RectItem:
         vb.addItem(self.item)
 
     def set_color(self, edge, face, alpha=0.2):
-        self.item.setPen(QPen(_qcolor(edge), 2))
+        pen = QPen(_qcolor(edge))
+        pen.setCosmetic(True)
+        pen.setWidthF(1.0)
+        self.item.setPen(pen)
         self.item.setBrush(QBrush(_qcolor(face, alpha)))
 
     def remove(self):
@@ -852,7 +857,7 @@ class FeatureViewer(QMainWindow):
         # (unbinned) resolution from a 1×1 shapes catalog, for high-def review
         # and 1×1-vs-binned discrepancy spotting.
         self._view_1x1 = False
-        self._sel_sub_catalog = None       # "<algo>_shapes_1x1.json" or None
+        self._sel_sub_catalog = None       # "<algo>_shapes_1x1.h5" or None
         self._sub_features = None          # [feat, …] kept+filtered from 1×1 cat
         self._sub_bin_to_features = {}     # 1×1 bin_key → [feat, …]
         self._sub_source = None            # io.BinImageSource for 1×1 raw frames
@@ -894,8 +899,8 @@ class FeatureViewer(QMainWindow):
         self._bin_size = _BIN_SIZE
         # Selected catalogs (filenames within RESULTS_DIR), restored per-scan
         # from the cookie before the first data load.
-        self._sel_scan_catalog = None      # "<algo>_peaks_<NxN>.json" or None
-        self._sel_feature_catalog = None   # "<algo>_shapes_<NxN>.json" or None
+        self._sel_scan_catalog = None      # "<algo>_peaks_<NxN>.h5" or None
+        self._sel_feature_catalog = None   # "<algo>_shapes_<NxN>.h5" or None
         self._init_catalog_selection()
         self._load_data()
         self._build_ui()
@@ -917,7 +922,7 @@ class FeatureViewer(QMainWindow):
 
         Feature Catalog (shapes/combined/plain list) takes precedence; else the
         Scan Catalog (peaks) rendered as points; else **blank** — no silent
-        fallback to a stray ``feature_catalog`` when nothing valid is selected.
+        fall back to the available shape catalog when nothing is selected.
         """
         for sel in (self._sel_feature_catalog, self._sel_scan_catalog):
             if RESULTS_DIR is not None and sel:
@@ -949,8 +954,7 @@ class FeatureViewer(QMainWindow):
                 self._bin_to_all_features[bk].append(feat)
 
         self._grid_path = self._resolve_grid_mapping()
-        with open(self._grid_path) as f:
-            gm = json.load(f)
+        gm = io.load_grid_mapping(self._grid_path)
         self._n_rows = gm["n_bin_rows"]
         self._n_cols = gm["n_bin_cols"]
         self._build_territory_remap(gm)
@@ -1188,8 +1192,8 @@ class FeatureViewer(QMainWindow):
         """(grid_mapping_path, variant) for the selected 1×1 sub-catalog.
 
         Picks whichever 1×1 grid mapping actually contains the catalog's bin keys
-        — the plain ``grid_mapping_1x1.json`` (``row_col`` cells) or the
-        territorial ``grid_mapping_1x1_territory.json`` (``"<tid>_0"`` cells,
+        - the plain ``grid_mapping_1x1.h5`` (``row_col`` cells) or the
+        territorial ``grid_mapping_1x1_territory.h5`` (``"<tid>_0"`` cells,
         raw frames in ``xrd_1x1_bins_territory.h5``). Mirrors the binned view's
         :meth:`_resolve_grid_mapping`. Returns ``(None, None)`` if neither fits."""
         if RESULTS_DIR is None or not self._sel_sub_catalog:
@@ -1219,8 +1223,7 @@ class FeatureViewer(QMainWindow):
         if not gm_path:
             return None
         try:
-            with open(gm_path) as f:
-                gm = json.load(f)
+            gm = io.load_grid_mapping(gm_path)
         except Exception:
             return None
         self._sub_variant = variant
@@ -1793,8 +1796,7 @@ class FeatureViewer(QMainWindow):
             return
         self._grid_path = new_grid
         try:
-            with open(new_grid) as f:
-                gm = json.load(f)
+            gm = io.load_grid_mapping(new_grid)
             self._n_rows = gm["n_bin_rows"]
             self._n_cols = gm["n_bin_cols"]
             self._build_territory_remap(gm)
@@ -1858,7 +1860,7 @@ class FeatureViewer(QMainWindow):
     def _bins_built_text(self):
         """Whether the binned HDF5 for the current bin exists, and when built."""
         try:
-            p = _DM.bins_h5(self._bin_size) if _DM is not None else None
+            p = _DM.binned_h5(self._bin_size) if _DM is not None else None
         except Exception:
             p = None
         if p and os.path.exists(p):
@@ -1891,7 +1893,7 @@ class FeatureViewer(QMainWindow):
         # No binned file → raw frames. Confirm on a second Load press first.
         # A built 1×1 h5 counts too, so a bins-only project (raw deleted) loads
         # 1×1 straight from the h5 without arming the raw-frames warning.
-        h5 = _DM.bins_h5(bin_size, scan=scan) if _DM is not None else None
+        h5 = _DM.binned_h5(bin_size, scan=scan) if _DM is not None else None
         archive = (_DM.unbinned_archive_h5(scan=scan)
                    if _DM is not None else None)
         has_local_source = ((h5 and os.path.exists(h5)) or
@@ -2182,7 +2184,7 @@ class FeatureViewer(QMainWindow):
     def _xrf_grid_mapping(self, scan, grid, variant=None):
         """Grid mapping for (scan, bin grid, variant) (cached); None if absent.
 
-        ``variant="territory"`` selects ``grid_mapping_1x1_territory.json`` so a
+        ``variant="territory"`` selects ``grid_mapping_1x1_territory.h5`` so a
         per-frame XRF spectrum resolves a territorial ``"<tid>_0"`` cell key."""
         key = (scan, grid, variant)
         if key in self._xrf_gm_cache:
@@ -2232,7 +2234,7 @@ class FeatureViewer(QMainWindow):
         # A territorial 1×1 cell key ("<tid>_0") resolves against the territory
         # grid mapping, not the plain one. Prefer the active sub-view variant, but
         # fall back to the other 1×1 variant so XRF still resolves when only the
-        # territory mapping exists (this scan has no plain grid_mapping_1x1.json).
+        # territory mapping exists (this scan has no plain grid_mapping_1x1.h5).
         gm = None
         if grid == 1:
             variants = [self._sub_variant, "territory", None]
@@ -4460,16 +4462,9 @@ class FeatureViewer(QMainWindow):
         return {}
 
     def _scan_state(self):
-        """The saved settings dict for the current scan (the per-scan cookie).
-
-        New layout is ``{"scans": {<scan>: {...}}}``; an older flat file (one
-        shared settings dict) is still read so prior sessions migrate cleanly.
-        """
-        whole = self._load_state()
-        scans = whole.get("scans")
-        if isinstance(scans, dict):
-            return scans.get(self._scan or "", {})
-        return whole  # legacy flat format
+        """The saved settings dict for the current scan."""
+        scans = self._load_state().get("scans")
+        return scans.get(self._scan or "", {}) if isinstance(scans, dict) else {}
 
     def _save_state(self):
         p = self._state_path()

@@ -6,9 +6,9 @@ Inspect the holdout directory rather than assuming a particular bin size, detect
 
 - **`bin_annotations.json`**: Ground-truth peaks grouped by bin and reflection. Bin entries map reflection names to detector pixel coordinates.
 - **`empty_bins.json`**: Reviewed bins containing no peaks.
-- **`grid_mapping.json`**: Grid and bin metadata when available.
+- **`grid_mapping.h5`**: Grid and bin metadata when available.
 - **`tth.tiff`**: Per-pixel 2-theta map.
-- **`reflections.py`**: Valid reflection names and expected 2-theta values.
+- **`reflections.json`**: Valid reflection names and expected 2-theta values, when supplied.
 - **`labels/`**: Per-bin label files when required by the evaluator.
 - **`evaluate.py`**: Holdout evaluation harness when supplied.
 
@@ -46,6 +46,8 @@ Handle zero-denominator and empty-bin cases explicitly and consistently, then av
 ## Important notes
 
 - This is final validation data. Do not tune algorithms or hyperparameters against it.
+- Submit the final numeric result with CVEvolve's holdout metric tool. Use a metric name containing `f2` when reporting the primary mean F2 score so xrd-app records it as `holdout_f2` during automatic registration.
+- CVEvolve writes the selected module to `reports/best_candidate.py`; xrd-app validates and registers that report output automatically after a successful GUI run. Do not create `top_algorithms.json` or copy candidates into xrd-app manually.
 - This task evaluates each bin's peak detections independently.
 - Do not hard-code a bin size, detector dimensions, matching radius, or data path.
 - Ensure each reported peak lies in the expected 2-theta band for its reflection.

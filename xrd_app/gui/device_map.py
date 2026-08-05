@@ -28,7 +28,7 @@ from PyQt5.QtCore import Qt, pyqtSignal, QTimer, QRectF
 from PyQt5.QtGui import QPainter, QColor, QBrush, QFont
 
 from ..config import DataManager
-from ..core import catalogs
+from ..core import catalogs, io
 from .palette import element_colors as _element_colors, hex_to_rgba as _hex_to_rgba
 
 pg.setConfigOptions(imageAxisOrder="row-major", antialias=True)
@@ -51,8 +51,8 @@ def configure(project_root=".", bin_size=3, scan=None, catalog=None):
     global _DM, _BIN_SIZE, RESULTS_DIR, HOLDOUT_DIR, CATALOG_PATH, GRID_PATH, H5_PATH
     _DM = DataManager(project_root, scan=scan)
     _BIN_SIZE = bin_size
-    RESULTS_DIR = _DM.results_dir()
-    HOLDOUT_DIR = _DM.holdout_dir
+    RESULTS_DIR = _DM.labels_dir()
+    HOLDOUT_DIR = _DM.metadata_dir
     CATALOG_PATH = catalog
     if CATALOG_PATH:
         resolved = catalogs.resolve_catalog_sources(
@@ -60,7 +60,7 @@ def configure(project_root=".", bin_size=3, scan=None, catalog=None):
         GRID_PATH, H5_PATH = resolved.grid_mapping, resolved.bins_h5
     else:
         GRID_PATH = _DM.grid_mapping(bin_size=_BIN_SIZE, scan=scan)
-        H5_PATH = _DM.bins_h5(_BIN_SIZE, scan=scan)
+        H5_PATH = _DM.binned_h5(_BIN_SIZE, scan=scan)
 
 
 REFLECTIONS = []
@@ -132,9 +132,8 @@ def load_features():
     """Kept-feature list from the selected feature map (or the newest shapes/
     combined catalog for the bin when none is selected).
 
-    Reads any catalog kind via ``load_features_any`` (shapes ``kept``, combined
-    ``features``, or a legacy plain list), so a shapes catalog renders here as
-    its kept features.
+    Reads any catalog kind via ``load_features_any`` (shapes ``kept`` or combined
+    ``features``), so a shapes catalog renders here as its kept features.
     """
     path = CATALOG_PATH or catalogs.default_feature_source(RESULTS_DIR, _BIN_SIZE)
     if not path:
@@ -144,8 +143,7 @@ def load_features():
 
 
 def load_grid_info():
-    with open(GRID_PATH or _DM.grid_mapping(bin_size=_BIN_SIZE)) as f:
-        gm = json.load(f)
+    gm = io.load_grid_mapping(GRID_PATH or _DM.grid_mapping(bin_size=_BIN_SIZE))
     return gm["n_bin_rows"], gm["n_bin_cols"]
 
 
@@ -181,10 +179,6 @@ def build_device_grids(features, n_rows, n_cols, metric="intensity"):
             profile = feat.get("intensity_profile", {})
             if is_per_feature:
                 val = feat.get(feat_key)
-                if val is None and feat_key == "chi_fwhm":
-                    val = feat.get("rocking_fwhm")  # accept legacy field
-                if val is None and feat_key == "tth_fwhm":
-                    val = feat.get("strain_breadth")  # accept legacy field
                 if val is None:
                     continue
                 for bk in profile:

@@ -7,12 +7,13 @@ The "Pick Development Set" step selects bins from one of:
 A single holdout percentage splits the bins (seeded, reproducible) into a dev set
 (``test_data/``) and a holdout set (``holdout_data/``), each written in the format
 CVEvolve already expects: ``bin_annotations.json`` + ``empty_bins.json`` +
-``grid_mapping.json`` (copied).
+``grid_mapping.h5`` (copied).
 """
 
 from __future__ import annotations
 
 import json
+import math
 import random
 import shutil
 from pathlib import Path
@@ -42,10 +43,10 @@ def bins_from_verified(bin_annotations_path) -> Tuple[Annotations, list]:
 
 
 def bins_from_peaks(peaks_json) -> Tuple[Annotations, list]:
-    """Convert a ``*_peaks.json`` (peaks_by_bin) to bin_annotations format."""
+    """Convert a peaks catalog dictionary to bin-annotation format."""
     if not isinstance(peaks_json, dict):
-        with open(peaks_json) as f:
-            peaks_json = json.load(f)
+        from .catalogs import load_result
+        peaks_json = load_result(peaks_json)
     ann = {}
     for bk, peaks in peaks_json.get("peaks_by_bin", {}).items():
         by_ref = {}
@@ -58,14 +59,14 @@ def bins_from_peaks(peaks_json) -> Tuple[Annotations, list]:
 
 
 def bins_from_shapes(shapes_json) -> Tuple[Annotations, list]:
-    """Convert a ``*_shapes.json`` (kept features) to bin_annotations format.
+    """Convert a shapes catalog dictionary to bin-annotation format.
 
     Each kept feature contributes its per-bin detector positions (from the
     feature's intensity_profile) under the feature's reflection.
     """
     if not isinstance(shapes_json, dict):
-        with open(shapes_json) as f:
-            shapes_json = json.load(f)
+        from .catalogs import load_result
+        shapes_json = load_result(shapes_json)
     ann = {}
     for feat in shapes_json.get("kept", []):
         ref = feat.get("reflection", "unknown")
@@ -86,7 +87,7 @@ def _write_set(dest: Path, ann: Annotations, empty: list, grid_mapping: Optional
     with open(dest / "empty_bins.json", "w") as f:
         json.dump(empty, f, indent=2)
     if grid_mapping and Path(grid_mapping).exists():
-        shutil.copy2(grid_mapping, dest / "grid_mapping.json")
+        shutil.copy2(grid_mapping, dest / "grid_mapping.h5")
 
 
 def build_split(annotations: Annotations, empty_bins: list, *, holdout_pct: float,
@@ -97,6 +98,11 @@ def build_split(annotations: Annotations, empty_bins: list, *, holdout_pct: floa
     ``holdout_pct`` is the fraction (0-100) of *labeled* bins reserved for holdout.
     Empty bins are split in the same proportion. Returns counts.
     """
+    if not math.isfinite(holdout_pct) or not 0 <= holdout_pct < 100:
+        raise ValueError("holdout_pct must be between 0 (inclusive) and 100 (exclusive)")
+    if not annotations and not empty_bins:
+        raise ValueError("No labeled or reviewed-empty bins were found in the selected source")
+
     dest_dev, dest_holdout = Path(dest_dev), Path(dest_holdout)
     rng = random.Random(seed)
 
@@ -120,10 +126,10 @@ def build_split(annotations: Annotations, empty_bins: list, *, holdout_pct: floa
 
     n_pts = sum(len(pts) for refs in annotations.values() for pts in refs.values())
     return {
-        "total_bins": len(annotations),
+        "total_bins": len(annotations) + len(empty_bins),
         "total_points": n_pts,
-        "dev_bins": len(dev_ann),
-        "holdout_bins": len(hold_ann),
+        "dev_bins": len(dev_ann) + len(dev_empty),
+        "holdout_bins": len(hold_ann) + len(hold_empty_l),
         "dev_empty": len(dev_empty),
         "holdout_empty": len(hold_empty_l),
         "seed": seed,

@@ -9,8 +9,8 @@ What it pulls out, for the (001) reflection feature #54 (detector pixel ~917,446
     Bragg blob), so the notebook can show what one "scan" actually looks like.
 
 Source of truth:
-  Labels/Scan_0203/gaussian_shapes_3x3_faithful.json   -> feature #54 record
-  Metadata/Scan_0203/grid_mapping_3x3_faithful.json    -> bins{R_C->[gi]}, frame_map
+  Labels/Scan_0203/gaussian_shapes_3x3_faithful.h5   -> feature #54 record
+  Metadata/Scan_0203/grid_mapping_3x3_faithful.h5    -> bins{R_C->[gi]}, frame_map
   Binned/Scan_0203/xrd_3x3_bins_faithful.h5            -> per-bin summed detector images
 
 --source binned (default): read the local, already-summed 3x3 bin images. Fast.
@@ -22,7 +22,7 @@ Source of truth:
 Writes  xrd_app/notebooks/feature54_scans.h5  (a few tens of MB; do NOT commit).
 """
 from __future__ import annotations
-import argparse, json, os
+import argparse, os
 from pathlib import Path
 import numpy as np
 import h5py
@@ -40,8 +40,9 @@ def _project_base(root: Path) -> Path:
 
 
 def load_feature(base: Path, fid: int) -> dict:
-    sj = base / "Labels" / "Scan_0203" / "gaussian_shapes_3x3_faithful.json"
-    S = json.loads(sj.read_text())
+    from xrd_app.core import result_store
+    sj = base / "Labels" / "Scan_0203" / "gaussian_shapes_3x3_faithful.h5"
+    S = result_store.load(sj)
     feat = next((f for f in S["kept"] if f.get("feature_id") == fid), None)
     if feat is None:
         raise SystemExit(f"feature_id {fid} not in {sj}")
@@ -77,7 +78,9 @@ def main():
     print(f"feature #{FEATURE_ID}: {feat['reflection']} @ det ({det_x},{det_y}), "
           f"ref_tth={ref_tth}, {len(members)} member bins")
 
-    gm = json.loads((base / "Metadata" / "Scan_0203" / "grid_mapping_3x3_faithful.json").read_text())
+    from xrd_app.core import io
+    gm = io.load_grid_mapping(
+        base / "Metadata" / "Scan_0203" / "grid_mapping_3x3_faithful.h5")
     bins_gi = gm["bins"]                        # bin_key -> [global frame indices]
 
     # footprint bounding box in BIN coordinates

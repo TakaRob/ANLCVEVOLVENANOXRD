@@ -29,6 +29,7 @@ from PyQt5.QtWidgets import (
 )
 
 from ..config import DataManager
+from ..core import catalogs
 from ._console import JobConsole
 
 
@@ -300,9 +301,8 @@ class CVEvolveDialog(QDialog):
         rl.addRow("Engine:", self.engine)
 
         self.argo_key = QLineEdit()
-        self.argo_key.setEchoMode(QLineEdit.Password)
         self.argo_key.setPlaceholderText("Transient; not saved (uses ARGO_API_KEY)")
-        rl.addRow("Argo username / API key:", self.argo_key)
+        rl.addRow("Argo username:", self.argo_key)
 
         self.hutch = QCheckBox("Enable Hutch tracking (live SQL + model output)")
         rl.addRow("Tracking:", self.hutch)
@@ -361,7 +361,7 @@ class CVEvolveDialog(QDialog):
         self._editor_font = int(size)
 
     def _refresh_sources(self, *_):
-        """List the actual dev-set source files: verified labels + peaks JSONs.
+        """List the actual dev-set source files: verified labels and peaks HDF5.
 
         (Shapes are intentionally excluded.) Each item carries the ``--source``
         kind and algorithm name that ``build-holdout`` needs.
@@ -377,8 +377,11 @@ class CVEvolveDialog(QDialog):
             self.sources.addItem(it)
 
         if ldir.is_dir():
-            for p in sorted(ldir.glob(f"*_peaks_{bs}.json")):
-                algo = p.stem.replace(f"_peaks_{bs}", "")
+            for p in catalogs.list_catalogs(ldir, "peaks", self.bin_size):
+                info = catalogs.parse_name(p.name) or {}
+                if info.get("tag"):
+                    continue
+                algo = info.get("algo", p.stem)
                 it = QListWidgetItem(f"{p.name}   (peaks · {algo})")
                 it.setData(Qt.UserRole, {"source": "peaks", "algorithm": algo})
                 self.sources.addItem(it)
@@ -423,6 +426,13 @@ class CVEvolveDialog(QDialog):
             return
         args = ["run-cvevolve", "--root", self.project_root,
                 "--config", cfg, "--engine", self.engine.currentText()]
+        config_dir = Path(cfg).resolve().parent
+        prompt = config_dir / "prompt.md"
+        if prompt.exists():
+            args += ["--prompt", str(prompt)]
+        holdout_prompt = config_dir / "holdout_test_prompt.md"
+        if holdout_prompt.exists():
+            args += ["--holdout-test-prompt", str(holdout_prompt)]
         if self.hutch.isChecked():
             args += ["--hutch"]
             from ..core.cvevolve_setup import default_hutch_db
@@ -434,7 +444,17 @@ class CVEvolveDialog(QDialog):
             self.hutch_view.hide()
         key = self.argo_key.text().strip()
         env = {"ARGO_API_KEY": key} if key else None
-        self.console.run(args, env=env)
+        self.console.run(args, env=env, on_finished=self._on_run_finished)
+
+    def _on_run_finished(self, code):
+        if code != 0:
+            return
+        cfg = self.config.text().strip()
+        args = ["register-cvevolve", "--root", self.project_root,
+                "--config", cfg, "--bin-size", str(self.bin_size)]
+        self.console.run(
+            args, header="[CVEvolve completed; validating and registering the winner]",
+            clear=False)
 
     def closeEvent(self, event):  # noqa: N802 (Qt signature)
         self.hutch_view.stop()

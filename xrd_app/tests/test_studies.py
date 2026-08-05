@@ -6,7 +6,7 @@ import json
 
 import numpy as np
 
-from xrd_app.core import studies
+from xrd_app.core import result_store, studies
 
 
 def _write_csv(path, cols, rows):
@@ -27,11 +27,11 @@ def _make_study(root, name="Study", with_rsm=True):
                ["track_id", "reflection", "status", "theta_bragg", "fwhm"],
                [{"track_id": 1, "reflection": "(001)", "status": "fit",
                  "theta_bragg": 5.0, "fwhm": 0.3}])
-    (d / "tracks.json").write_text(json.dumps({
+    result_store.save(d / "tracks.h5", {
         "bin_size": 3, "n_tracks": 1,
         "tracks": [{"track_id": 1, "reflection": "(001)", "is_recurrent": True,
                     "members": [{"theta": 4.0, "intensity": 10.0},
-                                {"theta": 5.0, "intensity": 20.0}]}]}))
+                                {"theta": 5.0, "intensity": 20.0}]}]})
     (d / "prediction_report.md").write_text("# report\nrecall 0.7\n")
     np.savez_compressed(d / "combined_device.npz",
                         n_rows=2, n_cols=2, reflections=np.array(["(001)"]),
@@ -61,7 +61,7 @@ def test_artifacts_and_meta(tmp_path):
     e = next(x for x in studies.list_studies(tmp_path) if x["path"] == "Study")
     a = e["artifacts"]
     assert a["rsm"] and a["rocking"] and a["combined_device"] and a["tracks"]
-    assert e["bin_size"] == 3            # from tracks.json
+    assert e["bin_size"] == 3            # from tracks.h5
     assert e["scans"] == ["Scan_0203", "Scan_0204"]  # from rsm.summary.json
     assert "rsm" in studies.describe(e)
 

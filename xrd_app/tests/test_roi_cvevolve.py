@@ -5,7 +5,7 @@ import numpy as np
 import pytest
 
 from xrd_app.config import DataManager, ProjectConfig, default_config
-from xrd_app.core import reflection_sum, roi_catalog, roi_cvevolve
+from xrd_app.core import cvevolve_setup, holdout, reflection_sum, roi_catalog, roi_cvevolve
 
 
 def _project(tmp_path):
@@ -14,6 +14,37 @@ def _project(tmp_path):
     cfg = ProjectConfig(root, data=default_config("test", root))
     cfg.create_tree(); cfg.save()
     return DataManager(root)
+
+
+def test_peak_split_counts_reviewed_empty_bins_and_rejects_empty_source(tmp_path):
+    result = holdout.build_split(
+        {"0_0": {"001": [[1, 2]]}}, ["0_1"], holdout_pct=0, seed=42,
+        dest_dev=tmp_path / "dev", dest_holdout=tmp_path / "holdout",
+    )
+
+    assert result["total_bins"] == 2
+    assert result["dev_bins"] == 2
+    with pytest.raises(ValueError, match="No labeled"):
+        holdout.build_split({}, [], holdout_pct=20, seed=42,
+                            dest_dev=tmp_path / "empty-dev",
+                            dest_holdout=tmp_path / "empty-holdout")
+
+
+@pytest.mark.parametrize("holdout_pct", [-1, 100, np.nan, np.inf])
+def test_peak_split_rejects_invalid_holdout_percentage(tmp_path, holdout_pct):
+    with pytest.raises(ValueError, match="holdout_pct"):
+        holdout.build_split({"0_0": {}}, [], holdout_pct=holdout_pct, seed=42,
+                            dest_dev=tmp_path / "dev", dest_holdout=tmp_path / "holdout")
+
+
+def test_hutch_uses_configured_relative_database_path(tmp_path):
+    config = tmp_path / "config.yaml"
+    config.write_text("name: test\nhutch:\n  db_path: custom/hutch.db\n")
+
+    expected = tmp_path / "custom" / "hutch.db"
+    assert cvevolve_setup.default_hutch_db(config) == expected
+    assert cvevolve_setup.set_hutch(config, True) == expected
+    assert expected.parent.is_dir()
 
 
 def test_session_requires_saved_manual_roi_catalogs(tmp_path):
@@ -62,6 +93,7 @@ def test_session_exports_sums_labels_config_and_evaluator(tmp_path):
     assert (data / "evaluate.py").exists()
     assert (result["dest"] / "config.yaml").exists()
     assert (result["dest"] / "prompt.md").exists()
+    assert (result["dest"] / "holdout_test_prompt.md").exists()
 
 
 def test_session_removes_only_stale_generated_split_files(tmp_path):

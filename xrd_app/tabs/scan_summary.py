@@ -77,7 +77,7 @@ class ScanSummaryTab(QWidget):
         self._bin_combo = QComboBox()
         bins = set(_BIN_SIZES)
         for scan in self._dm.discover_scans(selected_only=True):
-            bins.update(catalogs.available_bins(self._dm.results_dir(scan)))
+            bins.update(catalogs.available_bins(self._dm.labels_dir(scan)))
         bins.add(self._bin_size)
         for b in sorted(bins):
             self._bin_combo.addItem(f"{b}x{b}", b)

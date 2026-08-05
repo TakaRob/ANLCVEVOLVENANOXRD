@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 Bragg Peak Detector v3-tuned: Multi-Scale Top-Hat + Dual SNR
 Tuned from r001-8a641fb0 (tophat_dual_snr_detector, F1=0.775)
@@ -13,19 +12,11 @@ Key tuning changes from parent:
 7. max_pixels 150->200: allows slightly larger peak components
 """
 
-import argparse
-import csv
-import json
-import importlib.util
-import sys
-from pathlib import Path
-
 import h5py
 import numpy as np
 import scipy.ndimage as ndi
 from scipy.ndimage import uniform_filter1d
 from scipy.ndimage import grey_dilation, grey_erosion, uniform_filter
-import tifffile
 
 BINS_H5_DEFAULT = "/home/takaji/xrd_3x3_bins.h5"
 
@@ -341,78 +332,3 @@ def compute_f1(detections, labels, tolerance=40):
     if precision + recall == 0:
         return 0.0, tp, fp, fn
     return 2 * precision * recall / (precision + recall), tp, fp, fn
-
-
-# ── Main ─────────────────────────────────────────────────────────────
-
-def main():
-    parser = argparse.ArgumentParser(
-        description="Tuned Multi-Scale Top-Hat + Dual SNR Bragg peak detector")
-    parser.add_argument("--bin-key", required=True)
-    parser.add_argument("--bins-h5", default=BINS_H5_DEFAULT)
-    parser.add_argument("--two-theta", dest="two_theta", default="tth.tiff")
-    parser.add_argument("--reflections", default="reflections.py")
-    parser.add_argument("--output", default="detections.csv")
-    parser.add_argument("--labels", default=None)
-    # Tunable parameters with optimal defaults
-    parser.add_argument("--band-half-width", type=float, default=0.35)
-    parser.add_argument("--snr-threshold", type=float, default=5.8)
-    parser.add_argument("--local-snr-threshold", type=float, default=3.0)
-    parser.add_argument("--local-window", type=int, default=31)
-    parser.add_argument("--tophat-sizes", type=str, default="7,11,15")
-    parser.add_argument("--min-pixels", type=int, default=4)
-    parser.add_argument("--max-pixels", type=int, default=200)
-    parser.add_argument("--min-separation", type=float, default=8.0)
-    parser.add_argument("--min-intensity-sigma", type=float, default=2.0)
-    args = parser.parse_args()
-
-    tophat_sizes = tuple(int(x) for x in args.tophat_sizes.split(","))
-
-    # Load reflections
-    spec = importlib.util.spec_from_file_location("reflections", args.reflections)
-    ref_mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(ref_mod)
-    degs = ref_mod.degs
-    deg_labels = ref_mod.deg_labels
-
-    # Load data
-    image = load_bin_image(args.bin_key, args.bins_h5)
-    tth_map = tifffile.imread(args.two_theta)
-
-    # Precompute 2-theta binning
-    tth_data = precompute_tth(tth_map)
-
-    # Detect peaks
-    detections = detect_peaks(
-        image, tth_map, tth_data, degs, deg_labels,
-        band_half_width=args.band_half_width,
-        snr_threshold=args.snr_threshold,
-        local_snr_threshold=args.local_snr_threshold,
-        local_window=args.local_window,
-        tophat_sizes=tophat_sizes,
-        min_pixels=args.min_pixels,
-        max_pixels=args.max_pixels,
-        min_separation=args.min_separation,
-        min_intensity_sigma=args.min_intensity_sigma,
-    )
-
-    # Write output CSV
-    with open(args.output, "w", newline="") as f:
-        writer = csv.writer(f)
-        writer.writerow(["reflection", "x", "y"])
-        for label, pts in detections.items():
-            for x, y in pts:
-                writer.writerow([label, x, y])
-
-    total = sum(len(pts) for pts in detections.values())
-    print(f"Detected {total} peaks in bin {args.bin_key}")
-
-    if args.labels:
-        with open(args.labels) as f:
-            labels = json.load(f)
-        f1, tp, fp, fn = compute_f1(detections, labels)
-        print(f"F1 score: {f1:.4f} (TP={tp} FP={fp} FN={fn})")
-
-
-if __name__ == "__main__":
-    main()

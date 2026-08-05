@@ -14,25 +14,10 @@ Key tuning changes (preserving core pipeline):
    are rescued. This specifically targets faint peaks missed by band-wide MAD.
 5. max_detections 25->50, ignore_edge 3->5
 6. dup_distance 15->12 for better separation of nearby peaks
-
-Usage:
-    python detect.py \
-        --bin-key 3_7 \
-        --bins-h5 /home/takaji/xrd_5x5_bins.h5 \
-        --two-theta tth.tiff \
-        --reflections reflections.py \
-        --output detections.csv
 """
 
-import argparse
-import csv
-import json
-import importlib.util
-
-import h5py
 import numpy as np
 import scipy.ndimage as ndi
-import tifffile
 
 
 BINS_H5_DEFAULT = "/home/takaji/xrd_3x3_bins.h5"
@@ -398,87 +383,3 @@ def compute_f1(detections, labels, tolerance=40):
     if prec + rec == 0:
         return 0.0, tp, fp, fn
     return 2 * prec * rec / (prec + rec), tp, fp, fn
-
-
-# ── Main ─────────────────────────────────────────────────────────────
-
-def main():
-    parser = argparse.ArgumentParser(
-        description="Tuned: Multi-Scale Top-Hat + Local-Contrast Rescue Bragg Peak Detector")
-    parser.add_argument("--bin-key", required=True, help="Bin key, e.g. '3_7'")
-    parser.add_argument("--bins-h5", default=BINS_H5_DEFAULT,
-                        help="Pre-built bin images HDF5")
-    parser.add_argument("--two-theta", dest="two_theta", default="tth.tiff")
-    parser.add_argument("--reflections", default="reflections.py")
-    parser.add_argument("--output", default="detections.csv")
-    parser.add_argument("--labels", default=None,
-                        help="Ground truth JSON for evaluation")
-    # Tunable parameters with tuned defaults
-    parser.add_argument("--tophat-sizes", type=int, nargs="+", default=[9, 15, 21])
-    parser.add_argument("--tth-tolerance", type=float, default=0.30)
-    parser.add_argument("--snr-threshold", type=float, default=4.8)
-    parser.add_argument("--rescue-band-snr", type=float, default=99.0,
-                        help="Rescue band SNR threshold (99=disabled)")
-    parser.add_argument("--rescue-local-snr", type=float, default=99.0,
-                        help="Rescue local annular SNR threshold (99=disabled)")
-    parser.add_argument("--min-pixels", type=int, default=2)
-    parser.add_argument("--max-pixels", type=int, default=200)
-    parser.add_argument("--min-compactness", type=float, default=0.08)
-    parser.add_argument("--dup-distance", type=float, default=12)
-    parser.add_argument("--ignore-edge", type=int, default=5)
-    parser.add_argument("--max-detections", type=int, default=50)
-    parser.add_argument("--min-peak-value", type=float, default=6.0)
-    args = parser.parse_args()
-
-    # Load reflections
-    spec = importlib.util.spec_from_file_location("reflections", args.reflections)
-    ref_mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(ref_mod)
-    degs = ref_mod.degs
-    deg_labels = ref_mod.deg_labels
-
-    # Load data
-    with h5py.File(args.bins_h5, "r") as f:
-        if args.bin_key not in f:
-            raise ValueError(f"Bin '{args.bin_key}' not found in {args.bins_h5}")
-        image = f[args.bin_key][:].astype(np.float64)
-
-    tth_map = tifffile.imread(args.two_theta)
-    tth_data = precompute_tth(tth_map)
-
-    detections = detect_peaks(
-        image, tth_map, degs, deg_labels, tth_data,
-        tophat_sizes=tuple(args.tophat_sizes),
-        tth_tolerance=args.tth_tolerance,
-        snr_threshold=args.snr_threshold,
-        rescue_band_snr=args.rescue_band_snr,
-        rescue_local_snr=args.rescue_local_snr,
-        min_pixels=args.min_pixels,
-        max_pixels=args.max_pixels,
-        min_compactness=args.min_compactness,
-        dup_distance=args.dup_distance,
-        ignore_edge=args.ignore_edge,
-        max_detections=args.max_detections,
-        min_peak_value=args.min_peak_value,
-    )
-
-    # Write output CSV
-    with open(args.output, "w", newline="") as f:
-        writer = csv.writer(f)
-        writer.writerow(["reflection", "x", "y"])
-        for label, pts in detections.items():
-            for x, y in pts:
-                writer.writerow([label, x, y])
-
-    total = sum(len(pts) for pts in detections.values())
-    print(f"Detected {total} peaks in bin {args.bin_key}")
-
-    if args.labels:
-        with open(args.labels) as f:
-            labels = json.load(f)
-        f1, tp, fp, fn = compute_f1(detections, labels)
-        print(f"F1 score: {f1:.4f} (TP={tp} FP={fp} FN={fn})")
-
-
-if __name__ == "__main__":
-    main()

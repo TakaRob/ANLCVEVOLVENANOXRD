@@ -2,7 +2,7 @@
 """Study intensity-defined edges and centers of one drift-linked 1x1 feature.
 
 Shows regular and true-coordinate territorial maps, measured 10/25/50% intensity
-edges, and circular versus rotated-elliptical Gaussian fits. Reads saved JSON only.
+edges, and circular versus rotated-elliptical Gaussian fits. Reads saved HDF5.
 """
 
 from __future__ import annotations
@@ -93,13 +93,13 @@ def _fit_model(xy, intensity, elliptical):
 
 def _dataset(project, scan, feature_id, peak_algo, tolerance):
     labels, metadata = project / "Labels" / scan, project / "Metadata" / scan
-    shapes = _load(labels / "territory_shapes_1x1_territory_coord.json")
+    shapes = _load(labels / "territory_shapes_1x1_territory_coord.h5")
     feature = next(f for f in shapes["kept"] if f.get("feature_id") == feature_id)
-    regular_gm = _load(metadata / "grid_mapping_1x1.json")
-    territory_gm = _load(metadata / "grid_mapping_1x1_territory.json")
-    regular_peaks = _load(labels / f"{peak_algo}_peaks_1x1.json")["peaks_by_bin"]
+    regular_gm = _load(metadata / "grid_mapping_1x1.h5")
+    territory_gm = _load(metadata / "grid_mapping_1x1_territory.h5")
+    regular_peaks = _load(labels / f"{peak_algo}_peaks_1x1.h5")["peaks_by_bin"]
     territory_peaks = _load(
-        labels / f"{peak_algo}_peaks_1x1_territory.json")["peaks_by_bin"]
+        labels / f"{peak_algo}_peaks_1x1_territory.h5")["peaks_by_bin"]
 
     center_t = feature["center_bin"]
     profile = feature["intensity_profile"][center_t]

@@ -8,13 +8,13 @@ true-coordinate territorial cells. No raw detector frames are read.
 from __future__ import annotations
 
 import argparse
-import json
 from pathlib import Path
 
 import matplotlib.pyplot as plt
 from matplotlib.colors import LogNorm
 import numpy as np
 
+from xrd_app.core import io, result_store
 from xrd_app.core.territory import grow_peak_feature
 
 
@@ -23,8 +23,7 @@ DEFAULT_PEAK_ALGO = "5x5_tophat_band_adaptive_snr"
 
 
 def _load(path: Path):
-    with path.open() as f:
-        return json.load(f)
+    return io.load_grid_mapping(path) if "grid_mapping" in path.name else result_store.load(path)
 
 
 def _regular_neighbors(keys):
@@ -106,16 +105,16 @@ def run(project: Path, scan: str, feature_id: int, output: Path,
     labels = project / "Labels" / scan
     metadata = project / "Metadata" / scan
 
-    shapes = _load(labels / "territory_shapes_1x1_territory_coord.json")
+    shapes = _load(labels / "territory_shapes_1x1_territory_coord.h5")
     feature = next((f for f in shapes["kept"] if f.get("feature_id") == feature_id), None)
     if feature is None:
         raise ValueError(f"Feature {feature_id} is not in the territorial catalog")
 
-    regular_gm = _load(metadata / "grid_mapping_1x1.json")
-    territory_gm = _load(metadata / "grid_mapping_1x1_territory.json")
-    regular_peaks = _load(labels / f"{peak_algo}_peaks_1x1.json")["peaks_by_bin"]
+    regular_gm = _load(metadata / "grid_mapping_1x1.h5")
+    territory_gm = _load(metadata / "grid_mapping_1x1_territory.h5")
+    regular_peaks = _load(labels / f"{peak_algo}_peaks_1x1.h5")["peaks_by_bin"]
     territory_peaks = _load(
-        labels / f"{peak_algo}_peaks_1x1_territory.json")["peaks_by_bin"]
+        labels / f"{peak_algo}_peaks_1x1_territory.h5")["peaks_by_bin"]
 
     center_territory = feature["center_bin"]
     profile = feature["intensity_profile"][center_territory]

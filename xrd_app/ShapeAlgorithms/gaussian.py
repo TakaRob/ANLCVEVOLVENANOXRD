@@ -15,24 +15,11 @@ A "shape" is a kept (gaussian-like) feature. This file is self-contained and
 swappable — drop a new ``ShapeAlgorithms/<name>.py`` exposing ``link_peaks`` and
 ``characterize_features`` (and register it in ``catalog.json``) to evolve the
 shape stage, exactly like the detectors in ``PeakAlgorithms/``.
-
-Usage (standalone)
-------------------
-    python gaussian.py \
-        --peaks Labels/Scan_0203/baseline_peaks_3x3.json \
-        --two-theta tth.tiff \
-        --grid-mapping Metadata/Scan_0203/grid_mapping_3x3.json \
-        --reflections reflections.py \
-        --output shapes_catalog_3x3.json
 """
 
-import argparse
-import importlib.util
-import json
 from collections import defaultdict
 
 import numpy as np
-import tifffile
 
 
 DEFAULT_LINK_TOLERANCE = 5  # pixels — max distance to consider same peak across bins
@@ -297,43 +284,3 @@ def _coerce(obj):
     if isinstance(obj, np.ndarray):
         return _coerce(obj.tolist())
     return obj
-
-
-# ── Standalone CLI ─────────────────────────────────────────────────
-def main():
-    parser = argparse.ArgumentParser(description="Baseline shape finder (link + gaussian filter)")
-    parser.add_argument("--peaks", required=True, help="Saved *_peaks.json from 'xrd-app peaks'")
-    parser.add_argument("--two-theta", dest="two_theta", default="tth.tiff")
-    parser.add_argument("--grid-mapping", required=True, help="grid_mapping_*.json")
-    parser.add_argument("--reflections", default="reflections.py")
-    parser.add_argument("--output", default="shapes_catalog.json")
-    parser.add_argument("--link-tolerance", type=int, default=DEFAULT_LINK_TOLERANCE)
-    args = parser.parse_args()
-
-    with open(args.peaks) as f:
-        peaks_data = json.load(f)
-    peaks_by_bin = peaks_data.get("peaks_by_bin", peaks_data)
-
-    with open(args.grid_mapping) as f:
-        gm = json.load(f)
-    n_rows, n_cols = gm["n_bin_rows"], gm["n_bin_cols"]
-
-    spec = importlib.util.spec_from_file_location("reflections", args.reflections)
-    ref_mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(ref_mod)
-    degs, deg_labels = ref_mod.degs, ref_mod.deg_labels
-
-    tth_map = tifffile.imread(args.two_theta).astype(np.float64)
-
-    kept, filtered = run_shape_pipeline(
-        peaks_by_bin, n_rows, n_cols, tth_map, degs, deg_labels,
-        link_tolerance=args.link_tolerance)
-
-    with open(args.output, "w") as f:
-        json.dump(_coerce(kept), f, indent=2)
-
-    print(f"Kept {len(kept)} shapes, filtered {len(filtered)} -> {args.output}")
-
-
-if __name__ == "__main__":
-    main()

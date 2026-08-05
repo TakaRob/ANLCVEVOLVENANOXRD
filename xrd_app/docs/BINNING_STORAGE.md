@@ -53,8 +53,8 @@ xrd-app grid \
 These write small mapping files such as:
 
 ```text
-Metadata/Scan_0203/grid_mapping_1x1.json
-Metadata/Scan_0203/grid_mapping_3x3.json
+Metadata/Scan_0203/grid_mapping_1x1.h5
+Metadata/Scan_0203/grid_mapping_3x3.h5
 ```
 
 The mapping says which acquisition-order frames belong to each spatial bin.
@@ -114,7 +114,7 @@ If an unbinned archive does not exist, `bin` reads the loose raw HDF5 files
 directly. Retain these products:
 
 ```text
-Metadata/Scan_0203/grid_mapping_3x3.json
+Metadata/Scan_0203/grid_mapping_3x3.h5
 Binned/Scan_0203/xrd_3x3_bins.h5
 ```
 
@@ -167,7 +167,7 @@ commands and do not run `make-bins` or `archive-unbinned`.
 - For scientifically important or actively analyzed scans, keep
   `xrd_unbinned_archive.h5` and only the NxN caches currently needed.
 - For archival scans where storage dominates and the grid is finalized, keep
-  only `grid_mapping_NxN.json` and `xrd_NxN_bins.h5`.
+  only `grid_mapping_NxN[_variant].h5` and `xrd_NxN_bins.h5`.
 - Do not refer to the archive as a 1x1 binned file. A true
   `xrd_1x1_bins.h5` is already grid-assigned and may contain collision sums.
   When both exist, the app preferentially uses the lossless archive for ordinary

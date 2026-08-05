@@ -44,8 +44,8 @@ def configure(project_root=".", bin_size=3, scan=None, catalog=None):
     global DEGS, DEG_LABELS, LABELED_DEGS
     _DM = DataManager(project_root, scan=scan)
     _BIN_SIZE = bin_size
-    RESULTS_DIR = _DM.results_dir()
-    HOLDOUT_DIR = _DM.holdout_dir
+    RESULTS_DIR = _DM.labels_dir()
+    HOLDOUT_DIR = _DM.metadata_dir
     CATALOG_PATH = catalog
     WEIGHT_MODE = "count"   # fresh build starts on a plain head-count
     # Honor the per-scan/selected reflections file (fall back to defaults).

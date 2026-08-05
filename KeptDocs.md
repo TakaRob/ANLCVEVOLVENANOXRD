@@ -71,10 +71,10 @@ base algorithm — conforming to the **detector contract** (`precompute_tth`,
 `core/save_algorithm.py`.
 
 
-what was 
-xrd-app grid --deskew-method faithful (square-pixel re-grid, true-Y columns) and --deskew-method perrow_offset (legacy "triangle", in xrd_app/core/deskew_legacy.py).
-xrd-app shapes --algorithm gaussian_deskew — the linker-stage column-shift fix (xrd_app/ShapeAlgorithms/gaussian_deskew.py). Note: a linker fix cannot move a shape's center_bin, so it cannot actually de-skew positions; kept only for the record.
-The experimental deskew data catalogs (*_perrowOffset*, *_preHybrid*, *_faithful*, *_deskew* peaks/shapes in Labels/) were left in place.
+Current grid methods are `positions_xy`, `faithful`, `faithful_native`, and
+`commanded`; use `territory-grid` when irregular physical cells are required.
+Backlash is handled during grid construction rather than by shifting linked
+shapes, because a linker cannot correct a feature's `center_bin`.
 
  Rocking-Series Study — `5%_DI_Yes_GB` (Scans 203–214)
 

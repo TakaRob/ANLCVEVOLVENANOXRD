@@ -26,18 +26,18 @@ init ─► scan-detect ─► link (tth/refl/pos) ─► [create-positions] ─
 
 | # | Step | CLI command | GUI control | Output |
 |---|------|-------------|-------------|--------|
-| 1 | Create project | `init` | Setup → **New project…** | `config.yaml` + tree + seeded `reflections.*` |
+| 1 | Create project | `init` | Setup → **New project…** | `config.yaml` + tree + seeded `reflections.json` |
 | 2 | Register scans | `scan-detect` | Setup → **Select scan folder…** / **Select scan set…** | `Raw/scans.json` |
 | 3 | Link calibration | `link` / `convert-poni` | Setup → **Load tth.tiff…** / **Convert .poni → tth…** / **Load positions…** | `config.data_sources`, `Metadata/tth.tiff` |
 | 4 | Real positions | `create-positions` | *(auto, inside grid)* / Setup → **Load positions…** | `Metadata/<scan>/positions.csv` |
-| 5 | Grid mapping | `grid` | *(folded into Create bins)* | `Metadata/<scan>/grid_mapping_NxN.json` |
+| 5 | Grid mapping | `grid` | *(folded into Create bins)* | `Metadata/<scan>/grid_mapping_NxN[_variant].h5` |
 | 6 | Build bins | `bin` / `make-bins` | Programs → **Create bins** | `Binned/<scan>/xrd_NxN_bins.h5` |
-| 7 | Peaks (Phase 1) | `peaks` | Programs → Peak Finding **Run** | `Labels/<scan>/<algo>_peaks_NxN.json` |
-| 8 | Shapes (Phase 2) | `shapes` | Programs → Shape Finding **Run** | `Labels/<scan>/<algo>_shapes_NxN.json` + kept/filtered CSVs |
+| 7 | Peaks (Phase 1) | `peaks` | Programs → Peak Finding **Run** | `Labels/<scan>/<algo>_peaks_NxN.h5` |
+| 8 | Shapes (Phase 2) | `shapes` | Programs → Shape Finding **Run** | `Labels/<scan>/<algo>_shapes_NxN.h5` + kept/filtered CSVs |
 | — | peaks→shapes (1 scan) | `run-pipeline` | Shape Finding, Peaks = "run peak algo above first" | both of the above |
 | — | many scans | `batch` | Programs multi-select scans × algos (fans out `run-pipeline`) | per-scan outputs |
 | 9 | Device maps | *(none — a viewer)* | **Device View** tab | reads the shapes catalog |
-| 10 | Territorial reference | `territory-grid` → `bin`/`peaks`/`shapes --variant territory`, **or** `territory-build` | Programs → **Build territorial reference** | `*_territory.json` + `territory_shapes_1x1_territory_coord.json` |
+| 10 | Territorial reference | `territory-grid` → `bin`/`peaks`/`shapes --variant territory`, **or** `territory-build` | Programs → **Build territorial reference** | `grid_mapping_1x1_territory.h5` + territory peaks/shapes HDF5 |
 | 11 | Territory map | *(none — a viewer)* | Device View → **Territorial reference available →** (popup) | reads the territory catalog |
 
 ---
@@ -48,13 +48,13 @@ init ─► scan-detect ─► link (tth/refl/pos) ─► [create-positions] ─
 - **CLI:** `xrd-app init --name <NAME> [--scan-number N] [--root DIR]`. Creates
   the standard tree (`Raw/ Binned/ Metadata/ Labels/ Figures/ CVEvolve/`), writes
   `config.yaml`, **and seeds an editable default reflection set** into
-  `Metadata/reflections.{json,py}`.
+  `Metadata/reflections.json`.
 - **GUI:** Setup → **New project…** (a workspace must be set first). This calls
   `workspace.create_project()`, not the `init` command.
 - **Linkage — FIXED:** the GUI path previously created the tree/config but
   **skipped the reflection seeding**, so a GUI-made project silently fell back to
   the hidden bundled set (no "Project default" in the Reflections selector).
-  `workspace.create_project()` now seeds `reflections.{json,py}` exactly like
+  `workspace.create_project()` now seeds `reflections.json` exactly like
   `init`, so both front doors produce identical projects.
 
 ### 2. `scan-detect` — discover & register scans
@@ -123,7 +123,7 @@ init ─► scan-detect ─► link (tth/refl/pos) ─► [create-positions] ─
 - **CLI:** `xrd-app peaks --bin-size 3 [--algorithm NAME] [--snr 4.0]
   [--variant TAG]`. **Defaults:** snr **4.0**; algorithm = **highest-scoring
   bundled detector** for the bin (`5x5_tophat_band_adaptive_snr` here). Writes
-  `<algo>_peaks_NxN.json` + records a lineage block.
+  `<algo>_peaks_NxN.h5` + records a lineage block.
 - **GUI:** Programs → **Peak Finding → Run**. Multi-select detectors
   (Ctrl/Shift-click); the highest-scoring is pre-selected. Fans out over
   (selected scans × selected detectors). **`--snr` is not exposed** — the GUI
@@ -136,7 +136,7 @@ init ─► scan-detect ─► link (tth/refl/pos) ─► [create-positions] ─
   **grid** at ≥2×2 and **coordinate** (gridless, true-(X,Y) neighbors) at 1×1;
   at 1×1 a `gaussian` request maps to `territory` (same gaussian verification,
   coordinate linking) and the output is tagged `_coord`. Writes
-  `<algo>_shapes_NxN.json` + `kept_peaks_NxN.csv` + `filtered_peaks_NxN.csv`.
+  `<algo>_shapes_NxN.h5` + `kept_peaks_NxN.csv` + `filtered_peaks_NxN.csv`.
 - **GUI:** Programs → **Shape Finding → Run**. The **Peaks** dropdown selects the
   input peak set; **"⟵ run peak algorithm above first"** chains peaks→shapes via
   `run-pipeline` (required for multi-scan, since saved peak sets are per-scan).
@@ -151,7 +151,7 @@ init ─► scan-detect ─► link (tth/refl/pos) ─► [create-positions] ─
   lineage (scan + source peak set).
 - **Linkage (verified):** the tab discovers catalogs via `core.catalogs`
   (`feature_sources`/`default_feature_source`); a freshly-run
-  `gaussian_shapes_3x3.json` is auto-listed and its provenance read from the
+  `gaussian_shapes_3x3.h5` is auto-listed and its provenance read from the
   in-file lineage block.
 
 ### 10–11. Territorial reference + Territory Map
@@ -164,7 +164,7 @@ init ─► scan-detect ─► link (tth/refl/pos) ─► [create-positions] ─
   with no way to build it from the GUI.
 - **Territory Map is popup-only (by design):** there is **no Territory Map tab**.
   It opens from **Device View → "Territorial reference available →"**, a button
-  that appears only when `grid_mapping_1x1_territory.json` exists
+  that appears only when `grid_mapping_1x1_territory.h5` exists
   (`has_territory_reference`). Territorial catalogs are deliberately excluded from
   the Device View dropdown (their irregular cells can't render on the fixed
   row/col grid) and routed to the popup instead.
@@ -254,7 +254,7 @@ build).
 - `shapes --bin-size 3` → **167 shapes kept, 1200 filtered** + kept/filtered CSVs ✓
 - `lineage` → shapes → peaks → detector chain with defaults recorded
   (snr=4.0, link_tol=5, gaussian) ✓
-- Device View resolution (`core.catalogs`) auto-lists `gaussian_shapes_3x3.json` ✓
+- Device View resolution (`core.catalogs`) auto-lists `gaussian_shapes_3x3.h5` ✓
 - Territory view: `has_territory_reference=True`, territory catalog recognized &
   routed to the popup (1302 features), territory bins resolve ✓
 - Guardrails: `scan-detect` rejects ME7-only dirs; `grid` fails cleanly with no

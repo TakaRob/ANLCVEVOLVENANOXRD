@@ -1,7 +1,6 @@
 """Whole-detector unlimited-width "(no reflections)" reflection set."""
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import numpy as np
@@ -32,18 +31,7 @@ def test_whole_frame_builds_one_full_band():
     assert bands[refl_io.WHOLE_FRAME_LABEL].all()
 
 
-def test_legacy_whole_frame_tiles_load_as_one_reflection(tmp_path):
-    path = tmp_path / "reflections.json"
-    path.write_text(json.dumps([
-        {"name": refl_io.WHOLE_FRAME_LABEL, "two_theta": angle, "width": 0.4}
-        for angle in (0.0, 0.3, 0.6)
-    ]))
-    assert refl_io.read_json(path) == refl_io.whole_frame_reflections()
-
-
 def test_whole_frame_save_roundtrip(tmp_path):
     refls = refl_io.whole_frame_reflections()
-    refl_io.save(refls, tmp_path / "reflections.json", tmp_path / "reflections.py")
-    mod = io.load_module(tmp_path / "reflections.py")
-    assert set(mod.deg_labels) == {refl_io.WHOLE_FRAME_LABEL}
-    assert len(mod.degs) == len(refls)
+    path = refl_io.save(refls, tmp_path / "reflections.json")
+    assert refl_io.read_json(path) == refls

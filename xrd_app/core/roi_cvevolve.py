@@ -39,7 +39,7 @@ def create_session(dm, dest=None, holdout_pct=20.0, seed=42) -> dict:
     if not examples:
         raise ValueError(
             "No training examples found. Save manual ROI > Shape features first; "
-            "expected Labels/<scan>/*_roimap_NxN.json plus Metadata/<scan>/reflection_sum.npz.")
+            "expected Labels/<scan>/*_roimap_NxN.h5 plus Metadata/<scan>/reflection_sum.npz.")
     dest = Path(dest or (dm.cvevolve_dir / "roi_summed_detection")).resolve()
     data = dest / "test_data"
     holdout = dest / "holdout_data"
@@ -92,7 +92,9 @@ def create_session(dm, dest=None, holdout_pct=20.0, seed=42) -> dict:
     }
     with open(dest / "config.yaml", "w") as handle:
         yaml.safe_dump(config, handle, sort_keys=False)
-    (dest / "prompt.md").write_text(_prompt())
+    prompt = _prompt()
+    (dest / "prompt.md").write_text(prompt)
+    (dest / "holdout_test_prompt.md").write_text(prompt)
     return {"dest": dest, "examples": len(examples), "splits": splits}
 
 

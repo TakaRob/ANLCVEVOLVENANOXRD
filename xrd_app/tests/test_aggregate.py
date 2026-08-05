@@ -5,11 +5,10 @@ read path, column mapping, and CSV/SQLite emit are all exercised offline.
 """
 from __future__ import annotations
 
-import json
 import sqlite3
 from pathlib import Path
 
-from xrd_app.core import aggregate as agg
+from xrd_app.core import aggregate as agg, catalogs
 
 
 def _feature(fid, reflection, tth, chi, prof):
@@ -25,8 +24,8 @@ def _feature(fid, reflection, tth, chi, prof):
         "peak_intensity": max(e["intensity"] for e in prof.values()),
         "mean_snr": 8.5,
         "n_bins": len(prof),
-        "rocking_fwhm": 1.2,      # legacy alias for chi_fwhm
-        "strain_breadth": 0.05,   # legacy alias for tth_fwhm
+        "chi_fwhm": 1.2,
+        "tth_fwhm": 0.05,
         "spatial_extent": ["5_7", "5_8"],
         "reason": "kept",
         "intensity_profile": prof,
@@ -36,8 +35,8 @@ def _feature(fid, reflection, tth, chi, prof):
 def _write_shapes(labels_root: Path, scan: str, bin_size: int, kept):
     d = labels_root / scan
     d.mkdir(parents=True, exist_ok=True)
-    p = d / f"gaussian_shapes_{bin_size}x{bin_size}.json"
-    p.write_text(json.dumps({"scan": scan, "kept": kept, "filtered": []}))
+    p = d / f"gaussian_shapes_{bin_size}x{bin_size}.h5"
+    catalogs.save_result(p, {"scan": scan, "kept": kept, "filtered": []})
     return p
 
 
@@ -73,7 +72,7 @@ def test_aggregate_collects_features_and_devicemap(tmp_path):
     # device_map rows = total bins across all profiles: 2 + 2 + 1 = 5.
     assert len(device_map) == 5
 
-    # Column mapping: legacy rocking_fwhm/strain_breadth land in chi_fwhm/tth_fwhm.
+    # Canonical morphology fields are retained in the aggregate.
     f0 = features[0]
     assert f0["chi_fwhm"] == 1.2
     assert f0["tth_fwhm"] == 0.05

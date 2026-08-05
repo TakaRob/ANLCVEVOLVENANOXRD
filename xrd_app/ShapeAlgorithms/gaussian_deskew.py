@@ -47,14 +47,11 @@ Register in ``catalog.json`` and select with
 ``xrd-app shapes --algorithm gaussian_deskew``.
 """
 
-import argparse
 import importlib.util
-import json
 import os
 from collections import defaultdict
 
 import numpy as np
-import tifffile
 
 DEFAULT_LINK_TOLERANCE = 5   # px — same meaning as gaussian.py
 _MAX_SHIFT = 15              # px-cols — search range for the per-row backlash shift
@@ -199,39 +196,3 @@ def run_shape_pipeline(peaks_by_bin, n_rows, n_cols, tth_map, degs, deg_labels,
     for i, f in enumerate(kept):
         f["feature_id"] = i + 1
     return kept, filtered
-
-
-# ── Standalone CLI ─────────────────────────────────────────────────
-def main():
-    ap = argparse.ArgumentParser(description="Skew-aware shape finder (deskew link + gaussian filter)")
-    ap.add_argument("--peaks", required=True, help="Saved *_peaks.json from 'xrd-app peaks'")
-    ap.add_argument("--two-theta", dest="two_theta", default="tth.tiff")
-    ap.add_argument("--grid-mapping", required=True, help="grid_mapping_*.json")
-    ap.add_argument("--reflections", default="reflections.py")
-    ap.add_argument("--output", default="feature_catalog.json")
-    ap.add_argument("--link-tolerance", type=int, default=DEFAULT_LINK_TOLERANCE)
-    args = ap.parse_args()
-
-    with open(args.peaks) as f:
-        peaks_data = json.load(f)
-    peaks_by_bin = peaks_data.get("peaks_by_bin", peaks_data)
-    with open(args.grid_mapping) as f:
-        gm = json.load(f)
-    n_rows, n_cols = gm["n_bin_rows"], gm["n_bin_cols"]
-
-    spec = importlib.util.spec_from_file_location("reflections", args.reflections)
-    ref_mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(ref_mod)
-    degs, deg_labels = ref_mod.degs, ref_mod.deg_labels
-    tth_map = tifffile.imread(args.two_theta).astype(np.float64)
-
-    kept, filtered = run_shape_pipeline(
-        peaks_by_bin, n_rows, n_cols, tth_map, degs, deg_labels,
-        link_tolerance=args.link_tolerance)
-    with open(args.output, "w") as f:
-        json.dump(_coerce(kept), f, indent=2)
-    print(f"Kept {len(kept)} shapes, filtered {len(filtered)} -> {args.output}")
-
-
-if __name__ == "__main__":
-    main()

@@ -5,9 +5,9 @@ listing/selection behaves identically everywhere.
 
 Three catalog kinds live flat in a scan's results dir (``Labels/<scan>/``):
 
-* **peaks**   ``<algo>_peaks_<NxN>[_<tag>].json``   — dict, ``peaks_by_bin`` + lineage
-* **shapes**  ``<algo>_shapes_<NxN>[_<tag>].json``  — dict, ``kept``/``filtered`` + lineage
-* **feature** ``feature_catalog_<NxN>[_<tag>].json`` — a plain list (no lineage)
+* **peaks**   ``<algo>_peaks_<NxN>[_<tag>].h5``
+* **shapes**  ``<algo>_shapes_<NxN>[_<tag>].h5``
+* **combined** ``<algo>_combined_<NxN>[_<tag>].h5``
 
 The bin size can sit in the *middle* of the name (followed by an optional grid /
 experiment ``tag``), so it is parsed from the part after the kind keyword rather
@@ -22,23 +22,20 @@ changing their on-disk format; the CLI appends to it on every write via
 
 from __future__ import annotations
 
-import datetime
 import json
-import os
 import re
 from pathlib import Path
 from typing import NamedTuple
 
+from . import result_store
 from .io import atomic_write_json
 
-# Per-scan sidecar mapping ``filename -> lineage dict`` for files that cannot
-# carry an in-file lineage block (the plain-list feature_catalog, hand-made files).
+# Per-scan sidecar mapping ``filename -> lineage dict``.
 MANIFEST_NAME = "catalog_lineage.json"
 
 # kind -> the keyword that precedes the bin in the filename.
 _KIND_KEYWORDS = (("peaks", "_peaks_"), ("shapes", "_shapes_"),
                   ("combined", "_combined_"))
-_FEATURE_PREFIX = "feature_catalog_"
 # A "<NxN>" bin followed by an optional "_<tag>" — anchored at the start of the
 # substring that follows the kind keyword.
 _BIN_TAG_RE = re.compile(r"^(\d+)x(\d+)(?:_(.+))?$")
@@ -46,19 +43,15 @@ _BIN_TAG_RE = re.compile(r"^(\d+)x(\d+)(?:_(.+))?$")
 
 # ── name parsing ───────────────────────────────────────────────────
 def _bin_tag(rest: str):
-    """Split a ``"3x3"`` / ``"3x3_perrowOffset151x235"`` remainder → (bin, tag)."""
+    """Split a ``"3x3"`` / ``"3x3_territory"`` remainder into bin and tag."""
     m = _BIN_TAG_RE.match(rest)
-    if m:
-        return int(m.group(1)), (m.group(3) or "")
-    # Fallback: find the first "_NxN" anywhere (tolerates odd remainders).
-    m = re.search(r"(\d+)x(\d+)", rest)
-    return (int(m.group(1)) if m else None), ""
+    return (int(m.group(1)), m.group(3) or "") if m else (None, "")
 
 
 def parse_name(name) -> "dict | None":
     """Parse a catalog filename → ``{algo, kind, bin, tag}`` (or None).
 
-    ``kind`` ∈ {peaks, shapes, combined, feature}. The bin is taken from the
+    ``kind`` is peaks, shapes, or combined. The bin is taken from the
     segment after the kind keyword so an algorithm name like
     ``5x5_tophat_band_adaptive_snr`` doesn't masquerade as a bin size.
     """
@@ -68,13 +61,31 @@ def parse_name(name) -> "dict | None":
             algo, rest = stem.split(kw, 1)
             bin_size, tag = _bin_tag(rest)
             return {"algo": algo, "kind": kind, "bin": bin_size, "tag": tag}
-    if stem.startswith(_FEATURE_PREFIX):
-        bin_size, tag = _bin_tag(stem[len(_FEATURE_PREFIX):])
-        return {"algo": "", "kind": "feature", "bin": bin_size, "tag": tag}
     return None
 
 
 # ── lineage resolution + manifest ──────────────────────────────────
+def load_result(path):
+    """Load a numerical HDF5 catalog."""
+    try:
+        return result_store.load(path)
+    except Exception:
+        return None
+
+
+def load_result_metadata(path):
+    """Load catalog metadata without reading HDF5 numerical datasets."""
+    try:
+        return result_store.metadata(path)
+    except Exception:
+        return None
+
+
+def save_result(path, data):
+    """Persist a numerical catalog in the canonical HDF5 format."""
+    return result_store.save(path, data)
+
+
 def _load_json(path):
     try:
         with open(path) as f:
@@ -89,7 +100,7 @@ def _manifest_path(results_dir) -> Path:
 
 def read_lineage(path, results_dir=None) -> "dict | None":
     """In-file ``lineage`` block, else the manifest entry, else None."""
-    data = _load_json(path)
+    data = load_result_metadata(path)
     if isinstance(data, dict):
         lin = data.get("lineage")
         if isinstance(lin, dict):
@@ -124,7 +135,7 @@ def catalog_bin(path, results_dir=None) -> "int | None":
     lin = read_lineage(path, results_dir)
     if isinstance(lin, dict) and lin.get("bin_size") is not None:
         return lin["bin_size"]
-    data = _load_json(path)
+    data = load_result_metadata(path)
     if isinstance(data, dict) and data.get("bin_size") is not None:
         return data["bin_size"]
     info = parse_name(Path(path).name)
@@ -137,7 +148,7 @@ _IDENTITY_UNSET = object()
 def validate_result_identity(path, expected_scan=None, expected_bin_size=None,
                              expected_variant=_IDENTITY_UNSET, results_dir=None) -> dict:
     """Reject known scan/bin/variant mismatches for a result artifact."""
-    data = _load_json(path)
+    data = load_result_metadata(path)
     lin = read_lineage(path, results_dir)
     metadata = lin if isinstance(lin, dict) else (data if isinstance(data, dict) else {})
     info = parse_name(Path(path).name) or {}
@@ -210,21 +221,21 @@ def lineage_key(path):
 
 
 # ── discovery ──────────────────────────────────────────────────────
-def _iter_json(results_dir):
-    """JSONs in the scan dir plus one level of subdirs (future Peaks/ Shapes/)."""
+def _iter_catalogs(results_dir):
+    """HDF5 catalogs in the scan directory and one subdirectory level."""
     rd = Path(results_dir)
     if not rd.is_dir():
         return
-    yield from rd.glob("*.json")
-    for d in rd.iterdir():
-        if d.is_dir():
-            yield from d.glob("*.json")
+    yield from rd.glob("*.h5")
+    for directory in rd.iterdir():
+        if directory.is_dir():
+            yield from directory.glob("*.h5")
 
 
 def list_catalogs(results_dir, kind, bin_size=None) -> list:
     """All catalogs of ``kind`` (optionally for one bin), sorted by name."""
     out = []
-    for p in _iter_json(results_dir):
+    for p in _iter_catalogs(results_dir):
         if p.name == MANIFEST_NAME:
             continue
         info = parse_name(p.name)
@@ -236,10 +247,10 @@ def list_catalogs(results_dir, kind, bin_size=None) -> list:
     return sorted(out, key=lambda p: p.name)
 
 
-def available_bins(results_dir, kinds=("peaks", "shapes", "feature")) -> list:
+def available_bins(results_dir, kinds=("peaks", "shapes", "combined")) -> list:
     """Sorted bin sizes that have at least one catalog of the given kinds."""
     bins = set()
-    for p in _iter_json(results_dir):
+    for p in _iter_catalogs(results_dir):
         info = parse_name(p.name)
         if info and info["kind"] in kinds and info["bin"] is not None:
             bins.add(info["bin"])
@@ -247,129 +258,29 @@ def available_bins(results_dir, kinds=("peaks", "shapes", "feature")) -> list:
 
 
 def feature_sources(results_dir, bin_size=None) -> list:
-    """Catalogs offered in the feature-source selector: shapes, then combined,
-    then plain ``feature_catalog`` lists (hand-made one-offs / exports).
-
-    Plain lists were once hidden as redundant kept-only copies of a shapes file,
-    but intentional one-offs live as this kind too, so they are surfaced again.
-    ``default_feature_source`` still prefers shapes/combined for headless use.
-    """
+    """Shape and combined HDF5 catalogs offered as feature sources."""
     return (list_catalogs(results_dir, "shapes", bin_size)
-            + list_catalogs(results_dir, "combined", bin_size)
-            + list_catalogs(results_dir, "feature", bin_size))
+            + list_catalogs(results_dir, "combined", bin_size))
 
 
 def default_feature_source(results_dir, bin_size):
-    """The catalog a headless consumer should use when none is selected: the
-    newest-named shapes/combined catalog for ``bin_size`` (mirrors the single
-    canonical file the old ``feature_catalog_NxN.json`` provided). A plain
-    feature list is used only when no shapes/combined exists; ``None`` if neither.
-    """
+    """Newest-named shapes/combined catalog for ``bin_size``, or ``None``."""
     primary = (list_catalogs(results_dir, "shapes", bin_size)
                + list_catalogs(results_dir, "combined", bin_size))
-    if primary:
-        return primary[-1]
-    feats = list_catalogs(results_dir, "feature", bin_size)
-    return feats[-1] if feats else None
-
-
-# ── lineage backfill for hand-made feature catalogs ────────────────
-def _infer_peak_source(results_dir, bin_size, tag):
-    """Best guess at the peaks file a hand-made feature catalog derived from.
-
-    Returns ``(path, how)`` where ``how`` is ``"grid-tag match"`` when a peaks
-    file's grid tag (e.g. ``perrowOffset151x235``) appears in the catalog's tag,
-    or ``"bin fallback"`` for the plain (untagged, non-rawgrid) peaks at that bin.
-    ``(None, None)`` when the bin has no peaks file.
-    """
-    peaks = list_catalogs(results_dir, "peaks", bin_size)
-    if not peaks:
-        return None, None
-    tag = tag or ""
-    for p in peaks:                       # grid-variant match (tag encodes grid)
-        ptag = (parse_name(p.name) or {}).get("tag") or ""
-        if ptag and ptag in tag:
-            return p, "grid-tag match"
-    plain = [p for p in peaks if not (parse_name(p.name) or {}).get("tag")]
-    plain.sort(key=lambda p: ("rawgrid" in p.name, p.name))   # prefer non-rawgrid
-    if plain:
-        return plain[0], "bin fallback"
-    return peaks[0], "bin fallback"
-
-
-def backfill_feature_lineage(results_dir, scan=None, overwrite=False) -> list:
-    """Record lineage for plain ``feature_catalog`` files that have none, so they
-    show as first-class feature sources with an (inferred) peak lineage.
-
-    The peak source is inferred (see :func:`_infer_peak_source`) and flagged
-    ``peak_source_inferred`` so callers know it is a guess. Returns the list of
-    ``(filename, lineage)`` written. Idempotent unless ``overwrite``.
-    """
-    rd = Path(results_dir)
-    scan = scan or rd.name
-    out = []
-    for p in list_catalogs(rd, "feature"):
-        if not overwrite and read_lineage(p, rd) is not None:
-            continue
-        info = parse_name(p.name) or {}
-        bin_size, tag = info.get("bin"), (info.get("tag") or "")
-        try:
-            kept, _ = load_features_any(p)
-            n_features = len(kept)
-        except Exception:
-            n_features = None
-        created = datetime.datetime.fromtimestamp(
-            os.path.getmtime(p)).replace(microsecond=0).isoformat()
-        lineage = {
-            "stage": "feature",
-            "scan": scan,
-            "bin_size": bin_size,
-            "tag": tag,
-            "created": created,
-            "feature_count": n_features,
-            "lineage_backfilled": True,
-        }
-        src, how = _infer_peak_source(rd, bin_size, tag)
-        if src is not None:
-            lineage["peak_source_file"] = src.name
-            lineage["peak_source_inferred"] = True
-            lineage["peak_source_inference"] = how
-            ps = read_lineage(src, rd)
-            if isinstance(ps, dict):
-                lineage["peak_source"] = ps
-            else:                          # minimal nested source from the name
-                pinfo = parse_name(src.name) or {}
-                lineage["peak_source"] = {
-                    "stage": "peaks", "bin_size": pinfo.get("bin"),
-                    "peak_algorithm": pinfo.get("algo"), "tag": pinfo.get("tag"),
-                }
-        record_catalog(rd, p.name, lineage)
-        out.append((p.name, lineage))
-    return out
+    return primary[-1] if primary else None
 
 
 def shapes_for_peaks(results_dir, peaks_path) -> list:
     """Feature catalogs derived from a given peaks file.
 
-    Primary match: a shapes file whose ``lineage.peak_source_file`` names this
-    peaks file. Fallback (covers manually-renamed/tagged files where the lineage
-    pointer no longer resolves): shapes at the same bin and tag.
+    A shape catalog must identify the exact upstream peaks filename in lineage.
     """
     pname = Path(peaks_path).name
     pinfo = parse_name(pname) or {}
-    bin_size = pinfo.get("bin")
-    shapes = list_catalogs(results_dir, "shapes", bin_size)
-
-    direct = []
-    for sp in shapes:
-        lin = read_lineage(sp, results_dir)
-        if isinstance(lin, dict) and lin.get("peak_source_file") == pname:
-            direct.append(sp)
-    if direct:
-        return direct
-
-    tag = pinfo.get("tag")
-    return [sp for sp in shapes if (parse_name(sp.name) or {}).get("tag") == tag]
+    return [
+        path for path in list_catalogs(results_dir, "shapes", pinfo.get("bin"))
+        if (read_lineage(path, results_dir) or {}).get("peak_source_file") == pname
+    ]
 
 
 def match_across_bin(results_dir, kind, ref_path, new_bin) -> "Path | None":
@@ -438,7 +349,11 @@ def catalog_bin_keys(path, limit=400):
 
 
 def _grid_bin_keys(grid_mapping_path):
-    g = _load_json(grid_mapping_path)
+    from .io import load_grid_mapping
+    try:
+        g = load_grid_mapping(grid_mapping_path)
+    except Exception:
+        g = None
     if isinstance(g, dict) and isinstance(g.get("bins"), dict):
         return set(g["bins"].keys())
     return set()
@@ -496,7 +411,7 @@ class CatalogSources(NamedTuple):
 
 def resolve_catalog_sources(dm, catalog_path, bin_size=None, scan=None):
     """Resolve one catalog to a faithful grid/H5 pair for its scan and variant."""
-    results_dir = dm.results_dir(scan)
+    results_dir = dm.labels_dir(scan)
     bin_size = bin_size or catalog_bin(catalog_path, results_dir)
     if bin_size is None:
         raise ValueError(f"Cannot determine bin size for catalog {Path(catalog_path).name}")
@@ -515,24 +430,22 @@ def resolve_catalog_sources(dm, catalog_path, bin_size=None, scan=None):
     else:
         mdir = dm.metadata_scan_dir(scan)
         default = dm.grid_mapping(bin_size=bin_size, scan=scan)
-        tagged = sorted(p for p in mdir.glob(
-            f"grid_mapping_{bin_size}x{bin_size}_*.json") if p != default)
+        tagged = sorted(
+            p for p in mdir.glob(f"grid_mapping_{bin_size}x{bin_size}_*.h5")
+            if p != default)
         candidates = [default] + tagged
         grid = default
     cov = best_grid_mapping(candidates, catalog_path, default=grid, coverage=True)
-    return CatalogSources(cov.path, dm.bins_h5(bin_size, scan=scan, variant=variant),
+    return CatalogSources(cov.path, dm.binned_h5(bin_size, scan=scan, variant=variant),
                           variant, cov.matched, cov.total)
 
 
 def load_features_any(path):
     """``(kept, filtered)`` from any catalog kind.
 
-    shapes/combined dict → (kept, filtered); peaks dict → point-features;
-    plain list (feature_catalog) → (list, []). Missing/odd files → ([], []).
+    Shapes/combined dictionaries become feature lists; peaks become point features.
     """
-    data = _load_json(path)
-    if isinstance(data, list):
-        return data, []
+    data = load_result(path)
     if isinstance(data, dict):
         if "kept" in data or "filtered" in data:
             return data.get("kept", []), data.get("filtered", [])
@@ -546,25 +459,17 @@ def load_features_any(path):
 def append_features(path, feats) -> list:
     """Append feature dicts into a catalog in place, assigning ``feature_id``.
 
-    Writes back the same on-disk shape it found: a shapes file keeps its
-    ``kept``/``filtered``/``lineage`` structure (features go into ``kept``); a
-    combined file appends to ``features``; a plain list (legacy feature_catalog)
-    grows in place; a missing/odd file becomes a new plain list. This is what
-    lets the viewer's accept/curate action edit the *selected* shapes catalog
-    directly instead of a separate feature_catalog copy. Returns the ids
-    assigned, in order. Atomic write so readers never see a partial file.
+    A shapes file appends to ``kept`` and a combined file appends to ``features``.
+    Returns the assigned IDs. The replacement is atomic.
     """
     path = Path(path)
-    data = _load_json(path)
+    data = load_result(path)
     if isinstance(data, dict) and isinstance(data.get("kept"), list):
         target = data["kept"]
     elif isinstance(data, dict) and isinstance(data.get("features"), list):
         target = data["features"]
-    elif isinstance(data, list):
-        target = data
     else:
-        data = []
-        target = data
+        raise ValueError(f"Catalog cannot accept features: {path}")
     next_id = max((f.get("feature_id", 0) for f in target), default=0) + 1
     ids = []
     for feat in feats:
@@ -572,5 +477,5 @@ def append_features(path, feats) -> list:
         target.append(feat)
         ids.append(next_id)
         next_id += 1
-    atomic_write_json(path, data)
+    save_result(path, data)
     return ids

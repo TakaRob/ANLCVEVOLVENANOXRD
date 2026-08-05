@@ -193,19 +193,44 @@ def _apply_profile_crops(profiles, crops, parsed, mapping_bins):
             }
 
 
+def _keys_in_crops(keys, parsed, crops):
+    """Keep only spatial bins needed by at least one requested sample crop."""
+    if any(crop is None for crop in crops):
+        return list(keys)
+    selected = []
+    for key in keys:
+        row, col = parsed[key]
+        if any(y0 <= row < y1 and x0 <= col < x1 for x0, y0, x1, y1 in crops):
+            selected.append(key)
+    return selected
+
+
 def _sample_keys(source, keys, rois, mapping_bins, normalize_frames, profiles,
-                 progress=None, progress_offset=0, progress_total=None):
+                 crops=None, parsed=None, progress=None, progress_offset=0,
+                 progress_total=None):
     groups = _roi_groups(rois)
     normalize_source = (normalize_frames and
                         getattr(source, "aggregation", "sum") != "mean_per_frame")
     total = progress_total or len(keys)
     for index, key in enumerate(keys):
+        row, col = parsed[key] if parsed is not None else (None, None)
         for group in groups:
-            ux0, uy0, ux1, uy1 = group["bounds"]
+            members = group["members"]
+            if crops is not None:
+                members = [member for member in members
+                           if crops[member[0]] is None or
+                           (crops[member[0]][1] <= row < crops[member[0]][3] and
+                            crops[member[0]][0] <= col < crops[member[0]][2])]
+            if not members:
+                continue
+            ux0 = min(roi[0] for _, roi in members)
+            uy0 = min(roi[1] for _, roi in members)
+            ux1 = max(roi[2] for _, roi in members)
+            uy1 = max(roi[3] for _, roi in members)
             union = source.region(key, uy0, uy1, ux0, ux1)
             if union is None or not union.size:
                 continue
-            for roi_index, (x0, y0, x1, y1) in group["members"]:
+            for roi_index, (x0, y0, x1, y1) in members:
                 patch = union[y0 - uy0:y1 - uy0, x0 - ux0:x1 - ux0]
                 if patch.size:
                     n_frames = len(mapping_bins.get(key) or []) or 1
@@ -231,11 +256,13 @@ def sample_rois(
 ) -> list[dict]:
     """Reduce multiple detector ROIs in one spatial-bin pass.
 
-    Each bin's union detector bounding box is read once and all ROIs are sliced
-    from that in-memory patch. ``fast`` is an approximate preview: sample a
-    guarded spatial stride, identify bright coarse cells, then densely reread
-    their neighborhoods. Unsampled cells receive the coarse median floor and are
-    marked ``coarse_fill``. Exact analysis remains the default.
+    Each needed bin's union detector bounding box is read once and all ROIs are
+    sliced from that in-memory patch. Sample crops filter spatial keys before any
+    detector data is read; outside cells remain zero-filled in the full-size
+    result grid. ``fast`` is an approximate preview: sample a guarded spatial
+    stride, identify bright coarse cells, then densely reread their neighborhoods.
+    Unsampled cells receive the coarse median floor and are marked ``coarse_fill``.
+    Exact analysis remains the default.
     """
     if metric not in METRICS:
         raise ValueError(f"Unknown metric {metric!r}; choose from {METRICS}")
@@ -266,13 +293,13 @@ def sample_rois(
              for crop in requested_crops]
     profiles = [{} for _ in normalized]
     stride = max(2, int(stride))
-    regular = list(keys)
+    regular = _keys_in_crops(keys, parsed, crops)
 
     if not fast or stride <= 1 or len(regular) < stride * stride * 2:
         if fast:
             log("[roi-map] fast preview guard: grid too small/irregular; using exact sweep")
-        _sample_keys(source, keys, normalized, mapping_bins, normalize_frames,
-                     profiles, progress=progress)
+        _sample_keys(source, regular, normalized, mapping_bins, normalize_frames,
+                     profiles, crops=crops, parsed=parsed, progress=progress)
         if any(not profile for profile in profiles):
             raise ValueError("ROI does not overlap readable detector data")
         _apply_profile_crops(profiles, crops, parsed, mapping_bins)
@@ -284,8 +311,8 @@ def sample_rois(
               if parsed[key][0] % stride == 0 and parsed[key][1] % stride == 0]
     if not coarse:
         log("[roi-map] fast preview guard: no stride samples; using exact sweep")
-        _sample_keys(source, keys, normalized, mapping_bins, normalize_frames,
-                     profiles, progress=progress)
+        _sample_keys(source, regular, normalized, mapping_bins, normalize_frames,
+                     profiles, crops=crops, parsed=parsed, progress=progress)
         if any(not profile for profile in profiles):
             raise ValueError("ROI does not overlap readable detector data")
         _apply_profile_crops(profiles, crops, parsed, mapping_bins)
@@ -296,7 +323,7 @@ def sample_rois(
     log(f"[roi-map] FAST PREVIEW: stride={stride}, coarse {len(coarse)}/{len(keys)} bins; "
         "small features between sampled cells may be missed")
     _sample_keys(source, coarse, normalized, mapping_bins, normalize_frames, profiles,
-                 progress=progress)
+                 crops=crops, parsed=parsed, progress=progress)
     if any(not profile for profile in profiles):
         raise ValueError("ROI does not overlap readable detector data")
     refine = set()
@@ -320,8 +347,9 @@ def sample_rois(
     total_reads = len(coarse) + len(refine)
     log(f"[roi-map] FAST PREVIEW: densely refining {len(refine)} bins around coarse signal")
     _sample_keys(source, sorted(refine, key=lambda key: parsed[key]), normalized,
-                 mapping_bins, normalize_frames, profiles, progress=progress,
-                 progress_offset=len(coarse), progress_total=max(total_reads, 1))
+                 mapping_bins, normalize_frames, profiles, crops=crops, parsed=parsed,
+                 progress=progress, progress_offset=len(coarse),
+                 progress_total=max(total_reads, 1))
 
     for profile in profiles:
         floors = {
@@ -341,7 +369,7 @@ def sample_rois(
 
 
 def sample_roi(source, roi, **kwargs) -> dict:
-    """Backward-compatible one-ROI wrapper over :func:`sample_rois`."""
+    """Sample one ROI and return its map result."""
     return sample_rois(source, [roi], **kwargs)[0]
 
 

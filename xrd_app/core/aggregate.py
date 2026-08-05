@@ -40,9 +40,8 @@ DEVICEMAP_COLUMNS = [
 def iter_catalogs(results_dir: Path, scans=None, bin_size: Optional[int] = None):
     """Yield (scan_name, bin_size, catalog_path) — one catalog per (scan, bin).
 
-    Picks the canonical shapes/combined catalog per bin via
-    :func:`catalogs.default_feature_source` (the newest-named one), matching the
-    single-file behaviour the old per-bin ``feature_catalog_NxN.json`` provided.
+    Picks the newest-named canonical shapes/combined catalog per bin via
+    :func:`catalogs.default_feature_source`.
     """
     from . import catalogs
     if not results_dir.exists():
@@ -91,8 +90,8 @@ def _feature_row(scan: str, bin_size: Optional[int], f: dict) -> dict:
         "sum_integrated": round(sum(integrated), 1) if integrated else None,
         "mean_snr": round(f["mean_snr"], 2) if f.get("mean_snr") is not None else None,
         "n_bins": f.get("n_bins"),
-        "chi_fwhm": f.get("chi_fwhm", f.get("rocking_fwhm")),  # accept legacy field
-        "tth_fwhm": f.get("tth_fwhm", f.get("strain_breadth")),  # accept legacy field
+        "chi_fwhm": f.get("chi_fwhm"),
+        "tth_fwhm": f.get("tth_fwhm"),
         "spatial_extent": " ".join(f.get("spatial_extent", [])),
         "reason": f.get("reason"),
     }

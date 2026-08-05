@@ -34,7 +34,7 @@ def make_tab(project_root=".", scan=None, bin_size=3):
         # transform, so it only needs the base detector + name:
         #  - Noise reduction: the *selected* radial model (gaussian /
         #    split_gaussian / skewed_gaussian / fourier) plus the Strength/Shift
-        #    sliders. The saved detector reruns noise_reduction_algorithms.
+        #    sliders. The saved detector reruns core.algorithms.
         #    reduce_noise per image before the base detector's own cleaning.
         #  - Log scale + contrast clip: the log toggle and the contrast
         #    *percentile* bounds (not the absolute vmin/vmax, which are per-image

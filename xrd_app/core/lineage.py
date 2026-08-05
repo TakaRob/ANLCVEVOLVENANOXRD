@@ -1,4 +1,4 @@
-"""Provenance ("lineage") blocks embedded in every result JSON.
+"""Provenance ("lineage") blocks embedded in every result catalog.
 
 Each pipeline output carries a ``lineage`` dict recording how it was made, so a
 saved peaks/shapes/combined file is self-describing:
@@ -57,8 +57,7 @@ def combined_lineage(scan, bin_size, algorithm, detector_file=None) -> dict:
 
 def shape_lineage(scan, bin_size, shape_algorithm, link_tolerance,
                   peak_source, peak_source_file=None) -> dict:
-    """Shape lineage. ``peak_source`` is the upstream peaks' lineage dict (or a
-    bare name string for legacy peak files)."""
+    """Shape lineage with the upstream peaks lineage dictionary."""
     d = _base("shapes", scan, bin_size)
     d["shape_algorithm"] = shape_algorithm
     if link_tolerance is not None:
@@ -69,23 +68,12 @@ def shape_lineage(scan, bin_size, shape_algorithm, link_tolerance,
     return d
 
 
-def from_peaks_data(peaks_data: dict, fallback_file=None) -> dict:
-    """Recover an upstream peaks lineage from a loaded peaks JSON.
-
-    Prefers an embedded ``lineage`` block; otherwise synthesizes one from the
-    legacy top-level fields so older files still chain.
-    """
-    lin = peaks_data.get("lineage")
-    if isinstance(lin, dict):
-        return lin
-    return peak_lineage(
-        scan=peaks_data.get("scan"),
-        bin_size=peaks_data.get("bin_size"),
-        algorithm=peaks_data.get("algorithm") or peaks_data.get("detector")
-        or (str(fallback_file) if fallback_file else None),
-        detector_file=peaks_data.get("detector"),
-        snr=peaks_data.get("snr"),
-    )
+def from_peaks_data(peaks_data: dict) -> dict:
+    """Return the required upstream lineage from a loaded peaks catalog."""
+    lineage = peaks_data.get("lineage")
+    if not isinstance(lineage, dict):
+        raise ValueError("Peaks catalog has no lineage block")
+    return lineage
 
 
 def _bin_label(bs) -> str:

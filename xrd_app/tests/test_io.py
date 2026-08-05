@@ -30,12 +30,14 @@ def _project(tmp_path):
 
 
 def _write_grid(path, bins):
-    path.write_text(json.dumps({
+    io.save_grid_mapping(path, {
         "bin_size": 3,
         "n_bin_rows": 1,
         "n_bin_cols": len(bins),
+        "xrd_files": [],
+        "frame_map": [],
         "bins": bins,
-    }))
+    })
 
 
 def test_catalog_lineage_selects_matching_tagged_grid_and_h5(tmp_path):
@@ -46,21 +48,21 @@ def test_catalog_lineage_selects_matching_tagged_grid_and_h5(tmp_path):
     tagged_grid = dm.grid_mapping(bin_size=3, scan=7, variant="faithful")
     _write_grid(default_grid, {"0_0": [0]})
     _write_grid(tagged_grid, {"0_0": [0]})
-    catalog = labels / "gaussian_shapes_3x3_export.json"
-    catalog.write_text(json.dumps({
+    catalog = labels / "gaussian_shapes_3x3_export.h5"
+    catalogs.save_result(catalog, {
         "lineage": {
             "stage": "shapes", "scan": "Scan_0007", "bin_size": 3,
             "peak_source": {"stage": "peaks", "variant": "faithful"},
         },
         "kept": [{"center_bin": "0_0", "spatial_extent": ["0_0"]}],
         "filtered": [],
-    }))
+    })
 
     resolved = catalogs.resolve_catalog_sources(dm, catalog, bin_size=3, scan=7)
 
     assert resolved.variant == "faithful"
     assert resolved.grid_mapping == tagged_grid
-    assert resolved.bins_h5 == dm.bins_h5(3, scan=7, variant="faithful")
+    assert resolved.bins_h5 == dm.binned_h5(3, scan=7, variant="faithful")
     assert (resolved.matched, resolved.total) == (1, 1)
 
 
@@ -70,11 +72,11 @@ def test_tagged_catalog_filename_selects_matching_grid_and_h5(tmp_path):
     labels.mkdir(parents=True)
     tagged_grid = dm.grid_mapping(bin_size=3, scan=7, variant="faithful")
     _write_grid(tagged_grid, {"4_5": [0]})
-    catalog = labels / "gaussian_shapes_3x3_faithful.json"
-    catalog.write_text(json.dumps({
+    catalog = labels / "gaussian_shapes_3x3_faithful.h5"
+    catalogs.save_result(catalog, {
         "kept": [{"center_bin": "4_5", "spatial_extent": ["4_5"]}],
         "filtered": [],
-    }))
+    })
 
     resolved = catalogs.resolve_catalog_sources(dm, catalog, scan=7)
 
@@ -83,26 +85,26 @@ def test_tagged_catalog_filename_selects_matching_grid_and_h5(tmp_path):
 
 
 def test_best_grid_mapping_rejects_zero_overlap_for_nonempty_catalog(tmp_path):
-    grid = tmp_path / "grid_mapping_3x3.json"
+    grid = tmp_path / "grid_mapping_3x3.h5"
     _write_grid(grid, {"0_0": [0]})
-    catalog = tmp_path / "gaussian_shapes_3x3.json"
-    catalog.write_text(json.dumps({
+    catalog = tmp_path / "gaussian_shapes_3x3.h5"
+    catalogs.save_result(catalog, {
         "kept": [{"center_bin": "9_9", "spatial_extent": ["9_9"]}],
         "filtered": [],
-    }))
+    })
 
     with pytest.raises(catalogs.CatalogGridMismatch, match="covers only 0/1"):
         catalogs.best_grid_mapping([grid], catalog, default=grid)
 
 
 def test_best_grid_mapping_rejects_partial_coverage(tmp_path):
-    grid = tmp_path / "grid_mapping_3x3.json"
+    grid = tmp_path / "grid_mapping_3x3.h5"
     _write_grid(grid, {"0_0": [0]})
-    catalog = tmp_path / "gaussian_shapes_3x3.json"
-    catalog.write_text(json.dumps({
+    catalog = tmp_path / "gaussian_shapes_3x3.h5"
+    catalogs.save_result(catalog, {
         "kept": [{"center_bin": "0_0", "spatial_extent": ["0_0", "0_1"]}],
         "filtered": [],
-    }))
+    })
 
     with pytest.raises(catalogs.CatalogGridMismatch, match="covers only 1/2"):
         catalogs.best_grid_mapping([grid], catalog, default=grid)
@@ -160,7 +162,7 @@ def test_archive_source_sums_cells_and_regions_without_raw(tmp_path):
         "bins": {"0_0": [0, 1], "0_1": [2]},
     }
     gm_path = dm.grid_mapping(bin_size=1, scan=7)
-    gm_path.write_text(json.dumps(gm))
+    io.save_grid_mapping(gm_path, gm)
     for path in raw.iterdir():
         path.unlink()
 
@@ -338,13 +340,15 @@ def test_configured_grid_only_applies_without_explicit_context(tmp_path):
     dm.config.data.setdefault("data_sources", {})["grid_mapping"] = str(configured)
 
     assert dm.grid_mapping() == configured
-    assert dm.grid_mapping(bin_size=5, scan=7).name == "grid_mapping_5x5.json"
+    assert dm.grid_mapping(bin_size=5, scan=7).name == "grid_mapping_5x5.h5"
 
 
 def test_open_bin_source_pairs_supplied_variant_grid_with_variant_h5(tmp_path):
     dm = _project(tmp_path)
     gm = dm.grid_mapping(bin_size=3, scan=7, variant="faithful")
-    gm.write_text(json.dumps({"bin_size": 3, "variant": "faithful", "bins": {"9_9": []}}))
+    io.save_grid_mapping(gm, {
+        "bin_size": 3, "variant": "faithful", "bins": {"9_9": []},
+    })
     with h5py.File(dm.binned_h5(3, scan=7), "w") as f:
         f.create_dataset("0_0", data=np.zeros((1, 1)))
     with h5py.File(dm.binned_h5(3, scan=7, variant="faithful"), "w") as f:
@@ -359,11 +363,11 @@ def test_open_bin_source_pairs_supplied_variant_grid_with_variant_h5(tmp_path):
 
 def test_roi_source_uses_requested_bin_grid_not_configured_grid(tmp_path):
     dm = _project(tmp_path)
-    configured = tmp_path / "Metadata" / "configured_3x3.json"
-    configured.write_text(json.dumps({"bin_size": 3, "bins": {"3_3": []}}))
+    configured = tmp_path / "Metadata" / "configured_3x3.h5"
+    io.save_grid_mapping(configured, {"bin_size": 3, "bins": {"3_3": []}})
     dm.config.data.setdefault("data_sources", {})["grid_mapping"] = str(configured)
     requested = dm.grid_mapping(bin_size=5, scan=7)
-    requested.write_text(json.dumps({"bin_size": 5, "bins": {"5_5": []}}))
+    io.save_grid_mapping(requested, {"bin_size": 5, "bins": {"5_5": []}})
     with h5py.File(dm.binned_h5(5, scan=7), "w") as f:
         f.create_dataset("5_5", data=np.ones((1, 1)))
 
@@ -389,10 +393,10 @@ def test_open_bin_source_rejects_wrong_h5_bin_size_attr(tmp_path):
 def test_open_bin_source_rejects_out_of_grid_mapping_key(tmp_path):
     dm = _project(tmp_path)
     gm = dm.grid_mapping(bin_size=3, scan=7)
-    gm.write_text(json.dumps({
+    io.save_grid_mapping(gm, {
         "bin_size": 3, "n_bin_rows": 1, "n_bin_cols": 1,
         "bins": {"1_0": [0]},
-    }))
+    })
     with h5py.File(dm.binned_h5(3, scan=7), "w") as f:
         f.create_dataset("1_0", data=np.ones((2, 3)))
 
@@ -414,10 +418,10 @@ def test_open_bin_source_rejects_non_2d_bin_dataset(tmp_path):
 def test_open_bin_source_accepts_valid_sparse_h5_and_metadata(tmp_path):
     dm = _project(tmp_path)
     gm = dm.grid_mapping(bin_size=3, scan=7)
-    gm.write_text(json.dumps({
+    io.save_grid_mapping(gm, {
         "bin_size": 3, "n_bin_rows": 4, "n_bin_cols": 5,
         "bins": {"0_0": [0], "1_2": [], "3_4": [1]},
-    }))
+    })
     with h5py.File(dm.binned_h5(3, scan=7), "w") as f:
         f.attrs["bin_size"] = 3
         f.attrs["n_bin_rows"] = 4
@@ -440,10 +444,10 @@ def test_open_bin_source_accepts_valid_sparse_h5_and_metadata(tmp_path):
 def test_open_bin_source_preserves_territory_key_space(tmp_path):
     dm = _project(tmp_path)
     gm = dm.grid_mapping(bin_size=1, scan=7, variant="territory")
-    gm.write_text(json.dumps({
+    io.save_grid_mapping(gm, {
         "bin_size": 1, "coordinate_source": "territory_xy",
         "n_bin_rows": 2, "n_bin_cols": 2, "bins": {"7_0": [0]},
-    }))
+    })
     with h5py.File(dm.binned_h5(1, scan=7, variant="territory"), "w") as f:
         f.attrs["bin_size"] = 1
         f.attrs["n_bin_rows"] = 2

@@ -690,7 +690,7 @@ class SetupTab(QWidget):
         start = str(dm.metadata_scan_dir(self.scan))
         path = _pick_file(
             self, "Select a reflections file", start,
-            "Reflections (reflections.py reflections.json *.py *.json)")
+            "Reflection JSON (reflections.json *.json)")
         if not path:
             return
         dm.set_reflection_source(path, self.scan)

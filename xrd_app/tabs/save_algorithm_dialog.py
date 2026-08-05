@@ -14,7 +14,7 @@ from PyQt5.QtWidgets import (
 from ..config import DataManager, format_detector_label
 from ..core import save_algorithm
 
-# Radial background models from NoiseReduction/noise_reduction_algorithms.py.
+# Radial background models from core.algorithms.
 _NOISE_OPTIONS = ["(none)", "gaussian", "split_gaussian", "skewed_gaussian",
                   "fourier"]
 

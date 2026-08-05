@@ -89,7 +89,7 @@ ARC_COLORS = [
 
 BIN_SIZES = [1, 3, 4, 5]
 
-# H5 paths are resolved at runtime via DataManager.bins_h5(); labels only here.
+# H5 paths are resolved at runtime via DataManager.binned_h5(); labels only here.
 BIN_CONFIGS = {
     5: {"label": "5×5"},
     4: {"label": "4×4"},
@@ -942,7 +942,7 @@ class LabelingTool(QMainWindow):
         # Prefer a built HDF5 for any bin size, including 1×1 (one frame per
         # bin). A bins-only project (raw frames deleted to save disk) then still
         # labels off the h5; we only touch raw frames when no binned file exists.
-        resolved = self.dm.bins_h5(bin_size)
+        resolved = self.dm.binned_h5(bin_size)
         self.bins_h5_path = str(resolved) if resolved else None
 
         raw_keys = None
@@ -982,18 +982,13 @@ class LabelingTool(QMainWindow):
             self.bin_keys = sorted(mapping.keys())
             self.n_bins = len(self.bin_keys)
 
-        results_dir = self.dm.results_dir()
+        results_dir = self.dm.labels_dir()
         results_dir.mkdir(parents=True, exist_ok=True)
         self._annotations_path = results_dir / f"bin_annotations_{bin_size}x{bin_size}.json"
         self._all_annotations = {}
         if self._annotations_path.exists():
             with open(self._annotations_path) as f:
                 self._all_annotations = json.load(f)
-        else:
-            old_path = results_dir / "bin_annotations.json"
-            if bin_size == 5 and old_path.exists():
-                with open(old_path) as f:
-                    self._all_annotations = json.load(f)
 
         for key, ref_dict in self._all_annotations.items():
             has_points = any(
@@ -2109,7 +2104,7 @@ class LabelingTool(QMainWindow):
         """Copy reviewed annotations + empty bins to CVEvolve holdout_data."""
         self._save_current_bin_annotations()
 
-        holdout_dir = self.dm.holdout_dir
+        holdout_dir = self.dm.metadata_dir
         holdout_dir.mkdir(parents=True, exist_ok=True)
 
         reviewed_ann = {}

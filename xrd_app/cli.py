@@ -71,10 +71,8 @@ def init(project_name, scan_number, root):
 @click.option('--scan', default=None, help='Scan number/name (defaults to config scan)')
 @click.option('--project', is_flag=True, default=False,
               help='Write the project-wide default (Metadata/) instead of per-scan.')
-@click.option('--spacing', type=float, default=0.3, hidden=True)
-@click.option('--use-tth/--no-use-tth', 'use_tth', default=False, hidden=True)
 @click.option('--root', default='.', help='Project root directory')
-def whole_frame_reflections(scan, project, spacing, use_tth, root):
+def whole_frame_reflections(scan, project, root):
     """Write one unlimited-width "(no reflections)" reflection.
 
     Detectors recognize this reserved reflection as a detector-spanning band, so
@@ -83,13 +81,7 @@ def whole_frame_reflections(scan, project, spacing, use_tth, root):
     """
     from .core import reflections as refl_io
     dm = DataManager(root, scan=scan)
-    tth_map = None
-    if use_tth:
-        from .core import io
-        tth_path = dm.tth_map()
-        if Path(tth_path).exists():
-            tth_map = io.load_tth_map(tth_path)
-    refls = refl_io.whole_frame_reflections(tth_map, spacing=spacing)
+    refls = refl_io.whole_frame_reflections()
     mdir = dm.metadata_dir if project else dm.metadata_scan_dir(scan)
     out = refl_io.save(refls, mdir / "reflections.json")
     scope = "project default" if project else f"scan {dm.scan_name}"
@@ -115,7 +107,7 @@ _LINK_ROOTS = {
 
 @main.command()
 @click.option('--tth', help='Path to a 2θ-per-pixel TIFF map')
-@click.option('--reflections', help='Path to reflections.json or reflections.py')
+@click.option('--reflections', help='Path to reflections.json')
 @click.option('--detector', help='Path to a detector / evolved-algorithm .py script')
 @click.option('--raw-root', help='Parent dir containing many Scan_NNNN/ dirs (multi-scan)')
 @click.option('--position-root', help='Dir containing scan_NNNN_position.csv files (multi-scan)')
@@ -409,22 +401,25 @@ def build_holdout(source, algorithm, bin_size, scan, holdout_pct, seed, dest, ro
             click.echo("Error: --algorithm <name> required for --source peaks.")
             raise SystemExit(1)
         src_path = dm.peaks_json(algorithm, bin_size, scan)
-        _require(src_path, "peaks JSON")
+        _require(src_path, "peaks catalog")
         ann, empty = H.bins_from_peaks(str(src_path))
     else:  # shapes
         if not algorithm:
             click.echo("Error: --algorithm <name> required for --source shapes.")
             raise SystemExit(1)
         src_path = dm.shapes_json(algorithm, bin_size, scan)
-        _require(src_path, "shapes JSON")
+        _require(src_path, "shapes catalog")
         ann, empty = H.bins_from_shapes(str(src_path))
 
     dest_dir = Path(dest) if dest else dm.cvevolve_dir
     grid = dm.grid_mapping(bin_size=bin_size, scan=scan)
-    counts = H.build_split(
-        ann, empty, holdout_pct=holdout_pct, seed=seed,
-        dest_dev=dest_dir / "test_data", dest_holdout=dest_dir / "holdout_data",
-        grid_mapping=grid if Path(grid).exists() else None)
+    try:
+        counts = H.build_split(
+            ann, empty, holdout_pct=holdout_pct, seed=seed,
+            dest_dev=dest_dir / "test_data", dest_holdout=dest_dir / "holdout_data",
+            grid_mapping=grid if Path(grid).exists() else None)
+    except ValueError as exc:
+        raise click.UsageError(str(exc)) from exc
 
     click.echo(f"[holdout] source={source} kind={'peak' if source!='shapes' else 'shape'}")
     click.echo(f"[holdout] ({counts['holdout_bins']}/{counts['total_bins']}) bins → holdout, "
@@ -460,11 +455,32 @@ def cvevolve_init(name, force, root):
 
 
 # ─────────────────────────────────────────────────────────────────────
+# register-cvevolve — import a completed winner into the project library
+# ─────────────────────────────────────────────────────────────────────
+@main.command(name='register-cvevolve')
+@click.option('--config', 'config_path', required=True, help='CVEvolve config.yaml')
+@click.option('--name', default=None, help='Registered algorithm name (default: candidate name)')
+@click.option('--bin-size', type=int, default=None, help='Bin size this winner was trained on')
+@click.option('--root', default='.', help='Project root directory')
+def register_cvevolve(config_path, name, bin_size, root):
+    """Validate and register a completed CVEvolve winner in Algorithms/."""
+    from .core import cvevolve_results
+    try:
+        result = cvevolve_results.register_winner(
+            config_path, root, name=name, bin_size=bin_size)
+    except (FileNotFoundError, TypeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(f"[CVEvolve] registered winner -> {result['path']}")
+
+
+# ─────────────────────────────────────────────────────────────────────
 # run-cvevolve — wrapper around the CVEvolve algorithm search
 # ─────────────────────────────────────────────────────────────────────
 @main.command(name='run-cvevolve')
 @click.option('--config', 'config_path', required=True, help='CVEvolve config.yaml')
-@click.option('--prompt', 'prompt_path', default=None, help='CVEvolve task prompt .md (optional)')
+@click.option('--prompt', 'prompt_path', default=None, help='CVEvolve task prompt .md (default: prompt.md beside config)')
+@click.option('--holdout-test-prompt', 'holdout_prompt_path', default=None,
+              help='Holdout prompt .md (default: holdout_test_prompt.md beside config)')
 @click.option('--engine', type=click.Choice(['local', 'podman', 'docker']), default='podman')
 @click.option('--cvevolve-dir', default=None, help='Path to the CVEvolve checkout')
 @click.option('--image', default='cvevolve', help='Container image tag')
@@ -474,7 +490,8 @@ def cvevolve_init(name, force, root):
 @click.option('--hutch/--no-hutch', default=False,
               help='Enable Hutch (SQLite) tracking before launching; prints HUTCH_DB <path>')
 @click.option('--root', default='.', help='Project root directory')
-def run_cvevolve(config_path, prompt_path, engine, cvevolve_dir, image, build, mounts, envs, hutch, root):
+def run_cvevolve(config_path, prompt_path, holdout_prompt_path, engine, cvevolve_dir,
+                 image, build, mounts, envs, hutch, root):
     """Run CVEvolve with the given config (Podman by default — LLM-generated code)."""
     import subprocess
     import sys
@@ -487,10 +504,20 @@ def run_cvevolve(config_path, prompt_path, engine, cvevolve_dir, image, build, m
         # at the same DB without re-parsing the config.
         click.echo(f"HUTCH_DB {db_path}")
     inner = ["cvevolve", "run", "--config", str(config_path)]
+    if prompt_path is None:
+        default_prompt = config_path.parent / "prompt.md"
+        prompt_path = default_prompt if default_prompt.exists() else None
     if prompt_path:
         prompt_path = Path(prompt_path).resolve()
         _require(prompt_path, "CVEvolve prompt")
         inner += ["--prompt", str(prompt_path)]
+    if holdout_prompt_path is None:
+        default_holdout_prompt = config_path.parent / "holdout_test_prompt.md"
+        holdout_prompt_path = default_holdout_prompt if default_holdout_prompt.exists() else None
+    if holdout_prompt_path:
+        holdout_prompt_path = Path(holdout_prompt_path).resolve()
+        _require(holdout_prompt_path, "CVEvolve holdout test prompt")
+        inner += ["--holdout-test-prompt", str(holdout_prompt_path)]
 
     if engine == 'local':
         exe = sys.executable
@@ -512,11 +539,19 @@ def run_cvevolve(config_path, prompt_path, engine, cvevolve_dir, image, build, m
         if rc != 0:
             raise SystemExit(rc)
 
+    from .core import cvevolve_setup as CV
     mount_dirs = [Path(m).resolve() for m in mounts] or [Path(root).resolve()]
-    run_cmd = [engine, "run", "--rm", "-it"]
+    referenced_dirs = CV.config_mount_dirs(config_path)
+    for path in (prompt_path, holdout_prompt_path):
+        if path:
+            referenced_dirs.append(path.parent)
+    for directory in referenced_dirs:
+        if not any(directory.is_relative_to(d) for d in mount_dirs):
+            mount_dirs.append(directory)
+    run_cmd = [engine, "run", "--rm", "-i"]
     for name in envs:
         run_cmd += ["-e", name]
-    for d in mount_dirs:
+    for d in dict.fromkeys(mount_dirs):
         run_cmd += ["-v", f"{d}:{d}"]
     run_cmd += ["-w", str(config_path.parent), image, *inner]
     click.echo(f"[run-cvevolve:{engine}] {' '.join(run_cmd)}")
@@ -681,11 +716,9 @@ def scan_detect(scans_dir, scan_file, scans, deep, root):
 @click.option('--shape', default=None, help='Synthesize a grid with no positions: ROWSxCOLS or COLS')
 @click.option('--xrd-dir', help='Directory of raw per-frame H5 files (defaults to resolved)')
 @click.option('--positions', help='Scan position CSV (defaults to resolved)')
-@click.option('--rawgrid', is_flag=True,
-              help='Bypass (X,Y) de-skew: use the legacy serpentine X-only grid.')
 @click.option('--deskew-method',
               type=click.Choice(['auto', 'positions_xy', 'faithful', 'faithful_native',
-                                 'commanded', 'perrow_offset']),
+                                 'commanded']),
               default='auto',
               help='How frames map to the lattice, from the real (X, Y) CSV. '
                    'auto (DEFAULT): positions_xy at 1x1 (both axes snapped to true '
@@ -693,16 +726,16 @@ def scan_detect(scans_dir, scan_file, scans, deep, root):
                    'faithful at >=2x2 (already clean there). Override with: '
                    'positions_xy (force the true-(X,Y) grid at any bin), faithful '
                    '(snap columns to true Y on a square-pixel, file-index-row '
-                   'lattice), faithful_native (faithful at native frame density), '
-                   'commanded (align columns by rank), or perrow_offset (DEPRECATED). '
-                   "For zero-collision irregular cells use 'xrd-app territory-grid'.")
+                    'lattice), faithful_native (faithful at native frame density), or '
+                    'commanded (align columns by rank). For zero-collision irregular '
+                    "cells use 'xrd-app territory-grid'.")
 @click.option('--variant', default=None,
               help='Tag appended to default output names (e.g. "faithful") so a '
                    'coordinate variant sits alongside the default instead of overwriting it.')
-@click.option('--output', help='Output grid_mapping JSON (defaults to per-scan Metadata dir)')
+@click.option('--output', help='Output grid mapping HDF5 (defaults to per-scan Metadata dir)')
 @click.option('--root', default='.', help='Project root directory')
-def grid(bin_size, scan, shape, xrd_dir, positions, rawgrid, deskew_method, variant, output, root):
-    """Generate grid_mapping.json assigning raw frames to a spatial bin grid.
+def grid(bin_size, scan, shape, xrd_dir, positions, deskew_method, variant, output, root):
+    """Generate an HDF5 grid mapping assigning raw frames to a spatial bin grid.
 
     The grid is built from the **real (X, Y) coordinate CSV** — required. When
     no real CSV exists one is created automatically from the **real SOCKETSERVER
@@ -711,7 +744,7 @@ def grid(bin_size, scan, shape, xrd_dir, positions, rawgrid, deskew_method, vari
     than silently reconstructing the grid from the one-file-per-row layout (that
     silent fallback is what skewed rocking 203-214). The chosen ``deskew_method``
     (default ``auto``) and the positions provenance (``positions_csv`` /
-    ``positions_real``) are recorded in the output JSON, and ``bin`` refuses any
+    ``positions_real``) are recorded in the output mapping, and ``bin`` refuses any
     mapping whose ``positions_real`` is not true.
 
     The only opt-in bypass is ``--shape ROWSxCOLS``, which synthesizes a raster
@@ -767,7 +800,7 @@ def grid(bin_size, scan, shape, xrd_dir, positions, rawgrid, deskew_method, vari
 
     io.generate_grid_mapping(xdir, pos if pos_real else None, bin_size,
                              scan_number=scan_no, output=out, n_cols=n_cols,
-                             deskew=not rawgrid, deskew_method=deskew_method,
+                             deskew=True, deskew_method=deskew_method,
                              log=click.echo, archive=archive if archive.exists() else None)
     click.echo(f"Wrote grid_mapping -> {out}")
 
@@ -785,7 +818,7 @@ def grid(bin_size, scan, shape, xrd_dir, positions, rawgrid, deskew_method, vari
 @click.option('--variant', default='territory',
               help='Tag for the output names so the territorial mapping sits '
                    'alongside the grid ones (default "territory").')
-@click.option('--output', help='Output grid_mapping JSON (defaults to per-scan Metadata dir)')
+@click.option('--output', help='Output grid mapping HDF5 (defaults to per-scan Metadata dir)')
 @click.option('--root', default='.', help='Project root directory')
 def territory_grid(target_size, scan, xrd_dir, positions, variant, output, root):
     """Build a territorial (cell-model) grid mapping — the skew-free source of truth.
@@ -867,10 +900,6 @@ def territory_build(ctx, target_size, scan, algorithm, snr, compression, root):
 @main.command(name='create-positions')
 @click.option('--scan', default=None, help='Scan number/name (defaults to config scan)')
 @click.option('--socket-dir', help='SOCKETSERVER interferometry dir (defaults to resolved)')
-@click.option('--method', type=click.Choice(['averaging', 'basic']), default='averaging',
-              help='averaging (default, self-contained) or basic (needs --theta)')
-@click.option('--theta', type=float, default=None,
-              help='Sample theta in degrees — only used by --method basic')
 @click.option('--reduction', type=int, default=1,
               help='Use every Nth interferometer sample (speed; 1 = all)')
 @click.option('--from-h5', 'from_h5', default=None,
@@ -879,8 +908,7 @@ def territory_build(ctx, target_size, scan, algorithm, snr, compression, root):
 @click.option('--output', help='Output CSV (default: Metadata/<scan>/positions.csv)')
 @click.option('--force', is_flag=True, help='Overwrite an existing CSV')
 @click.option('--root', default='.', help='Project root directory')
-def create_positions(scan, socket_dir, method, theta, reduction, from_h5, output,
-                     force, root):
+def create_positions(scan, socket_dir, reduction, from_h5, output, force, root):
     """Build a REAL per-frame position CSV from the beamline's stage positions.
 
     Two sources, tried in order (or forced): the **SOCKETSERVER interferometry
@@ -930,8 +958,7 @@ def create_positions(scan, socket_dir, method, theta, reduction, from_h5, output
             info = P.build_positions_csv_from_h5(lozano_h5, out, log=click.echo)
         else:
             info = P.build_positions_csv(
-                sdir, out, scan_number=scan_no, method=method, theta_deg=theta,
-                reduction=reduction, log=click.echo)
+                sdir, out, scan_number=scan_no, reduction=reduction, log=click.echo)
     except (FileNotFoundError, ValueError, KeyError) as e:
         click.echo(f"Error: {e}")
         raise SystemExit(1)
@@ -979,7 +1006,7 @@ def archive_unbinned(scan, xrd_dir, positions, output, compression, force, root)
 @main.command()
 @click.option('--bin-size', type=int, default=3, help='Spatial bin size (NxN)')
 @click.option('--scan', default=None, help='Scan number/name (defaults to config scan)')
-@click.option('--grid-mapping', help='Grid mapping JSON (defaults to resolved)')
+@click.option('--grid-mapping', help='Grid mapping HDF5 (defaults to resolved)')
 @click.option('--variant', default=None,
               help='Coordinate variant tag (e.g. "faithful") — resolves the matching '
                    'tagged grid mapping and writes a tagged binned HDF5.')
@@ -999,9 +1026,8 @@ def bin(bin_size, scan, grid_mapping, variant, output, compression,
     out.parent.mkdir(parents=True, exist_ok=True)
 
     # Require the grid to have been built from a REAL (X, Y) coordinate CSV.
-    # Layout-reconstructed (file_per_row) or synthetic grids — and any legacy
-    # mapping predating this provenance field — are rejected so we never bin on
-    # the skew that mis-binned rocking 203-214.
+    # Layout-reconstructed or synthetic grids without position provenance are
+    # rejected so we never bin on the skew that mis-binned rocking 203-214.
     gm_data = io.load_grid_mapping(gm)
     if not gm_data.get("positions_real", False):
         src = gm_data.get("coordinate_source", "unknown")
@@ -1033,10 +1059,10 @@ def bin(bin_size, scan, grid_mapping, variant, output, compression,
 @click.option('--name', 'out_name', default=None, help='Algorithm name for the output file (default: detector stem)')
 @click.option('--variant', default=None,
               help='Coordinate variant tag (e.g. "faithful") — reads the tagged bins '
-                   'and writes a tagged peaks JSON.')
+                   'and writes a tagged peaks HDF5 catalog.')
 @click.option('--h5-path', help='Binned HDF5 (defaults to resolved bins)')
 @click.option('--tth-path', help='2θ TIFF map (defaults to resolved)')
-@click.option('--reflections', 'reflections_path', help='reflections.py (defaults to resolved)')
+@click.option('--reflections', 'reflections_path', help='reflections.json (defaults to resolved)')
 @click.option('--root', default='.', help='Project root directory')
 def peaks(bin_size, scan, algorithm, snr, workers, out_name, variant, h5_path, tth_path,
           reflections_path, root):
@@ -1064,8 +1090,8 @@ def peaks(bin_size, scan, algorithm, snr, workers, out_name, variant, h5_path, t
         detector_file=det, snr=snr, variant=variant)
 
     out = dm.peaks_json(algo, bin_size, scan, variant=variant)
-    _write_json(out, result)
     from .core import catalogs
+    catalogs.save_result(out, result)
     catalogs.record_catalog(dm.labels_dir(scan), out.name, result["lineage"])
     click.echo(f"\nDone: {result['n_peaks']} peaks in "
                f"{result['n_bins_with_peaks']} bins -> {out}")
@@ -1078,12 +1104,12 @@ def peaks(bin_size, scan, algorithm, snr, workers, out_name, variant, h5_path, t
 @click.option('--bin-size', type=int, default=3, help='Bin size to process')
 @click.option('--scan', default=None, help='Scan number/name (defaults to config scan)')
 @click.option('--algorithm', default='gaussian', help='Shape algorithm path OR bundled name (see "detectors --kind shape")')
-@click.option('--from-peaks', help='Path to a saved *_peaks.json (else --peak-algo)')
+@click.option('--from-peaks', help='Path to a saved peaks HDF5 catalog (else --peak-algo)')
 @click.option('--peak-algo', help='Name of a saved peak set in Labels/<scan>/')
 @click.option('--link-tolerance', type=int, default=5, help='Cross-bin link tolerance (px)')
 @click.option('--variant', default=None,
               help='Coordinate variant tag (e.g. "faithful") — resolves the tagged '
-                   'peaks/grid and writes a tagged shapes JSON + CSVs.')
+                   'peaks/grid and writes a tagged shapes HDF5 catalog + CSVs.')
 @click.option('--coordinate/--grid-link', 'coordinate', default=None,
               help='Linking mode. Gridless coordinate linking (across true (X,Y) '
                    'neighbors) is the DEFAULT at 1×1 — the skew-free path, no grid '
@@ -1093,8 +1119,8 @@ def peaks(bin_size, scan, algorithm, snr, workers, out_name, variant, h5_path, t
                    '(only linking changes) and writes a "_coord" shapes file.')
 @click.option('--positions', help='Position CSV for coordinate linking (defaults to resolved)')
 @click.option('--tth-path', help='2θ TIFF map (defaults to resolved)')
-@click.option('--reflections', 'reflections_path', help='reflections.py (defaults to resolved)')
-@click.option('--grid-mapping', help='Grid mapping JSON (defaults to resolved)')
+@click.option('--reflections', 'reflections_path', help='reflections.json (defaults to resolved)')
+@click.option('--grid-mapping', help='Grid mapping HDF5 (defaults to resolved)')
 @click.option('--root', default='.', help='Project root directory')
 def shapes(bin_size, scan, algorithm, from_peaks, peak_algo, link_tolerance, variant,
            coordinate, positions, tth_path, reflections_path, grid_mapping, root):
@@ -1106,7 +1132,6 @@ def shapes(bin_size, scan, algorithm, from_peaks, peak_algo, link_tolerance, var
     Binned sizes default to grid linking. Coordinate mode reuses the standard
     peaks and only changes the linking stage.
     """
-    import json
     from .core import processing
     dm = DataManager(root, scan=scan)
 
@@ -1135,11 +1160,10 @@ def shapes(bin_size, scan, algorithm, from_peaks, peak_algo, link_tolerance, var
     peaks_path = Path(from_peaks) if from_peaks else (
         dm.peaks_json(peak_algo, bin_size, scan, variant=variant) if peak_algo else None)
     if not peaks_path:
-        raise click.UsageError("Provide --from-peaks <json> or --peak-algo <name>.")
-    _require(peaks_path, "peaks JSON (run 'xrd-app peaks' first)")
-    with open(peaks_path) as f:
-        peaks_data = json.load(f)
+        raise click.UsageError("Provide --from-peaks <catalog> or --peak-algo <name>.")
+    _require(peaks_path, "peaks catalog (run 'xrd-app peaks' first)")
     from .core import catalogs
+    peaks_data = catalogs.load_result(peaks_path)
     try:
         catalogs.validate_result_identity(
             peaks_path, expected_scan=dm.scan_name,
@@ -1189,13 +1213,13 @@ def shapes(bin_size, scan, algorithm, from_peaks, peak_algo, link_tolerance, var
     result["lineage"] = lineage.shape_lineage(
         scan=dm.scan_name, bin_size=bin_size, shape_algorithm=algo,
         link_tolerance=link_tolerance,
-        peak_source=lineage.from_peaks_data(peaks_data, fallback_file=peaks_path.name),
+        peak_source=lineage.from_peaks_data(peaks_data),
         peak_source_file=peaks_path.name)
 
     out = dm.shapes_json(algo, bin_size, scan, variant=out_variant)
-    _write_json(out, result)
+    catalogs.save_result(out, result)
 
-    # Emit the kept/filtered CSVs alongside the shapes file. The shapes JSON is
+    # Emit the kept/filtered CSVs alongside the shapes file. The shapes HDF5 file is
     # the catalog the GUIs (viewer, device-map, orientation) read directly via
     # core.catalogs — no separate feature_catalog copy is written anymore.
     suffix = f"{bin_size}x{bin_size}" + (f"_{out_variant}" if out_variant else "")
@@ -1343,7 +1367,6 @@ def roi_shapes(bin_size, scan, rois, name, preview_output, fast, stride,
         crops = [None] * len(detector_rois)
 
     dm = DataManager(root, scan=scan)
-    h5 = dm.binned_h5(bin_size, scan=scan)
     tth = dm.tth_map(scan=scan)
     gm_path = dm.grid_mapping(bin_size=bin_size, scan=scan)
     for label, path in (("tth", tth), ("grid mapping", gm_path)):
@@ -1352,13 +1375,6 @@ def roi_shapes(bin_size, scan, rois, name, preview_output, fast, stride,
         gm = io.validate_grid_mapping_bin_size(gm_path, bin_size)
     except ValueError as exc:
         raise click.ClickException(str(exc)) from exc
-    if not fast and not Path(h5).exists():
-        archive = dm.unbinned_archive_h5(scan=scan)
-        click.echo(f"[roi-shapes] {bin_size}x{bin_size} bins are not built; "
-                   "building them from the lossless archive/raw frames...")
-        io.build_bins(gm, h5, bin_size=bin_size, compression="zstd",
-                      log=click.echo, archive=archive if archive.exists() else None)
-
     try:
         source = io.open_bin_source(dm, bin_size, scan, grid_mapping=gm_path)
     except (FileNotFoundError, ValueError) as exc:
@@ -1457,14 +1473,12 @@ def roi_save(ctx, rois, name, bin_size, scan, sample_crops, root):
 @click.option('--shape-algo', default='gaussian', help='Shape algorithm name')
 @click.option('--snr', type=float, default=4.0, help='SNR threshold for detection')
 @click.option('--shape', 'grid_shape', default=None, help='Synthesize grids: ROWSxCOLS or COLS')
-@click.option('--rawgrid', is_flag=True,
-              help='Bypass (X,Y) de-skew: use the legacy serpentine X-only grid.')
 @click.option('--compression', type=click.Choice(['zstd', 'gzip', 'lz4', 'none']), default='zstd')
 @click.option('--skip-existing', is_flag=True, help='Skip a scan whose shapes already exist')
 @click.option('--root', default='.', help='Project root directory')
 @click.pass_context
 def batch(ctx, scans, all_scans, bin_size, algorithm, shape_algo, snr, grid_shape,
-          rawgrid, compression, skip_existing, root):
+          compression, skip_existing, root):
     """Run grid -> bin -> peaks -> shapes for many scans, each in its own dirs."""
     scan_list = _resolve_scan_list(scans, all_scans, root)
     if not scan_list:
@@ -1491,8 +1505,7 @@ def batch(ctx, scans, all_scans, bin_size, algorithm, shape_algo, snr, grid_shap
             continue
         try:
             ctx.invoke(archive_unbinned, scan=name, compression=compression, root=root)
-            ctx.invoke(grid, bin_size=bin_size, scan=name, shape=grid_shape,
-                       rawgrid=rawgrid, root=root)
+            ctx.invoke(grid, bin_size=bin_size, scan=name, shape=grid_shape, root=root)
             ctx.invoke(bin, bin_size=bin_size, scan=name, compression=compression, root=root)
             ctx.invoke(peaks, bin_size=bin_size, scan=name, algorithm=algorithm,
                        snr=snr, root=root)
@@ -1550,19 +1563,15 @@ def run_pipeline(ctx, bin_size, scan, algorithm, shape_algo, snr, workers, root)
 @click.option('--scan', default=None, help='Scan number/name (defaults to config scan)')
 @click.option('--shape', 'grid_shape', default=None,
               help='Synthesize a grid (no positions): ROWSxCOLS or COLS')
-@click.option('--rawgrid', is_flag=True,
-              help='Bypass (X,Y) de-skew: use the legacy serpentine X-only grid.')
 @click.option('--compression', type=click.Choice(['zstd', 'gzip', 'lz4', 'none']), default='zstd')
 @click.option('--normalize-frames/--sum-frames', default=False,
               help='Write the mean per contributing frame instead of the frame sum.')
 @click.option('--root', default='.', help='Project root directory')
 @click.pass_context
-def make_bins(ctx, bin_size, scan, grid_shape, rawgrid, compression,
-              normalize_frames, root):
+def make_bins(ctx, bin_size, scan, grid_shape, compression, normalize_frames, root):
     """Archive raw frames once, then build the requested grid and bins."""
     ctx.invoke(archive_unbinned, scan=scan, compression=compression, root=root)
-    ctx.invoke(grid, bin_size=bin_size, scan=scan, shape=grid_shape,
-               rawgrid=rawgrid, root=root)
+    ctx.invoke(grid, bin_size=bin_size, scan=scan, shape=grid_shape, root=root)
     ctx.invoke(bin, bin_size=bin_size, scan=scan, compression=compression,
                normalize_frames=normalize_frames, root=root)
     dm = DataManager(root, scan=scan)
@@ -1689,30 +1698,28 @@ def run_combined_cmd(bin_size, scan, algorithm, root):
     suffix = f"{bin_size}x{bin_size}"
     ldir = dm.labels_dir(scan)
     ldir.mkdir(parents=True, exist_ok=True)
-    _write_json(ldir / f"{algo}_combined_{suffix}.json", result)
-    # The combined JSON is itself a feature source (load_features_any reads its
-    # "features" list) — the GUIs read it directly; no feature_catalog copy.
+    output = ldir / f"{algo}_combined_{suffix}.h5"
     from .core import catalogs
-    catalogs.record_catalog(ldir, f"{algo}_combined_{suffix}.json", result["lineage"])
+    catalogs.save_result(output, result)
+    catalogs.record_catalog(ldir, output.name, result["lineage"])
     click.echo(f"\nDone: {result['n_features']} features in "
                f"{len(result['by_bin'])} bins.")
 
 
 # ─────────────────────────────────────────────────────────────────────
-# lineage — show the provenance of result JSONs (peaks/shapes/combined)
+# lineage — show provenance of peaks/shapes/combined catalogs
 # ─────────────────────────────────────────────────────────────────────
 @main.command()
 @click.argument('target', required=False)
 @click.option('--scan', default=None, help='Scan number/name (defaults to config scan)')
 @click.option('--root', default='.', help='Project root directory')
 def lineage(target, scan, root):
-    """Show the lineage/provenance of result JSONs.
+    """Show the lineage/provenance of result catalogs.
 
-    With no TARGET, summarizes every peaks/shapes/combined JSON in
+    With no TARGET, summarizes every peaks/shapes/combined HDF5 catalog in
     Labels/<scan>/. TARGET may be a path or a file name within that folder.
     """
-    import json
-    from .core import lineage as L
+    from .core import catalogs, lineage as L
     dm = DataManager(root, scan=scan)
     ldir = dm.labels_dir(scan)
     if target:
@@ -1720,31 +1727,27 @@ def lineage(target, scan, root):
         if not p.exists():
             p = ldir / target            # try as a name inside Labels/<scan>
         if not p.exists():
-            raise click.ClickException(f"Result JSON not found: {p}")
+            raise click.ClickException(f"Result catalog not found: {p}")
         paths = [p]
     else:
-        paths = (sorted(ldir.glob("*_peaks_*.json"))
-                 + sorted(ldir.glob("*_shapes_*.json"))
-                 + sorted(ldir.glob("*_combined_*.json")))
+        paths = (catalogs.list_catalogs(ldir, "peaks")
+                 + catalogs.list_catalogs(ldir, "shapes")
+                 + catalogs.list_catalogs(ldir, "combined"))
     if not paths:
-        click.echo(f"No result JSONs found in {ldir}.")
+        click.echo(f"No result catalogs found in {ldir}.")
         return
     for p in paths:
         if not p.exists():
             click.echo(f"\n{p}: not found")
             continue
-        with open(p) as f:
-            data = json.load(f)
+        data = catalogs.load_result(p) or {}
         click.echo(f"\n{p.name}")
         lin = data.get("lineage")
         if isinstance(lin, dict):
             for line in L.format_lineage(lin):
                 click.echo("  " + line)
         else:
-            click.echo("  (no lineage block — legacy file)")
-            for k in ("algorithm", "shape_algo", "peak_source", "bin_size", "scan"):
-                if k in data:
-                    click.echo(f"    {k}: {data[k]}")
+            click.echo("  (no lineage block)")
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -1804,7 +1807,7 @@ def aggregate(scans, bin_size, out_dir, root):
 def scan_table(bin_size, type_match, refl, all_refl, bandwidth, out_dir, root):
     """One summary row per scan → prints a table + writes Study/scan_summary.csv.
 
-    For a bin size and catalog TYPE (the JSON lineage shared across scans — e.g.
+    For a bin size and catalog TYPE (the lineage shared across scans — e.g.
     the gaussian shapes at 3×3, or a territorial mapping) reports per scan:
     feature count, footprint area (sum + union), coverage %, the preferred χ
     (dominant azimuthal cluster) ± range, and shape fill % (solidity). A
@@ -1854,14 +1857,14 @@ def scan_table(bin_size, type_match, refl, all_refl, bandwidth, out_dir, root):
               help='Max spatial distance (bins) to call two shapes the same grain across θ')
 @click.option('--min-theta', type=int, default=2,
               help='Distinct θ a track needs to be flagged "recurrent" (H1)')
-@click.option('--out', 'out_path', default='Study/tracks.json', help='Output tracks JSON')
+@click.option('--out', 'out_path', default='Study/tracks.h5', help='Output tracks HDF5')
 @click.option('--root', default='.', help='Project root directory')
 def track(scans, bin_size, match_tol, min_theta, out_path, root):
-    """Link shapes across the θ sweep into grain tracks (Study/tracks.json + .csv).
+    """Link shapes across the θ sweep into grain tracks (Study/tracks.h5 + .csv).
 
     Same reflection band + spatial proximity within --match-tol bins (the grid is
     identical across θ, so de-skewed bin coords compare directly). Emits a full
-    JSON (per-track θ membership, χ(θ), intensity(θ)) and a one-row-per-track CSV.
+    HDF5 (per-track theta membership, chi(theta), intensity(theta)) and a one-row-per-track CSV.
     """
     from .core import aggregate as agg, tracking
     dm = DataManager(root)
@@ -1881,7 +1884,8 @@ def track(scans, bin_size, match_tol, min_theta, out_path, root):
     out = Path(out_path)
     if not out.is_absolute():
         out = Path(root) / out
-    _write_json(out, {
+    from .core import result_store
+    result_store.save(out, {
         "bin_size": bin_size, "match_tol": match_tol, "min_theta": min_theta,
         "n_tracks": len(tracks), "tracks": tracks,
     })
@@ -1896,7 +1900,7 @@ def track(scans, bin_size, match_tol, min_theta, out_path, root):
 # rocking — fit intensity(θ) per track → θ_Bragg, FWHM (mosaicity)
 # ─────────────────────────────────────────────────────────────────────
 @main.command()
-@click.option('--tracks', 'tracks_path', default='Study/tracks.json', help='tracks JSON from `xrd-app track`')
+@click.option('--tracks', 'tracks_path', default='Study/tracks.h5', help='tracks HDF5 from `xrd-app track`')
 @click.option('--min-points', type=int, default=4, help='Distinct θ needed to attempt a Gaussian fit')
 @click.option('--all-tracks', is_flag=True, help='Fit non-recurrent (single/sparse-θ) tracks too')
 @click.option('--out', 'out_path', default='Study/rocking_curves.csv', help='Output rocking-curves CSV')
@@ -1908,14 +1912,12 @@ def rocking(tracks_path, min_points, all_tracks, out_path, root):
     sparsely sampled in θ are emitted with moment descriptors and a 'too_sparse'
     status (the θ sampling is clustered — fits are only meaningful near θ≈3–6°).
     """
-    import json
-    from .core import rocking as rk, aggregate as agg
+    from .core import rocking as rk, aggregate as agg, result_store
     tp = Path(tracks_path)
     if not tp.is_absolute():
         tp = Path(root) / tp
-    _require(tp, "tracks JSON (run 'xrd-app track' first)")
-    with open(tp) as f:
-        tracks = json.load(f).get("tracks", [])
+    _require(tp, "tracks HDF5 (run 'xrd-app track' first)")
+    tracks = (result_store.load(tp) or {}).get("tracks", [])
 
     rows = rk.fit_tracks(tracks, min_points=min_points,
                          only_recurrent=not all_tracks, log=click.echo)
@@ -1930,7 +1932,7 @@ def rocking(tracks_path, min_points, all_tracks, out_path, root):
 # predict — forecast per-θ shapes, compare predicted vs observed
 # ─────────────────────────────────────────────────────────────────────
 @main.command()
-@click.option('--tracks', 'tracks_path', default='Study/tracks.json', help='tracks JSON from `xrd-app track`')
+@click.option('--tracks', 'tracks_path', default='Study/tracks.h5', help='tracks HDF5 from `xrd-app track`')
 @click.option('--scans', help='Comma-separated scans (default: all in Labels/)')
 @click.option('--bin-size', type=int, default=3, help='Bin size to aggregate features for')
 @click.option('--match-tol', type=float, default=2.0, help='Match tolerance (bins) for the repeatability floor')
@@ -1946,16 +1948,15 @@ def predict(tracks_path, scans, bin_size, match_tol, rocking_path, repeat_pair, 
     detections predicted vs noise?), the 203-vs-214 repeatability floor, χ(θ)
     smoothness, and rocking-fit quality.
     """
-    import csv as _csv, json
-    from .core import aggregate as agg, prediction as pred
+    import csv as _csv
+    from .core import aggregate as agg, prediction as pred, result_store
     dm = DataManager(root)
 
     tp = Path(tracks_path)
     if not tp.is_absolute():
         tp = Path(root) / tp
-    _require(tp, "tracks JSON (run 'xrd-app track' first)")
-    with open(tp) as f:
-        tracks = json.load(f).get("tracks", [])
+    _require(tp, "tracks HDF5 (run 'xrd-app track' first)")
+    tracks = (result_store.load(tp) or {}).get("tracks", [])
 
     scan_list = ([DataManager.scan_name_of(s.strip()) for s in scans.split(',') if s.strip()]
                  if scans else None)
@@ -1992,8 +1993,8 @@ def predict(tracks_path, scans, bin_size, match_tol, rocking_path, repeat_pair, 
 @main.command(name='combined-device')
 @click.option('--device-map', 'device_map_path', default='Study/device_map.csv',
               help='device_map.csv from `xrd-app aggregate`')
-@click.option('--tracks', 'tracks_path', default='Study/tracks.json',
-              help='Optional tracks JSON for the centroid overlay')
+@click.option('--tracks', 'tracks_path', default='Study/tracks.h5',
+              help='Optional tracks HDF5 for the centroid overlay')
 @click.option('--intensity', 'intensity_key', type=click.Choice(['integrated', 'intensity']),
               default='integrated', help='Which column drives the max/argmax canvases')
 @click.option('--out', 'out_path', default='Study/combined_device.npz', help='Output .npz')
@@ -2005,8 +2006,8 @@ def combined_device(device_map_path, tracks_path, intensity_key, out_path, root)
     recurrence count, and per-reflection layers — plus track centroids. Pure data
     layer for a future Combined Device View tab (no GUI here).
     """
-    import csv as _csv, json
-    from .core import combined_device as cd
+    import csv as _csv
+    from .core import combined_device as cd, result_store
     dmp = Path(device_map_path)
     if not dmp.is_absolute():
         dmp = Path(root) / dmp
@@ -2019,8 +2020,7 @@ def combined_device(device_map_path, tracks_path, intensity_key, out_path, root)
     if not tp.is_absolute():
         tp = Path(root) / tp
     if tp.exists():
-        with open(tp) as f:
-            tracks = json.load(f).get("tracks", [])
+        tracks = (result_store.load(tp) or {}).get("tracks", [])
 
     combined = cd.build_combined(rows, intensity_key=intensity_key,
                                  tracks=tracks, log=click.echo)
@@ -2059,7 +2059,6 @@ def _ensure_1x1_grid_mapping(dm, scan, source_bin_size, log=click.echo):
     when raw frames or real positions are unavailable — the HD build then
     proceeds intensity-only, exactly as before. Never raises.
     """
-    import json
     from .core import io
     from .core import positions as P
 
@@ -2067,11 +2066,9 @@ def _ensure_1x1_grid_mapping(dm, scan, source_bin_size, log=click.echo):
     nxn_path = dm.grid_mapping(bin_size=source_bin_size, scan=scan)
     source_grid = None
     if nxn_path and Path(nxn_path).exists():
-        with open(nxn_path) as f:
-            source_grid = json.load(f)
+        source_grid = io.load_grid_mapping(nxn_path)
     if gm_path and Path(gm_path).exists():
-        with open(gm_path) as f:
-            child_grid = json.load(f)
+        child_grid = io.load_grid_mapping(gm_path)
         if source_bin_size == 1 or (source_grid and _same_grid_lattice(child_grid, source_grid)):
             return True
         log(f"[hd-device-map] existing 1x1 grid {gm_path} does not match the "
@@ -2163,7 +2160,7 @@ def hd_device_map(bin_size, scan, catalog, win, max_cells, out_name, root):
         if not cat_path.exists():
             cat_path = dm.labels_dir(scan) / catalog
     else:
-        cat_path = catalogs.default_feature_source(dm.results_dir(scan), bin_size)
+        cat_path = catalogs.default_feature_source(dm.labels_dir(scan), bin_size)
     _require(cat_path, f"{bin_size}×{bin_size} feature catalog "
                        "(run 'xrd-app shapes' first, or pass --catalog)")
     try:
@@ -2190,8 +2187,7 @@ def hd_device_map(bin_size, scan, catalog, win, max_cells, out_name, root):
         gm_path = dm.grid_mapping(bin_size=1, scan=scan)
         gm = {}
         if gm_path and Path(gm_path).exists():
-            with open(gm_path) as f:
-                gm = json.load(f)
+            gm = io.load_grid_mapping(gm_path)
         # Real per-cell (x, y): try any resolvable position CSV. build_cell_xy
         # returns {} for X-only / missing CSVs (older grid mappings omit the
         # positions_real flag, so don't gate on it).
@@ -2237,7 +2233,7 @@ def hd_device_map(bin_size, scan, catalog, win, max_cells, out_name, root):
         "features": hd_features,
     }
     out = dm.hd_map_json(algo, bin_size, scan)
-    _write_json(out, result)
+    catalogs.save_result(out, result)
     click.echo(
         f"\nDone: {summary['n_features']} features, {summary['n_cells']} 1×1 cells "
         f"sampled ({summary['n_features_empty']} empty, "
@@ -2449,7 +2445,7 @@ def rsm(scans, in_dir, nbins, min_intensity, subtract_median, out_path, root):
 @click.option('--save-points', is_flag=True,
               help='Also write <scan>_xrf_points.npz: compact per-frame spectra so the '
                    'GUI histogram needs no raw ME7 (~10x smaller than raw)')
-@click.option('--grid-mapping', help='Grid mapping JSON (defaults to resolved)')
+@click.option('--grid-mapping', help='Grid mapping HDF5 (defaults to resolved)')
 @click.option('--out-dir', default=None, help='Output dir (default: per-scan Metadata dir)')
 @click.option('--root', default='.', help='Project root directory')
 def xrf(scans, bin_size, me7_dir, config_path, no_deadtime, refine_roi, save_points, grid_mapping, out_dir, root):
@@ -2501,8 +2497,8 @@ def xrf(scans, bin_size, me7_dir, config_path, no_deadtime, refine_roi, save_poi
 
         gm_path = Path(grid_mapping) if grid_mapping else dm.grid_mapping(bin_size=bin_size, scan=scan)
         _require(gm_path, "grid mapping (run 'xrd-app grid' first)")
-        with open(gm_path) as f:
-            gm = json.load(f)
+        from .core import io as core_io
+        gm = core_io.load_grid_mapping(gm_path)
 
         click.echo(f"[xrf] {scan}: ME7={me7.name}  channels={cfg['channels']}  "
                    f"deadtime={cfg['deadtime_correction']}  "
@@ -2567,7 +2563,7 @@ def list_studies(root):
     """List the rocking-study result sets discovered under the project.
 
     A *study* is a directory carrying the cross-scan artifacts
-    (rsm.npz / rocking_curves.csv / combined_device.npz / tracks.json /
+    (rsm.npz / rocking_curves.csv / combined_device.npz / tracks.h5 /
     features.csv). Merges any names/notes from ``studies.json``. This is what the
     Reciprocal-Space and Rocking-Study tabs offer in their study selector.
     """
@@ -2641,7 +2637,7 @@ def run_study(ctx, scans, bin_size, out_dir, study_name, notes, match_tol,
     if not out.is_absolute():
         out = Path(root) / out
     out.mkdir(parents=True, exist_ok=True)
-    tracks_json = f"{out_dir}/tracks.json"
+    tracks_json = f"{out_dir}/tracks.h5"
     fails = []
 
     def _step(label, cmd, **kw):

@@ -6,7 +6,7 @@ Faithful, de-hardcoded port of ``analysis/spatial_feature_analysis.py``:
   Phase 1  per-bin detection      (run a detector module over every bin)
   Phase 2  spatial linking        (Union-Find across neighboring bins)
   Phase 3  Gaussian filtering     (keep clusters with a clear bright center)
-  Phase 4  output                 (shapes JSON via the CLI + kept/filtered CSVs)
+  Phase 4  output                 (shapes HDF5 via the CLI + kept/filtered CSVs)
 
 The detector itself is supplied as an external module (``detector_script``)
 exposing ``radial_median_subtract``, ``fast_tophat``, ``build_tth_band_masks``,
@@ -542,14 +542,12 @@ def run_combined(
     detectors don't emit per-bin intensities, so ``peak_intensity``/``mean_snr``
     are null and ``intensity_profile`` is empty).
     """
-    import json as _json
     import sys as _sys
     det = io.load_module(detector_path)
     tth_map = io.load_tth_map(tth_path)
     degs, deg_labels = io.load_reflections(reflections_path)
     if isinstance(grid_mapping, (str, Path)):
-        with open(grid_mapping) as f:
-            grid_mapping = _json.load(f)
+        grid_mapping = io.load_grid_mapping(grid_mapping)
     log(f"  Reflections: {deg_labels}")
 
     # Identity for output files: a sub-foldered detector.py is identified by its
@@ -672,8 +670,8 @@ def run_shapes(
     ``link_peaks`` and ``characterize_features`` — this is the swappable part,
     mirroring how :func:`run_peaks` loads a detector module.
 
-    ``peaks`` is a :func:`run_peaks` result OR a loaded ``*_peaks.json`` — both
-    carry ``peaks_by_bin``. A "shape" is a kept (gaussian-like) feature. Returns
+    ``peaks`` is a :func:`run_peaks` result or loaded peaks HDF5 dictionary;
+    both carry ``peaks_by_bin``. A "shape" is a kept feature. Returns
     ``{bin_size, n_kept, n_filtered, kept: [...], filtered: [...]}``.
     """
     all_detections = peaks["peaks_by_bin"] if isinstance(peaks, dict) and \

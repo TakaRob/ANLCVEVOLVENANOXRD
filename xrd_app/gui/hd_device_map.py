@@ -14,7 +14,7 @@ Two display spaces, switchable:
     position colored by raw intensity (the actual scan geometry, holes included).
 
 The heavy sampling lives in the CLI/``core``; this module only renders the cached
-``*_hdmap_NxN.json``. Rendering helpers (colormap, RGBA, chi range slider) are
+``*_hdmap_NxN.h5``. Rendering helpers (colormap, RGBA, chi range slider) are
 reused from :mod:`gui.device_map` so the two views stay visually consistent.
 """
 
@@ -35,7 +35,7 @@ from PyQt5.QtCore import Qt, QTimer, QProcess
 from PyQt5.QtGui import QColor, QFont
 
 from ..config import DataManager
-from ..core import hd_map as hd_core
+from ..core import catalogs, hd_map as hd_core, io
 from . import device_map as dv
 from .lifecycle import start_process, stop_process
 
@@ -56,11 +56,11 @@ DISPLAY_XY = "xy"
 
 # ── catalog discovery / loading ────────────────────────────────────
 def list_hd_catalogs(results_dir, bin_size):
-    """``*_hdmap_<NxN>*.json`` in a scan's Labels dir, sorted by name."""
+    """Saved HD maps for one source feature-map bin size."""
     rd = Path(results_dir)
     if not rd.is_dir():
         return []
-    return sorted(rd.glob(f"*_hdmap_{bin_size}x{bin_size}*.json"))
+    return sorted(rd.glob(f"*_hdmap_{bin_size}x{bin_size}*.h5"))
 
 
 def _resolve_catalog(results_dir, bin_size, catalog):
@@ -82,8 +82,7 @@ def load_hd_features(catalog_path):
     Each returned feature gets a 1×1 boolean ``_mask``, cached ``center_row/col``
     and ``center_x/y`` for hover, and keeps its ``hd_profile`` cells.
     """
-    with open(catalog_path) as f:
-        data = json.load(f)
+    data = catalogs.load_result(catalog_path) or {}
     feats = data.get("features", [])
     n_rows = int(data.get("n_bin_rows_1x1") or 0)
     n_cols = int(data.get("n_bin_cols_1x1") or 0)
@@ -1190,8 +1189,7 @@ def _load_trajectory(dm, scan):
         gm_path = dm.grid_mapping(bin_size=1, scan=scan)
         if not gm_path or not Path(gm_path).exists():
             return {"grid": [], "xy": None}
-        with open(gm_path) as f:
-            gm = json.load(f)
+        gm = io.load_grid_mapping(gm_path)
         # The stored positions_csv may be an absolute path from another machine
         # (e.g. /net/micdata on the LAN host vs /mnt/z on a laptop). Fall back to
         # the project-relative CSV when it doesn't resolve here, so the real-(x,y)
@@ -1214,7 +1212,7 @@ def build_window(project_root=".", scan=None, bin_size=3, catalog=None,
     build) lets the embedding tab swap in the real view.
     """
     dm = DataManager(project_root, scan=scan)
-    results_dir = dm.results_dir(scan)
+    results_dir = dm.labels_dir(scan)
     cats = list_hd_catalogs(results_dir, bin_size)
     path = _resolve_catalog(results_dir, bin_size, catalog)
     if not path or not Path(path).exists():

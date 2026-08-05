@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 from xrd_app.config import DataManager, format_detector_label
-from xrd_app.core import io, save_algorithm
+from xrd_app.core import cvevolve_results, io, save_algorithm
 from xrd_app.core.processing import REQUIRED_DETECTOR_API, load_detector
 
 
@@ -85,6 +85,46 @@ def test_uncataloged_external_detector_is_generic(tmp_path):
 
     assert DataManager(tmp_path).detector_script(
         str(external), bin_size=4) == external
+
+
+def test_register_cvevolve_winner_is_project_owned_and_discoverable(tmp_path):
+    session = tmp_path / "sessions" / "peak_search"
+    reports = session / "reports"
+    history = session / "history"
+    source = session / "workspace" / "candidates" / "winner"
+    reports.mkdir(parents=True)
+    history.mkdir()
+    source.mkdir(parents=True)
+    detector = source / "candidate.py"
+    detector.write_text(_VALID_DETECTOR)
+    (source / "support.py").write_text("VALUE = 1\n")
+    (reports / "best_candidate.py").write_text(_VALID_DETECTOR)
+    (reports / "final_summary.json").write_text(json.dumps({
+        "best_candidate": {
+            "candidate_id": "candidate-1", "candidate_name": "Strong detector",
+            "code_file_path": str(detector), "primary_metric_value": 0.82,
+        },
+    }))
+    import sqlite3
+    with sqlite3.connect(history / "search_history.sqlite") as connection:
+        connection.execute(
+            "CREATE TABLE holdout_test_metrics "
+            "(id INTEGER PRIMARY KEY, candidate_id TEXT, metric_name TEXT, value REAL)")
+        connection.execute(
+            "INSERT INTO holdout_test_metrics VALUES (1, 'candidate-1', 'mean_f2', 0.77)")
+    config = tmp_path / "cvevolve.yaml"
+    config.write_text(
+        f"name: peak_search\nworkspace:\n  root_dir: {tmp_path / 'sessions'}\n")
+
+    result = cvevolve_results.register_winner(config, tmp_path, bin_size=3)
+
+    output = tmp_path / "Algorithms" / "PeakAlgorithms" / "Strong_detector"
+    assert result["path"] == output / "detector.py"
+    assert (output / "support.py").is_file()
+    entry = DataManager(tmp_path).load_detector_catalog()["detectors"][-1]
+    assert entry["holdout_f2"] == 0.77
+    assert entry["bin_size"] == "3x3"
+    assert DataManager(tmp_path).resolve_detector_name("Strong_detector", 3) == result["path"]
 
 
 def test_save_algorithm_uses_project_storage_and_is_discoverable(tmp_path):

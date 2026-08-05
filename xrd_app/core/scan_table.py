@@ -43,7 +43,7 @@ from typing import Optional
 
 import numpy as np
 
-from . import catalogs, orientation
+from . import catalogs, io, orientation
 from .territory import _polygon_area
 
 # Internal row keys (stable — used for CSV columns and dict access). The
@@ -283,7 +283,7 @@ def catalog_types(dm, bin_size: int) -> list:
     """
     seen: dict = {}
     for scan in dm.discover_scans(selected_only=True):
-        rd = dm.results_dir(scan)
+        rd = dm.labels_dir(scan)
         for p in catalogs.feature_sources(rd, bin_size):
             key = catalogs.lineage_key(p)
             info = catalogs.parse_name(p.name) or {}
@@ -313,7 +313,7 @@ def catalog_reflections(dm, bin_size: int, lineage_key) -> list:
     """
     refs = set()
     for scan in dm.discover_scans(selected_only=True):
-        cat = _match_catalog(dm.results_dir(scan), bin_size, lineage_key)
+        cat = _match_catalog(dm.labels_dir(scan), bin_size, lineage_key)
         if cat is None:
             continue
         kept, _ = catalogs.load_features_any(cat)
@@ -327,8 +327,7 @@ def catalog_reflections(dm, bin_size: int, lineage_key) -> list:
 def _grid_total_bins(dm, scan, bin_size) -> Optional[int]:
     gm_path = dm.grid_mapping(bin_size=bin_size, scan=scan)
     try:
-        with open(gm_path) as f:
-            gm = json.load(f)
+        gm = io.load_grid_mapping(gm_path)
         return int(gm["n_bin_rows"]) * int(gm["n_bin_cols"])
     except Exception:
         return None
@@ -337,8 +336,7 @@ def _grid_total_bins(dm, scan, bin_size) -> Optional[int]:
 def _territory_mapping(dm, scan) -> Optional[dict]:
     gm_path = dm.grid_mapping(bin_size=1, variant="territory", scan=scan)
     try:
-        with open(gm_path) as f:
-            gm = json.load(f)
+        gm = io.load_grid_mapping(gm_path)
     except Exception:
         return None
     return gm if gm.get("territories") else None
@@ -440,7 +438,7 @@ def scan_table_rows(dm, bin_size: int, lineage_key, refs=None, bandwidth: float 
     refset = set(refs) if refs else None
     rows = []
     for scan in dm.discover_scans(selected_only=True):
-        rd = dm.results_dir(scan)
+        rd = dm.labels_dir(scan)
         cat = _match_catalog(rd, bin_size, lineage_key) if lineage_key else None
         if cat is None:
             continue

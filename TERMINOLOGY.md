@@ -19,16 +19,16 @@ distinct stage with a distinct name. Do not use "peak" for all of them.
 
 | Canonical term | What it is | Stage | Lives in |
 |---|---|---|---|
-| **peak** | A single raw detection inside **one** spatial bin: a coordinate + intensity/SNR. The direct output of a detector algorithm. | Phase 1 (detection) | `*_peaks.json` → `peaks_by_bin: {bin_key: [peak, ...]}` |
+| **peak** | A single raw detection inside **one** spatial bin: a coordinate + intensity/SNR. The direct output of a detector algorithm. | Phase 1 (detection) | `*_peaks_NxN.h5` → `peaks_by_bin: {bin_key: [peak, ...]}` |
 | **member** | One peak after it has been linked into a cluster. Internally a tuple `(bin_key, peak_index, row, col, x, y, peak_dict)`. | Phase 2 (linking) | in-memory only (`processing.py`) |
-| **feature** | A linked cluster of members across adjacent bins that passed the Gaussian-profile filter. **This is the physical Bragg reflection / spot.** Fully characterized (center, extent, intensity profile, metrics). | Phase 3 (characterization) | `feature_catalog_NxN.json` |
+| **feature** | A linked cluster of members across adjacent bins that passed the Gaussian-profile filter. **This is the physical Bragg reflection / spot.** Fully characterized (center, extent, intensity profile, metrics). | Phase 3 (characterization) | `*_shapes_NxN.h5` under `kept`, or `*_combined_NxN.h5` under `features` |
 
 **shape** is the **stage name** for the verified feature — the same object as
 *feature*, named after the Phase-2 "shape finding" step that produces it (linking
 + gaussian-profile filter). It is the canonical name for that stage and its
 algorithm-kind across the *public surface*: the `ShapeAlgorithms/` directory, the
 `xrd-app shapes` / `run-shapes` CLI commands, `--source shapes`, `kind="shape"`,
-the on-disk `*_shapes_NxN.json` files, `config.shapes_json()`, and
+the on-disk `*_shapes_NxN.h5` files, `config.shapes_json()`, and
 `bins_from_shapes()`. Read "a shape" as "a verified feature." Use **feature** when
 talking about the data record/object; use **shape** when talking about the
 stage, its algorithm-kind, the CLI, or its output files. They are not competing
@@ -77,18 +77,18 @@ map they are correctly labeled `Col (scan x)` and `Row (scan y)` — keep that.
 
 The per-frame `(row, col)` is assigned **once**, in `core/io.py::generate_grid_mapping`,
 and every downstream stage (binning, peak bin-keys, cross-bin linking, device maps,
-aggregate) inherits it. The grid mapping JSON records which lattice it is on via
+aggregate) inherits it. The grid mapping HDF5 records which lattice it is on via
 `coordinate_source`:
 
 | `coordinate_source` | How `(row, col)` is assigned | When |
 |---|---|---|
-| `file_per_row` | From the one-file-per-scan-row HDF5 layout: `row` = file index, `col` = within-file rank (the **commanded** fast-axis position), serpentine-aware. Exact dimensions, one cell per frame, no merges. When a real position CSV exists the **(X, Y)** are used only to orient the axes (no re-snapping). | Default for a clean one-file-per-row raster (with *or* without a position CSV). |
-| `positions_xy` | Turn-counted position snap (`assign_grid_from_positions` fallback): both axes snapped onto a `build_scan_grid` lattice from real (X, Y). | Real position CSV but the scan is **not** one-file-per-row (fly-scans, multi-row files, irregular). |
-| `serpentine` | Legacy X-only turn-counting (`build_scan_grid`). | `--rawgrid` bypass, or CSV has no `Y_Position`. |
-| `synthetic` | Regular boustrophedon raster from `n_cols` (`build_regular_grid`). | No CSV and not file-per-row, with explicit `--shape`. |
-| `perrow_offset_deprecated` | **DEPRECATED** "triangle" method (`core/deskew_legacy.py`): file-per-row rows + a rigid per-row integer column offset from the encoder (X, Y). Amplifies serpentine *backlash* (even/odd-row divergence is an encoder artefact, not geometry) → fragments features into a parallelogram. Kept only for comparison via `grid --deskew-method perrow_offset`. | Never by default. |
+| `positions_xy` | Both axes are snapped from measured `(X,Y)` without clipping to a commanded rectangle. | Default at 1×1 and for irregular scans that still need a rectangular grid. |
+| `positions_faithful` | Exact file-index rows plus measured fast-axis columns on an approximately square display lattice. | Default at N≥2 for clean file-per-row scans. |
+| `positions_faithful_native` | Exact file-index rows plus measured fast-axis columns at native frame density. | Detection/recall work where native sampling matters more than square display pixels. |
+| `file_per_row` | File index and within-file rank (the **commanded** fast-axis position), serpentine-aware. | Selected with `--deskew-method commanded`. |
+| `territory_xy` | Irregular cells and adjacency from true `(X,Y)` positions. | Built with `territory-grid` when a rectangular lattice is inappropriate. |
 
-> **Why columns align by *commanded* position, not the encoder.** On these scans the even/odd serpentine rows' encoder Y diverges (growing to ±33 cols) — that's stage **backlash**, not real geometry. Snapping columns to the raw encoder (the deprecated `perrow_offset`) throws a feature's adjacent rows tens of columns apart and fragments it. `file_per_row` aligns by within-file rank (where the stage was *told* to go), keeping features intact. The old `positions_xy` global-scale also mis-handled this by *clipping* outlier-Y frames onto the edge column (a false hot blob).
+> **Why commanded and coordinate methods both exist.** On these scans the even/odd serpentine rows' encoder Y diverges by up to ±33 columns at nominally identical commanded positions because of stage **backlash**. Treating that divergence as a rigid row shift can throw adjacent parts of one feature tens of columns apart. `commanded` preserves within-row rank; `positions_xy` uses measured coordinates as a complete lattice; `faithful*` preserve exact row membership while controlling fast-axis placement. Territory cells are the physical-neighbor option for genuinely irregular layouts.
 
 **Missing position CSV.** The SOCKETSERVER-derived `scan_NNNN_position.csv` (µm; *not* TETRAMM, which is too coarse) is sometimes absent. `xrd-app grid` then **recreates** it from the file-per-row layout (`xrd-app recreate-positions`; tagged with a `# xrd-app coordinate_source=file_per_row` marker so loaders don't mistake it for a real export) and builds a `file_per_row` grid — so downstream never zero-pads positions. Absolute µm scale of a recreated CSV is nominal (`--step-x/--step-y`); the lattice is exact.
 
@@ -154,10 +154,7 @@ the matching device-map metric label, descriptions, and tab help text.
 with a rocking scan; this is only the azimuthal spread of detected bins. Naming it
 after χ keeps the claim honest and matches the already-correct colorbar.
 
-> **Migration note:** renaming the JSON field breaks existing
-> `feature_catalog_*.json` files and the device-map reader. Either regenerate
-> catalogs, or have the loader accept `chi_fwhm` and fall back to `rocking_fwhm`
-> for one release.
+The canonical HDF5 shapes catalog stores this field as `chi_fwhm`.
 
 ### 3.3 The "strain" misnomer (radial metric)
 
@@ -195,11 +192,8 @@ parallels the χ rename (`chi_fwhm`/`chi_breadth`). FWHM is shift-invariant, so 
 FWHM of Δ2θ equals the FWHM of 2θ across a feature's bins (one reflection → one
 `ref_tth`), making `tth_fwhm` exact.
 
-> **Migration note:** like `chi_fwhm`, renaming the JSON field breaks existing
-> `feature_catalog_*.json`. The device-map reader (`build_device_grids`) and the
-> aggregate reader accept `tth_fwhm` and fall back to `strain_breadth` for one
-> release. The per-bin/per-feature **metric keys** (`tth_dev` / `tth_breadth`)
-> are not persisted, so no migration is needed there.
+The canonical HDF5 shapes catalog stores this field as `tth_fwhm`. The
+per-bin/per-feature metric keys (`tth_dev` / `tth_breadth`) are not persisted.
 
 ---
 
@@ -224,7 +218,7 @@ feature). Keep this distinction visible in tooltips so the map isn't misread.
 - **peak** — raw single-bin detection. Pre-linking.
 - **member** — a peak inside a linked cluster (internal tuple).
 - **feature** — the final linked, filtered Bragg reflection/spot. The unit of analysis.
-- **shape** — the same verified feature, named after the Phase-2 "shape finding" stage; the canonical name for that stage, its algorithm-kind, CLI (`shapes`), and `*_shapes.json` files.
+- **shape** — the same verified feature, named after the Phase-2 "shape finding" stage; the canonical name for that stage, its algorithm-kind, CLI (`shapes`), and `*_shapes.h5` files.
 - **reflection** — the hkl label/class a feature belongs to (a grouping, not an object).
 - **point** — a manual ground-truth annotation, or genuine geometry (click location, "entry point"). Never a detection.
 - **bin / bin_key** — a spatial scan cell; key is `"row_col"`.
@@ -253,89 +247,19 @@ Done:
 
 Deliberately **not** changed (load-bearing identifiers / correct usage):
 
-- **`shape` stage identifier** — blessed as canonical (see §1): `ShapeAlgorithms/`, `xrd-app shapes`, `kind="shape"`, `*_shapes.json`, `config.shapes_json()`, `bins_from_shapes()` all stay.
-- **`*_peaks.json` / `filtered_peaks_*.csv`** — on-disk filename conventions; renaming breaks existing project data. Left as-is.
+- **`shape` stage identifier** — blessed as canonical (see §1): `ShapeAlgorithms/`, `xrd-app shapes`, `kind="shape"`, `*_shapes.h5`, `config.shapes_json()`, `bins_from_shapes()` all stay.
+- **`*_peaks.h5` / `filtered_peaks_*.csv`** — canonical on-disk filename conventions.
 - **`.shape`** (numpy/detector/grid dimensions) — unrelated to morphology.
 - **"LoG blob detection"** — the standard CV name for the *technique*, not an output-object noun (§1).
 
 ---
 
-## 7. Code occurrence inventory (as of 2026-06-26)
+## 7. Persistence contract
 
-A map of where `shape` and `feature` actually live, so any rename/swap can be
-scoped. Counts are matching **lines** (case-insensitive), in `xrd_app/`,
-excluding the algorithm-zoo dirs (`CombinedAlgorithms/`, `PeakAlgorithms/`).
+Numerical peaks, shapes, combined, ROI, and HD catalogs are HDF5. A feature is
+not a separate catalog kind: it is a record under shapes `kept` or combined
+`features`. Grid mappings are `grid_mapping_NxN[_variant].h5`, and cross-scan
+tracks are stored in `Study/tracks.h5`.
 
-### 7.1 `shape` — three distinct uses, only one is the domain term
-
-| Use | What it is | In scope for a swap? | Volume |
-|---|---|---|---|
-| **Domain `shape`** | the verified-feature stage/kind/CLI/files (§1) | **Yes** | ~280 lines |
-| `.shape` | numpy/detector/grid array dimensions | No (§1, §6) | ~63 lines |
-| `--shape` / `shape=` | the grid-geometry CLI flag (`n_cols`) | No (geometry) | ~22 lines |
-
-**Domain `shape` per file** (excludes `.shape`, `--shape`, `shape=`):
-
-| File | Lines | Mostly |
-|---|---|---|
-| `cli.py` | 71 | `shapes` / `run-shapes` commands, `--source shapes`, help text |
-| `gui/viewer.py` | 39 | shape overlays / source selection |
-| `tabs/programs.py` | 33 | program runner wiring the `shapes` command |
-| `config.py` | 31 | `shapes_json()`, `*_shapes_NxN.json` path builders |
-| `core/io.py` | 21 | shape file IO |
-| `core/catalogs.py` | 21 | `bins_from_shapes()`, shape-catalog discovery |
-| `core/processing.py` | 19 | Phase-2 shape-finding (link + gaussian filter) |
-| `ShapeAlgorithms/gaussian.py` | 12 | the shape algorithm itself |
-| `core/lineage.py` | 11 | lineage of shape outputs |
-| `core/holdout.py` | 7 | |
-| `core/geometry.py` | 6 | |
-| `app.py` | 4 | |
-| `tabs/shape_verify.py` | 3 | the verification tab (filename + title) |
-| `gui/device_map.py` | 3 | |
-| `core/aggregate.py` | 3 | |
-| `ShapeAlgorithms/catalog.json` | 3 | algorithm catalog `kind="shape"` |
-| `tabs/setup.py`, `tabs/_embed.py`, `tabs/cvevolve_dialog.py`, `gui/orientation.py`, `core/save_algorithm.py` | 2 each | |
-| `tabs/save_algorithm_dialog.py`, `tabs/reflection_popup.py` | 1 each | |
-
-**Load-bearing `shape` identifiers** (the public/on-disk surface — renaming
-these breaks existing project data + the CLI contract):
-`ShapeAlgorithms/` · `run_shapes` (10) · `shapes_json` (9) · `_shapes*.json`
-files · `bins_from_shapes` (2) · `shape_verify` tab · `kind="shape"` ·
-`--source shapes`.
-
-### 7.2 `feature` — the data-record term
-
-| File | Lines | Mostly |
-|---|---|---|
-| `gui/viewer.py` | 316 | the feature-centric inspector (overlays, IDs, profiles) |
-| `gui/device_map.py` | 53 | per-feature metrics painted into bins |
-| `gui/orientation.py` | 45 | |
-| `core/catalogs.py` | 41 | `feature_catalog_*` discovery/readers |
-| `tabs/_embed.py` | 38 | |
-| `core/processing.py` | 30 | feature record construction |
-| `ShapeAlgorithms/gaussian.py` | 23 | emits the feature dicts |
-| `core/aggregate.py` | 21 | per-feature CSV rows |
-| `cli.py` | 6 · `core/io.py` 4 · `tabs/shape_verify.py` 3 · `core/holdout.py` 3 · rest 1–2 | |
-
-**Load-bearing `feature` identifiers:** `feature_catalog` (61) ·
-`feature_id` (33) · `n_features` (4) · `features_by`/`by_feature` (6) ·
-`PER_FEATURE` (3). `feature_catalog_<NxN>[_<tag>].json` is the on-disk record
-file; `feature_id` is the cross-reference key threaded through viewer ↔
-device-map ↔ aggregate.
-
-### 7.3 Outside `xrd_app/` (scripts + docs that also use the terms)
-
-Legacy analysis scripts under `analysis/legacy/` · `ANALYSIS_PLAYBOOK.md` ·
-`docs/IMPLEMENTATION.md` · `docs/PLAN.md` · plus `README.md`, `CLAUDE.md`,
-`xrd_app/CLAUDE.md`, and `GRID_METHODS.md`. These would all drift if the
-meanings swap.
-
-### 7.4 ⚠️ The shape ↔ feature swap is a *re-definition*, not a rename
-
-Today (§1) **`shape` and `feature` name the same object** from two angles:
-`feature` = the data record, `shape` = the stage/CLI/file name for that same
-verified record. Swapping their *meanings* (so `shape` = a lighter, unverified
-candidate and `feature` = the verified one) **introduces a new distinction that
-does not exist in the code yet** — there is currently no separate "verified"
-object. This needs a definition decision before any edit (see open question
-below). Until then nothing in §1–§6 is changed.
+The older code-occurrence inventory is omitted because it described a removed
+catalog format rather than the canonical vocabulary.

@@ -19,9 +19,7 @@ Key innovations vs prior candidates:
 4. Tuned verification to balance recall vs precision for F2 optimization
 """
 
-import argparse, csv, importlib.util, json
 from collections import defaultdict
-from pathlib import Path
 import h5py, numpy as np, scipy.ndimage as ndi
 
 BINS_H5_DEFAULT = "/home/takaji/xrd_1x1_bins.h5"
@@ -502,62 +500,3 @@ def run_full_pipeline(center_bin, bins_h5_path, tth_map, degs, deg_labels,
             validated.setdefault(label, []).append([bx, by])
     
     return validated
-
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--center-bin", required=True)
-    parser.add_argument("--bins-h5", default=BINS_H5_DEFAULT)
-    parser.add_argument("--two-theta", default="tth.tiff")
-    parser.add_argument("--reflections", default="reflections.py")
-    parser.add_argument("--grid-mapping", default="grid_mapping.json")
-    parser.add_argument("--output", default="detections.csv")
-    parser.add_argument("--labels", default=None)
-    parser.add_argument("--spatial-radius", type=int, default=5)
-    parser.add_argument("--downsample", type=int, default=1)
-    args = parser.parse_args()
-    
-    spec = importlib.util.spec_from_file_location("reflections", args.reflections)
-    ref_mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(ref_mod)
-    import tifffile
-    tth_map = tifffile.imread(args.two_theta)
-    with open(args.grid_mapping) as f: grid_mapping = json.load(f)
-    
-    validated = run_full_pipeline(args.center_bin, args.bins_h5, tth_map,
-                                  ref_mod.degs, ref_mod.deg_labels, grid_mapping,
-                                  spatial_radius=args.spatial_radius,
-                                  downsample=args.downsample)
-    with open(args.output, "w", newline="") as f:
-        writer = csv.writer(f)
-        writer.writerow(["reflection", "x", "y"])
-        for label, pts in validated.items():
-            for x, y in pts: writer.writerow([label, x, y])
-    total = sum(len(pts) for pts in validated.values())
-    print(f"Detected {total} spatially-validated peaks at center bin {args.center_bin}")
-    
-    if args.labels:
-        with open(args.labels) as f: labels = json.load(f)
-        labels = {k: v for k, v in labels.items() if not k.startswith("__")}
-        gt_pts = []
-        for lab, pts in labels.items():
-            for pt in pts: gt_pts.append(pt)
-        det_pts = []
-        for lab, pts in validated.items():
-            for pt in pts: det_pts.append(pt)
-        matched_gt = set(); matched_det = set()
-        for gi, gp in enumerate(gt_pts):
-            best_d2 = 1600; best_di = -1
-            for di, dp in enumerate(det_pts):
-                if di in matched_det: continue
-                d2 = (gp[0]-dp[0])**2 + (gp[1]-dp[1])**2
-                if d2 < best_d2: best_d2 = d2; best_di = di
-            if best_di >= 0 and best_d2 < 1600:
-                matched_gt.add(gi); matched_det.add(best_di)
-        tp = len(matched_gt); fp = len(det_pts) - tp; fn = len(gt_pts) - tp
-        p = tp/(tp+fp) if tp+fp > 0 else 0
-        r = tp/(tp+fn) if tp+fn > 0 else 0
-        f1 = 2*p*r/(p+r) if p+r > 0 else 0
-        f2 = 5*p*r/(4*p+r) if 4*p+r > 0 else 0
-        print(f"P={p:.3f} R={r:.3f} F1={f1:.3f} F2={f2:.3f}")
-
-if __name__ == "__main__":
-    main()

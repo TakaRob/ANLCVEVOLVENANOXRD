@@ -11,8 +11,8 @@ from the one-file-per-row layout instead (no positions file is fabricated).
 
 Port of ``mictools.process_data.process_position_data`` (the ``averaging``
 method), reimplemented with numpy so ``core`` keeps no pandas/apstools/master-
-file dependency. The ``averaging`` method needs only the SOCKETSERVER files — it
-does not use the sample-theta baseline (only the legacy ``basic`` method does).
+file dependency. It needs only the SOCKETSERVER files and does not use a
+sample-theta baseline.
 """
 
 from __future__ import annotations
@@ -87,15 +87,12 @@ def _group_mean_by_trigger(rows: np.ndarray):
 
 
 def compute_positions(socket_dir: Union[str, Path], scan_number: int,
-                      method: str = "averaging", theta_deg: Optional[float] = None,
                       reduction: int = 1):
     """Reduce the SOCKETSERVER stream to per-trigger ``(triggers, x_um, y_um)``.
 
-    ``averaging`` (default) combines the three X interferometers with Z and the
-    three Y interferometers — robust and self-contained. ``basic`` uses single
-    encoders and needs ``theta_deg`` (the sample-theta cosine correction). Both
-    drop the first trigger (it carries no trigger data) and set the first kept
-    point as the origin. Positions are returned in microns.
+    The three X interferometers are combined with Z and the three Y
+    interferometers. The first trigger is dropped because it carries no trigger
+    data, and the first kept point defines the origin. Positions are in microns.
     """
     rows = _load_interferometry(Path(socket_dir), scan_number, reduction=reduction)
     triggers, means = _group_mean_by_trigger(rows)
@@ -106,22 +103,12 @@ def compute_positions(socket_dir: Union[str, Path], scan_number: int,
             f"Scan {scan_number}: only one trigger group in the SOCKETSERVER "
             "stream — nothing to position. The interferometry data looks empty.")
 
-    if method == "averaging":
-        rel = means - means[0]  # origin at the first kept trigger
-        x_avg = rel[:, list(_C_X)].mean(axis=1)
-        y_avg = rel[:, list(_C_Y)].mean(axis=1)
-        z = rel[:, _C_Z]
-        x_pos = -np.sqrt(x_avg ** 2 + z ** 2)
-        y_pos = y_avg
-    elif method == "basic":
-        if theta_deg is None:
-            raise ValueError(
-                "method='basic' needs theta_deg (sample-theta, degrees). Use the "
-                "default method='averaging', which needs no theta.")
-        x_pos = means[:, _C_X[0]] / np.cos(-1 * np.radians(theta_deg))
-        y_pos = means[:, _C_Y[0]]
-    else:
-        raise ValueError(f"Unknown method {method!r} (use 'averaging' or 'basic').")
+    rel = means - means[0]  # origin at the first kept trigger
+    x_avg = rel[:, list(_C_X)].mean(axis=1)
+    y_avg = rel[:, list(_C_Y)].mean(axis=1)
+    z = rel[:, _C_Z]
+    x_pos = -np.sqrt(x_avg ** 2 + z ** 2)
+    y_pos = y_avg
 
     x_um = x_pos / 1e4
     y_um = y_pos / 1e4
@@ -136,8 +123,6 @@ def build_positions_csv(
     socket_dir: Union[str, Path],
     output: Union[str, Path],
     scan_number: int,
-    method: str = "averaging",
-    theta_deg: Optional[float] = None,
     reduction: int = 1,
     log: Callable[[str], None] = print,
 ) -> dict:
@@ -149,8 +134,7 @@ def build_positions_csv(
     """
     log(f"Reading SOCKETSERVER interferometry for scan {scan_number} ...")
     triggers, x_um, y_um = compute_positions(
-        socket_dir, scan_number, method=method, theta_deg=theta_deg,
-        reduction=reduction)
+        socket_dir, scan_number, reduction=reduction)
     x_span = float(np.ptp(x_um)) if len(x_um) else 0.0
     y_span = float(np.ptp(y_um)) if len(y_um) else 0.0
     log(f"  {len(triggers)} positions, span {x_span:.2f} x {y_span:.2f} um "

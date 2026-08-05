@@ -12,6 +12,7 @@ from PyQt5.QtWidgets import (
 )
 
 from ..config import DataManager, format_detector_label
+from ..core import catalogs
 from ..core.processing import default_worker_count
 from ._console import ConsolePanel
 
@@ -426,8 +427,10 @@ class ProgramsTab(QWidget):
         bs = self._cur_bin()
         found = [_CHAIN_OPTION]
         if ldir.is_dir():
-            for p in sorted(ldir.glob(f"*_peaks_{bs}x{bs}.json")):
-                found.append(p.stem.replace(f"_peaks_{bs}x{bs}", ""))
+            for p in catalogs.list_catalogs(ldir, "peaks", bs):
+                info = catalogs.parse_name(p.name) or {}
+                if not info.get("tag"):
+                    found.append(info.get("algo", p.stem))
         self.shape_src.addItems(found)
 
     # ----- actions ----------------------------------------------------
@@ -525,8 +528,15 @@ class ProgramsTab(QWidget):
             self.console._append("[no bins — create one in Data Prep first]\n")
             return
         from .cvevolve_dialog import CVEvolveDialog
-        CVEvolveDialog(self.project_root, scan=self.scan,
-                       bin_size=bs, parent=self).exec_()
+        dialog = getattr(self, "_cvevolve_dialog", None)
+        if dialog is None:
+            dialog = CVEvolveDialog(self.project_root, scan=self.scan, bin_size=bs)
+            dialog.setAttribute(Qt.WA_DeleteOnClose)
+            dialog.destroyed.connect(lambda: setattr(self, "_cvevolve_dialog", None))
+            self._cvevolve_dialog = dialog
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
 
     def _run_shapes(self):
         scans = self._selected_scans()
