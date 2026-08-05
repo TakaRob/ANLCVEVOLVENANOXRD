@@ -3,8 +3,10 @@
 #
 # Focus scans use the lossless territorial 1x1 variant. All other device scans
 # use the standard 3x3 mapping. Before detection, summed bins are rebuilt as the
-# mean per contributing frame. This script does not rebuild grids or run
-# cross-scan studies.
+# mean per contributing frame. A missing HDF5 grid mapping is restored from the
+# scan's grid_mapping_*.json when present (pre-HDF5 trees only carry the JSON,
+# which the current pipeline cannot read), otherwise rebuilt from the scan's real
+# positions.csv. This script does not run cross-scan studies.
 #
 # Example:
 #   nohup ./run_final_analysis.sh > run_final_analysis.log 2>&1 &
@@ -87,19 +89,64 @@ ensure_normalized_bins() {
   fi
 }
 
+ensure_grid() {
+  # Ensure the HDF5 grid mapping exists. Pre-HDF5 project trees carry only the
+  # old grid_mapping_*.json; the current pipeline resolves and requires the .h5
+  # form, so 'bin --normalize-frames' hard-fails without it. The JSON already
+  # holds the full frame->bin assignment, so convert it in place (no raw frames
+  # needed). Only when no JSON exists do we rebuild from the scan's real
+  # positions.csv via the given 'xrd-app' subcommand.
+  local grid=$1
+  shift
+  local build=("$@")
+  local json="${grid%.h5}.json"
+
+  if [[ -s "$grid" ]]; then
+    return 0
+  fi
+
+  if [[ -s "$json" ]]; then
+    printf '[grid] converting JSON grid mapping to HDF5: %s\n' "$json"
+    if python3 - "$json" "$grid" <<'PY'
+import json, sys
+from xrd_app.core import io
+src, dst = sys.argv[1], sys.argv[2]
+io.save_grid_mapping(dst, json.loads(open(src).read()))
+io.load_grid_mapping(dst)  # verify it reads back
+PY
+    then
+      [[ -s "$grid" ]] && return 0
+    fi
+    printf 'GRID JSON CONVERSION FAILED, trying a raw rebuild: %s\n' "$json" >&2
+  fi
+
+  printf '[grid] building missing grid mapping: %s\n' "$grid"
+  "$XRD_APP" "${build[@]}" || return 1
+
+  if [[ ! -s "$grid" ]]; then
+    printf 'GRID BUILD PRODUCED NO OUTPUT: %s\n' "$grid" >&2
+    return 1
+  fi
+}
+
 run_grid_scan() {
   local scan=$1
   local scan_name
-  local bins peaks shapes
+  local bins peaks shapes grid
   scan_name="Scan_$(printf '%04d' "$scan")"
   bins="$ROOT/Binned/$scan_name/xrd_3x3_bins.h5"
   peaks="$ROOT/Labels/$scan_name/${DETECTOR}_peaks_3x3.h5"
   shapes="$ROOT/Labels/$scan_name/gaussian_shapes_3x3.h5"
+  grid="$ROOT/Metadata/$scan_name/grid_mapping_3x3.h5"
 
   printf '\n========== %s 3x3 (%s) ==========\n' "$scan_name" "$(timestamp)"
   if [[ ! -s "$bins" ]]; then
     printf 'MISSING BINS: %s\n' "$bins" >&2
     failures+=("bins3:$scan")
+    return
+  fi
+  if ! ensure_grid "$grid" grid --root "$ROOT" --scan "$scan" --bin-size 3; then
+    failures+=("grid3:$scan")
     return
   fi
   if ! ensure_normalized_bins "$scan" 3 "" "$bins"; then
@@ -137,16 +184,21 @@ run_grid_scan() {
 run_territory_scan() {
   local scan=$1
   local scan_name
-  local bins peaks shapes
+  local bins peaks shapes grid
   scan_name="Scan_$(printf '%04d' "$scan")"
   bins="$ROOT/Binned/$scan_name/xrd_1x1_bins_territory.h5"
   peaks="$ROOT/Labels/$scan_name/${DETECTOR}_peaks_1x1_territory.h5"
   shapes="$ROOT/Labels/$scan_name/territory_shapes_1x1_territory_coord.h5"
+  grid="$ROOT/Metadata/$scan_name/grid_mapping_1x1_territory.h5"
 
   printf '\n========== %s territory 1x1 (%s) ==========\n' "$scan_name" "$(timestamp)"
   if [[ ! -s "$bins" ]]; then
     printf 'MISSING TERRITORY BINS: %s\n' "$bins" >&2
     failures+=("bins-territory:$scan")
+    return
+  fi
+  if ! ensure_grid "$grid" territory-grid --root "$ROOT" --scan "$scan"; then
+    failures+=("grid-territory:$scan")
     return
   fi
   if ! ensure_normalized_bins "$scan" 1 territory "$bins"; then
