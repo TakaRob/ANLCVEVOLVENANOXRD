@@ -92,11 +92,11 @@ def main():
 
     binned_h5 = base / "Binned" / "Scan_0203" / "xrd_3x3_bins_faithful.h5"
 
-    # JSON-stored intensity per member bin (ground-truth footprint)
-    foot_json = np.full((Hb, Wb), np.nan, np.float32)
+    # Shape-catalog intensity per member bin (ground-truth footprint)
+    foot_stored = np.full((Hb, Wb), np.nan, np.float32)
     for k, rec in prof.items():
         r, c = (int(x) for x in k.split("_"))
-        foot_json[r - r_lo, c - c_lo] = rec["intensity"]
+        foot_stored[r - r_lo, c - c_lo] = rec["intensity"]
 
     # measured footprint = ROI sum around the spot, read from real detector images
     foot_meas = np.full((Hb, Wb), np.nan, np.float32)
@@ -127,13 +127,13 @@ def main():
     r0, r1, c0, c1 = roi_bounds(det_x, det_y, args.roi_half, crops.shape[1:][::-1] if crops.ndim == 3 else (1062, 1028))
 
     # quick fidelity check: measured ROI sum vs stored intensity
-    a = foot_meas[~np.isnan(foot_meas)]; b = foot_json[~np.isnan(foot_meas)]
+    a = foot_meas[~np.isnan(foot_meas)]; b = foot_stored[~np.isnan(foot_meas)]
     if a.size > 2:
         print(f"footprint corr(measured ROI-sum, stored intensity) = {np.corrcoef(a, b)[0,1]:.3f}")
 
     with h5py.File(out, "w") as o:
         o.create_dataset("footprint_measured", data=foot_meas, compression="gzip")
-        o.create_dataset("footprint_intensity", data=foot_json, compression="gzip")
+        o.create_dataset("footprint_intensity", data=foot_stored, compression="gzip")
         o.create_dataset("member_bin_rc", data=member_rc)         # absolute bin (row,col)
         o.create_dataset("member_acq", data=member_acq)           # acquisition-order proxy (min gi)
         o.create_dataset("roi_stack", data=crops, compression="gzip")  # (N, h, w) real spot crops

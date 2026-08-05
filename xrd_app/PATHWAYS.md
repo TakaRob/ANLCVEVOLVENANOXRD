@@ -86,9 +86,9 @@ Every builder appends `tag = f"_{variant}" if variant else ""`:
 |---|---|
 | `grid_mapping(bin_size, scan, variant)` | `Metadata/<scan>/grid_mapping_NxN[_variant].h5` |
 | `binned_h5(bin_size, scan, variant)` | `Binned/<scan>/xrd_NxN_bins[_variant].h5` |
-| `peaks_json(algo, bin_size, scan, variant)` | `Labels/<scan>/<algo>_peaks_NxN[_variant].h5` |
-| `shapes_json(algo, bin_size, scan, variant)` | `Labels/<scan>/<algo>_shapes_NxN[_variant].h5` |
-| `hd_map_json(algo, bin_size, scan, variant)` | `Labels/<scan>/<algo>_hdmap_NxN[_variant].h5` |
+| `peaks_path(algo, bin_size, scan, variant)` | `Labels/<scan>/<algo>_peaks_NxN[_variant].h5` |
+| `shapes_path(algo, bin_size, scan, variant)` | `Labels/<scan>/<algo>_shapes_NxN[_variant].h5` |
+| `hd_map_path(algo, bin_size, scan, variant)` | `Labels/<scan>/<algo>_hdmap_NxN[_variant].h5` |
 | `xrf_product(scan)` | `Metadata/<scan>/<scan>_xrf.npz` |
 
 Current grid methods are `positions_xy`, `faithful`, `faithful_native`, and

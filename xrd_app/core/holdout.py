@@ -42,13 +42,13 @@ def bins_from_verified(bin_annotations_path) -> Tuple[Annotations, list]:
     return ann, empty
 
 
-def bins_from_peaks(peaks_json) -> Tuple[Annotations, list]:
-    """Convert a peaks catalog dictionary to bin-annotation format."""
-    if not isinstance(peaks_json, dict):
+def bins_from_peaks(peaks_source) -> Tuple[Annotations, list]:
+    """Convert a peaks catalog dictionary or path to bin-annotation format."""
+    if not isinstance(peaks_source, dict):
         from .catalogs import load_result
-        peaks_json = load_result(peaks_json)
+        peaks_source = load_result(peaks_source)
     ann = {}
-    for bk, peaks in peaks_json.get("peaks_by_bin", {}).items():
+    for bk, peaks in peaks_source.get("peaks_by_bin", {}).items():
         by_ref = {}
         for p in peaks:
             r, c = int(round(p["y"])), int(round(p["x"]))
@@ -58,17 +58,17 @@ def bins_from_peaks(peaks_json) -> Tuple[Annotations, list]:
     return ann, []
 
 
-def bins_from_shapes(shapes_json) -> Tuple[Annotations, list]:
-    """Convert a shapes catalog dictionary to bin-annotation format.
+def bins_from_shapes(shapes_source) -> Tuple[Annotations, list]:
+    """Convert a shapes catalog dictionary or path to bin-annotation format.
 
     Each kept feature contributes its per-bin detector positions (from the
     feature's intensity_profile) under the feature's reflection.
     """
-    if not isinstance(shapes_json, dict):
+    if not isinstance(shapes_source, dict):
         from .catalogs import load_result
-        shapes_json = load_result(shapes_json)
+        shapes_source = load_result(shapes_source)
     ann = {}
-    for feat in shapes_json.get("kept", []):
+    for feat in shapes_source.get("kept", []):
         ref = feat.get("reflection", "unknown")
         for bk, entry in feat.get("intensity_profile", {}).items():
             if isinstance(entry, dict) and "det_x" in entry and "det_y" in entry:

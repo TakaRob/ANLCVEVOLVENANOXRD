@@ -19,7 +19,7 @@ that answer them. Pair it with `CLAUDE.md` (science context) and
 - **You run the tools; the researcher reads conclusions.** Run CLI commands,
   read the HDF5/CSV outputs, compute the number, and report it in their
   vocabulary (peaks, shapes, reflections, orientation, intensity). Don't make
-  them look at raw JSON unless they ask.
+  them inspect raw HDF5 result structures unless they ask.
 - **Never launch the GUI to answer a data question** (`xrd-app gui` blocks and
   needs a display). The GUI and the CLI read the *same* files — everything the
   GUI shows is answerable from the CLI + result files.

@@ -230,7 +230,7 @@ class ProgramsTab(QWidget):
         lin_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.MinimumExpanding)
         lin_btn.setMinimumHeight(40)
         lin_btn.setToolTip("Print the provenance (bin → algorithm chain) of every "
-                           "result JSON for the active scan.")
+                           "result artifact for the active scan.")
         lin_btn.clicked.connect(self._show_lineage)
         cve_row.addWidget(lin_btn)
         cve_row.addStretch()
@@ -416,7 +416,7 @@ class ProgramsTab(QWidget):
                 if lst.item(i).isSelected() and lst.item(i).data(Qt.UserRole)]
 
     def _refresh_peak_sources(self):
-        """List saved *_peaks.json in Labels/<scan>/ as shape-finding inputs.
+        """List saved peak catalogs in Labels/<scan>/ as shape-finding inputs.
 
         The first option chains peak→shape: it runs the peak algorithm selected
         above, then shape-finds its output, all in one process.

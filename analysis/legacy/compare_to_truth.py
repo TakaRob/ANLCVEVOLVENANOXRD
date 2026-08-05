@@ -79,7 +79,7 @@ def _kept(path):
 
 def _resolve(dm, scan):
     """Resolve truth shapes + territorial mapping, the 1×1 grid mapping, positions."""
-    truth = dm.shapes_json("territory", 1, scan, variant="territory")
+    truth = dm.shapes_path("territory", 1, scan, variant="territory")
     if not Path(truth).exists():
         hits = sorted(dm.labels_dir(scan).glob("*_shapes*territory*.json"))
         truth = hits[-1] if hits else truth

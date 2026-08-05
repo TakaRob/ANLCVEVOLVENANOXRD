@@ -36,7 +36,9 @@ def test_create_from_scan_registers_inputs_and_transfers_sum(tmp_path, monkeypat
     dm = DataManager(root, scan=scan_name)
     assert dm.scans_registry()[scan_name]["dir"] == str(scan)
     assert dm.tth_map() == tth
-    assert dm.grid_mapping(bin_size=2, scan=scan_name).exists()
+    grid_path = dm.grid_mapping(bin_size=2, scan=scan_name)
+    assert grid_path.exists()
+    assert io.load_grid_mapping(grid_path)["bin_size"] == 2
     saved = np.load(dm.metadata_scan_dir(scan_name) / "reflection_sum.npz")
     assert np.all(saved["image"] == 7)
     assert Path(root).name == "Scan_0042-Project"

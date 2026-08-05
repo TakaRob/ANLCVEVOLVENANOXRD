@@ -73,7 +73,7 @@ def remove_feature(path, roi) -> dict:
     """Remove exactly one feature matching ``roi`` and renumber the remainder.
 
     Raises ``KeyError`` instead of silently succeeding when the selected feature
-    is not present, so the GUI never removes its row while leaving the saved JSON
+    is not present, so the GUI never removes its row while leaving the saved catalog
     unchanged.
     """
     data = load(path)

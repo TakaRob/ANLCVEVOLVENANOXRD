@@ -170,7 +170,7 @@ regenerate. **1×1 is the slow one** (detection over every scan position).
 
 # %%
 def peaks_file(bs):
-    return DM.peaks_json(ALGOS[bs]["detector"], bs)
+    return DM.peaks_path(ALGOS[bs]["detector"], bs)
 
 
 def catalog_file(bs):
@@ -202,7 +202,7 @@ for bs in BIN_SIZES:
         else:
             print(f"  peaks exist: {Path(pj).name} (skip)")
 
-        sj = DM.shapes_json(a["shape"], bs)
+        sj = DM.shapes_path(a["shape"], bs)
         if FORCE or not Path(sj).exists():
             dt, ok, _ = run_xrd(["shapes", "--scan", SCAN, "--bin-size", str(bs),
                                  "--algorithm", a["shape"], "--peak-algo", a["detector"],
@@ -254,10 +254,10 @@ for bs in BIN_SIZES:
     pj = peaks_file(bs)
     if Path(pj).exists():
         d["peaks_by_bin"] = json.load(open(pj)).get("peaks_by_bin", {})
-    # Authoritative kept features = the shapes JSON's "kept" list. The legacy
+    # Authoritative kept features = the shapes catalog's "kept" list. The legacy
     # feature_catalog_*.json can be stale/overwritten by other tools, so only use
     # it as a fallback (and for combined algos, which write only the catalog).
-    sj = DM.shapes_json(ALGOS[bs]["shape"], bs) if ALGOS[bs]["kind"] == "peak" else None
+    sj = DM.shapes_path(ALGOS[bs]["shape"], bs) if ALGOS[bs]["kind"] == "peak" else None
     if sj and Path(sj).exists():
         d["features"] = json.load(open(sj)).get("kept", [])
     elif Path(catalog_file(bs)).exists():
@@ -1168,7 +1168,7 @@ _our = json.load(open(_cj))["features"] if Path(_cj).exists() else []
 _d1 = DATA.get(1, {})
 _shp = _d1.get("features", [])
 if not _shp:
-    _sj = DM.shapes_json("gaussian", 1)
+    _sj = DM.shapes_path("gaussian", 1)
     _shp = json.load(open(_sj)).get("kept", []) if Path(_sj).exists() else []
 _peakdet = ALGOS.get(1, {}).get("detector", "5x5_tophat_band_adaptive_snr")
 

@@ -28,7 +28,7 @@ RUN_EXACT_ROI_MAP = False
 SAVE_CATALOG = False
 
 # Optional existing ROI catalog used when RUN_EXACT_ROI_MAP is False.
-ROI_CATALOG_JSON = None
+ROI_CATALOG_PATH = None
 
 # %% Imports and paths
 import matplotlib.pyplot as plt
@@ -42,7 +42,7 @@ from xrd_app.core import io, processing, reflection_sum, roi_catalog, roi_map
 dm = DataManager(PROJECT_ROOT, scan=SCAN)
 if not dm.config.exists():
     raise FileNotFoundError(f"Not an xrd-app project: {PROJECT_ROOT}")
-catalog_path = Path(ROI_CATALOG_JSON) if ROI_CATALOG_JSON else dm.roi_map_json(
+catalog_path = Path(ROI_CATALOG_PATH) if ROI_CATALOG_PATH else dm.roi_map_path(
     CATALOG_NAME, BIN_SIZE
 )
 grid_path = dm.grid_mapping(bin_size=BIN_SIZE)

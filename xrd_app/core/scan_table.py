@@ -36,7 +36,6 @@ Territory Map's per-shape ``bounding area``/``fill %`` display.
 
 from __future__ import annotations
 
-import json
 import math
 from pathlib import Path
 from typing import Optional
@@ -262,7 +261,7 @@ def territory_fill(territories: dict, spatial_extent):
 
 
 # ─────────────────────────────────────────────────────────────────────
-# Catalog-type discovery (the "type of json" selector)
+# Catalog-type discovery
 # ─────────────────────────────────────────────────────────────────────
 def _lineage_label(key) -> str:
     """Human label for a lineage key ``(kind, algo, tag)``."""
@@ -278,7 +277,7 @@ def catalog_types(dm, bin_size: int) -> list:
     """Distinct catalog types available at ``bin_size`` across all project scans.
 
     Each entry: ``{"key": (kind, algo, tag), "label": str, "territory": bool,
-    "scans": int}`` — one option for the "type of json" selector. A type is
+    "scans": int}`` — one option for the catalog-type selector. A type is
     offered if at least one scan has a matching shapes/combined/feature catalog.
     """
     seen: dict = {}

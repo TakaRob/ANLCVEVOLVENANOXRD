@@ -1097,7 +1097,7 @@ class ROIShapeWindow(QMainWindow):
             self._update_job_controls()
             return
         tag = re.sub(r'[^A-Za-z0-9_.-]+', '_', self.name.text().strip()).strip('_.-')
-        self.result_path = self.dm.roi_map_json(tag, self.bin_size, self.scan)
+        self.result_path = self.dm.roi_map_path(tag, self.bin_size, self.scan)
         for entry in active:
             entry["status"] = "saved"
             entry["catalog_path"] = self.result_path

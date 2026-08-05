@@ -8,7 +8,7 @@ Selecting a shape in the list highlights the territories it spans.
 This is a focused, self-contained viewer (not a clone of the 4k-line grid
 viewer): the grid device-map assumes one pixel per ``"r_c"`` bin, which cannot
 represent irregular territories, so this draws real polygons instead. It reads
-the territorial grid mapping (``..._territory.json``, which carries each cell's
+the territorial grid mapping (``..._territory.h5``, which carries each cell's
 polygon / centroid / area / count) and the territorial shapes catalog.
 
 ``build_window(project_root, scan, bin_size, catalog=None)`` mirrors
@@ -17,7 +17,6 @@ polygon / centroid / area / count) and the territorial shapes catalog.
 
 from __future__ import annotations
 
-import json
 import re
 import sys
 from pathlib import Path
@@ -64,7 +63,7 @@ def _load_shapes(dm: DataManager, scan, catalog=None) -> list:
     if catalog and Path(catalog).exists():
         path = Path(catalog)
     else:
-        path = dm.shapes_json("territory", 1, scan, variant="territory")
+        path = dm.shapes_path("territory", 1, scan, variant="territory")
         if not Path(path).exists():
             ldir = dm.labels_dir(scan)
             hits = [candidate for candidate in catalogs.list_catalogs(ldir, "shapes", 1)

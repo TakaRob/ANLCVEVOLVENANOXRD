@@ -65,7 +65,7 @@ def create_from_scan(scan_folder, project_parent, name, tth_path, *,
     if summed_image is not None:
         reflection_sum.save(dm, scan_name, np.asarray(summed_image), is_raw=True)
 
-    io.atomic_write_json(dm.grid_mapping(bin_size=int(bin_size), scan=scan_name),
-                         grid_data, indent=None)
+    io.save_grid_mapping(dm.grid_mapping(bin_size=int(bin_size), scan=scan_name),
+                         grid_data)
     workspace.set_last_project(root)
     return root, scan_name

@@ -36,7 +36,7 @@ _DM = None
 _BIN_SIZE = 3
 RESULTS_DIR = None
 HOLDOUT_DIR = None
-CATALOG_PATH = None   # selected feature-map JSON; None → canonical per-bin file
+CATALOG_PATH = None   # selected feature-map HDF5 catalog; None → canonical per-bin file
 
 
 def configure(project_root=".", bin_size=3, scan=None, catalog=None):

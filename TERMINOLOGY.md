@@ -1,6 +1,6 @@
 # XRD-App Terminology — Single Source of Truth
 
-This document is the canonical vocabulary for the xrd-app. Code, UI labels, JSON
+This document is the canonical vocabulary for the xrd-app. Code, UI labels, persisted schema
 fields, docstrings, and docs should all use these terms and only these terms. It
 exists because the same concept is currently named several different ways
 (*peak* / *point* / *feature* / *shape*), and because the device map uses
@@ -28,7 +28,7 @@ distinct stage with a distinct name. Do not use "peak" for all of them.
 + gaussian-profile filter). It is the canonical name for that stage and its
 algorithm-kind across the *public surface*: the `ShapeAlgorithms/` directory, the
 `xrd-app shapes` / `run-shapes` CLI commands, `--source shapes`, `kind="shape"`,
-the on-disk `*_shapes_NxN.h5` files, `config.shapes_json()`, and
+the on-disk `*_shapes_NxN.h5` files, `config.shapes_path()`, and
 `bins_from_shapes()`. Read "a shape" as "a verified feature." Use **feature** when
 talking about the data record/object; use **shape** when talking about the
 stage, its algorithm-kind, the CLI, or its output files. They are not competing
@@ -247,7 +247,7 @@ Done:
 
 Deliberately **not** changed (load-bearing identifiers / correct usage):
 
-- **`shape` stage identifier** — blessed as canonical (see §1): `ShapeAlgorithms/`, `xrd-app shapes`, `kind="shape"`, `*_shapes.h5`, `config.shapes_json()`, `bins_from_shapes()` all stay.
+- **`shape` stage identifier** — blessed as canonical (see §1): `ShapeAlgorithms/`, `xrd-app shapes`, `kind="shape"`, `*_shapes.h5`, `config.shapes_path()`, `bins_from_shapes()` all stay.
 - **`*_peaks.h5` / `filtered_peaks_*.csv`** — canonical on-disk filename conventions.
 - **`.shape`** (numpy/detector/grid dimensions) — unrelated to morphology.
 - **"LoG blob detection"** — the standard CV name for the *technique*, not an output-object noun (§1).

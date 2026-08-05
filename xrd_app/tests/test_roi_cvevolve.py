@@ -65,7 +65,7 @@ def test_high_holdout_percentage_keeps_a_development_example(tmp_path):
     dm = _project(tmp_path)
     feature = {"feature_id": 1, "manual_roi": {"x0": 1, "y0": 2, "x1": 3, "y1": 4}}
     for scan in ("Scan_0037", "Scan_0038"):
-        roi_catalog.save_previews(dm.roi_map_json("manual", 3, scan), [feature],
+        roi_catalog.save_previews(dm.roi_map_path("manual", 3, scan), [feature],
                                   scan=scan, bin_size=3, name="manual")
         reflection_sum.save(dm, scan, np.ones((5, 6)), is_raw=True)
 
@@ -79,7 +79,7 @@ def test_session_exports_sums_labels_config_and_evaluator(tmp_path):
     dm = _project(tmp_path)
     scan = "Scan_0037"
     feature = {"feature_id": 1, "manual_roi": {"x0": 10, "y0": 20, "x1": 18, "y1": 30}}
-    roi_catalog.save_previews(dm.roi_map_json("manual", 3, scan), [feature],
+    roi_catalog.save_previews(dm.roi_map_path("manual", 3, scan), [feature],
                               scan=scan, bin_size=3, name="manual")
     reflection_sum.save(dm, scan, np.ones((40, 50)), is_raw=True)
 
@@ -100,7 +100,7 @@ def test_session_removes_only_stale_generated_split_files(tmp_path):
     dm = _project(tmp_path)
     scan = "Scan_0037"
     feature = {"feature_id": 1, "manual_roi": {"x0": 1, "y0": 2, "x1": 3, "y1": 4}}
-    roi_catalog.save_previews(dm.roi_map_json("manual", 3, scan), [feature],
+    roi_catalog.save_previews(dm.roi_map_path("manual", 3, scan), [feature],
                               scan=scan, bin_size=3, name="manual")
     reflection_sum.save(dm, scan, np.ones((5, 6)), is_raw=True)
     dest = tmp_path / "session"

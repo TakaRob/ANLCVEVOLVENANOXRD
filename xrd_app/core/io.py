@@ -1,10 +1,10 @@
 """
 Data loading and preparation for xrd-tools.
 
-Covers the three input formats used by the pipeline:
+Covers the pipeline's primary input formats:
   - Raw per-frame detector scans (HDF5)
   - The 2-theta map (TIFF)
-  - The grid mapping + reflections metadata (JSON / Python module)
+  - Grid mappings (HDF5) and reflection definitions (JSON)
 
 It also owns the two "prepare" steps that turn raw frames into the inputs the
 detector consumes:
@@ -381,7 +381,7 @@ def _grid_variant(grid_mapping) -> Optional[str]:
         return str(value) if value else None
     try:
         value = load_grid_mapping(grid_mapping).get("variant")
-    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+    except (OSError, ValueError, TypeError):
         value = None
     if value:
         return str(value)
@@ -968,7 +968,7 @@ def generate_grid_mapping(
 
     A CSV we recreated ourselves (tagged with :data:`RECREATED_CSV_MARKER`) is not
     treated as real positions — it routes to ``file_per_row``. The chosen source is
-    recorded in the output JSON as ``coordinate_source``.
+    recorded in the grid-mapping metadata as ``coordinate_source``.
     """
     log(f"Loading scan metadata from {xrd_dir} ...")
     xrd_files, frame_map, n_total = load_xrd_metadata(

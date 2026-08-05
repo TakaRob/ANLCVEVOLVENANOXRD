@@ -372,7 +372,7 @@ def test_roi_crop_grid_shape_uses_metadata_then_loaded_keys(monkeypatch):
     class DM:
         def grid_mapping(self, **kwargs):
             requested.append(kwargs)
-            return "grid.json"
+            return "grid.h5"
 
     window.dm = DM()
     monkeypatch.setattr(

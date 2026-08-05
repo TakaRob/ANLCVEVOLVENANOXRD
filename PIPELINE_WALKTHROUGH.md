@@ -1,7 +1,7 @@
 # Pipeline Walkthrough — GUI vs CLI, defaults, and linkage
 
 End-to-end map of the nano-XRD pipeline **from an empty project to the device
-maps and territory JSONs**, comparing what the GUI and the CLI can each do, what
+maps and territorial HDF5 results**, comparing what the GUI and the CLI can each do, what
 the defaults are, and confirming every step is wired correctly. XRF and the
 rocking/cross-scan study steps are intentionally out of scope here.
 
@@ -100,7 +100,7 @@ init ─► scan-detect ─► link (tth/refl/pos) ─► [create-positions] ─
 - **CLI:** `xrd-app grid --bin-size 3 [--deskew-method auto] [--variant TAG]
   [--shape ROWSxCOLS] [--rawgrid]`. **Default `--deskew-method auto`**:
   `positions_xy` at 1×1 (both axes snapped to true (X,Y) — skew-free), `faithful`
-  at ≥2×2. Records `coordinate_source` + `positions_real` in the output JSON.
+  at ≥2×2. Records `coordinate_source` + `positions_real` in the grid-mapping HDF5 metadata.
 - **GUI:** no standalone button — **folded into Programs → Create bins**
   (`make-bins` runs `grid` then `bin`). The GUI always uses `deskew-method auto`;
   `--rawgrid`, `--deskew-method`, `--variant`, and `--shape` are **CLI-only**.
@@ -144,7 +144,7 @@ init ─► scan-detect ─► link (tth/refl/pos) ─► [create-positions] ─
   uses defaults (which are the recommended values).
 
 ### 9. Device View — the spatial maps
-- **No CLI** (it's a viewer; the CLI equivalent is reading the shapes JSON).
+- **No CLI** (it's a viewer; the CLI equivalent is reading the shapes HDF5 result).
 - **GUI:** **Device View** tab. Pick **Bin → Feature catalog**; only bins/catalogs
   that exist are listed. Switchable metrics (integrated intensity, Δ2θ, χ
   orientation, χ FWHM, Δ2θ FWHM), χ-range filter. Status line shows the catalog's
@@ -226,7 +226,7 @@ dead-ends**. Two were fixed:
 1. **GUI "New project" didn't seed reflections** (`workspace.create_project` vs
    `cli.py init`). GUI-made projects fell back to the bundled set and showed no
    "Project default" in the Reflections selector. → `create_project` now seeds
-   `reflections.{json,py}` identically to `init`.
+   `reflections.json` identically to `init`.
 
 2. **Territorial reference was CLI-only.** The Territory Map / Device-View popup
    only appear *after* `territory-grid` + three `--variant territory` steps, which

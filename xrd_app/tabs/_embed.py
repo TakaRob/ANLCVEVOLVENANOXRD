@@ -211,7 +211,7 @@ class LineageCatalogTab(QWidget):
     You search by feature catalog: pick a bin (only bins that have catalogs are
     listed — any size), then a feature catalog for that bin. The status line
     prints the catalog's provenance read from its lineage — the **scan** it came
-    from and the peak set it was derived from. ``Browse…`` loads any catalog JSON
+    from and the peak set it was derived from. ``Browse…`` loads any compatible HDF5 catalog
     not auto-discovered and reads its bin/lineage from the file.
     """
 

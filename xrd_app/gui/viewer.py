@@ -181,7 +181,7 @@ def _fmt_num(v, prec=1):
 # in-file/manifest lineage, and the flat scan dir + one level of subdirs).
 
 def list_peak_catalogs():
-    """Peak-set JSONs (scan catalogs) for the current bin size, sorted by name."""
+    """Peak catalogs for the current bin size, sorted by name."""
     return catalogs.list_catalogs(RESULTS_DIR, "peaks", _BIN_SIZE) if RESULTS_DIR else []
 
 
@@ -2191,11 +2191,9 @@ class FeatureViewer(QMainWindow):
             return self._xrf_gm_cache[key]
         gm = None
         try:
-            import json
             p = _DM.grid_mapping(bin_size=grid, scan=scan, variant=variant)
             if p and Path(p).exists():
-                with open(p) as f:
-                    gm = json.load(f)
+                gm = io.load_grid_mapping(p)
         except Exception:
             gm = None
         self._xrf_gm_cache[key] = gm

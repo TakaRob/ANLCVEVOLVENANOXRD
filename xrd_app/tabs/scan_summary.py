@@ -1,7 +1,7 @@
 """Scan Summary tab — one comparable row per scan for the whole project.
 
 The cross-scan companion to the per-feature Device/Orientation views: pick a
-**bin size** and a **catalog type** (the JSON lineage shared across scans — e.g.
+**bin size** and a **catalog type** (the catalog lineage shared across scans — e.g.
 the gaussian shapes at 3×3, or a *territorial* mapping) and it prints an
 SQLite-style table, one row per scan, of feature count, footprint area (sum +
 union), coverage %, the preferred χ (dominant azimuthal cluster) ± range, and
@@ -33,7 +33,7 @@ TAB_META = {
     "scan_dependent": False,   # project-wide: one row per scan, not per active scan
     "general": (
         "One comparable row per scan for the whole project. Choose a bin size "
-        "and a catalog type (the JSON lineage — e.g. gaussian shapes 3×3, or a "
+        "and a catalog type (the catalog lineage — e.g. gaussian shapes 3×3, or a "
         "territorial mapping) and read, per scan: feature count, footprint area "
         "(Σ and set-union), coverage %, the preferred χ (tip of the dominant "
         "area-weighted azimuthal cluster) ± range, and shape fill % (how solidly "
@@ -89,7 +89,7 @@ class ScanSummaryTab(QWidget):
         self._type_combo = QComboBox()
         self._type_combo.setMinimumWidth(240)
         self._type_combo.setToolTip(
-            "The JSON lineage compared across scans (shapes/combined variant or a "
+            "The catalog lineage compared across scans (shapes/combined variant or a "
             "territorial mapping). Only types with at least one scan are listed.")
         self._type_combo.activated.connect(self._on_type_changed)
         bar.addWidget(self._type_combo)

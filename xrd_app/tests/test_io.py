@@ -335,8 +335,8 @@ def test_unbinned_archive_path_is_separate_from_1x1_bins(tmp_path):
 
 def test_configured_grid_only_applies_without_explicit_context(tmp_path):
     dm = _project(tmp_path)
-    configured = tmp_path / "Metadata" / "configured_3x3.json"
-    configured.write_text('{"bin_size": 3, "bins": {}}')
+    configured = tmp_path / "Metadata" / "configured_3x3.h5"
+    io.save_grid_mapping(configured, {"bin_size": 3, "bins": {}})
     dm.config.data.setdefault("data_sources", {})["grid_mapping"] = str(configured)
 
     assert dm.grid_mapping() == configured

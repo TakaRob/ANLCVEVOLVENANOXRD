@@ -400,14 +400,14 @@ def build_holdout(source, algorithm, bin_size, scan, holdout_pct, seed, dest, ro
         if not algorithm:
             click.echo("Error: --algorithm <name> required for --source peaks.")
             raise SystemExit(1)
-        src_path = dm.peaks_json(algorithm, bin_size, scan)
+        src_path = dm.peaks_path(algorithm, bin_size, scan)
         _require(src_path, "peaks catalog")
         ann, empty = H.bins_from_peaks(str(src_path))
     else:  # shapes
         if not algorithm:
             click.echo("Error: --algorithm <name> required for --source shapes.")
             raise SystemExit(1)
-        src_path = dm.shapes_json(algorithm, bin_size, scan)
+        src_path = dm.shapes_path(algorithm, bin_size, scan)
         _require(src_path, "shapes catalog")
         ann, empty = H.bins_from_shapes(str(src_path))
 
@@ -1089,7 +1089,7 @@ def peaks(bin_size, scan, algorithm, snr, workers, out_name, variant, h5_path, t
         scan=dm.scan_name, bin_size=bin_size, algorithm=algo,
         detector_file=det, snr=snr, variant=variant)
 
-    out = dm.peaks_json(algo, bin_size, scan, variant=variant)
+    out = dm.peaks_path(algo, bin_size, scan, variant=variant)
     from .core import catalogs
     catalogs.save_result(out, result)
     catalogs.record_catalog(dm.labels_dir(scan), out.name, result["lineage"])
@@ -1158,7 +1158,7 @@ def shapes(bin_size, scan, algorithm, from_peaks, peak_algo, link_tolerance, var
         algorithm = 'territory'
 
     peaks_path = Path(from_peaks) if from_peaks else (
-        dm.peaks_json(peak_algo, bin_size, scan, variant=variant) if peak_algo else None)
+        dm.peaks_path(peak_algo, bin_size, scan, variant=variant) if peak_algo else None)
     if not peaks_path:
         raise click.UsageError("Provide --from-peaks <catalog> or --peak-algo <name>.")
     _require(peaks_path, "peaks catalog (run 'xrd-app peaks' first)")
@@ -1216,7 +1216,7 @@ def shapes(bin_size, scan, algorithm, from_peaks, peak_algo, link_tolerance, var
         peak_source=lineage.from_peaks_data(peaks_data),
         peak_source_file=peaks_path.name)
 
-    out = dm.shapes_json(algo, bin_size, scan, variant=out_variant)
+    out = dm.shapes_path(algo, bin_size, scan, variant=out_variant)
     catalogs.save_result(out, result)
 
     # Emit the kept/filtered CSVs alongside the shapes file. The shapes HDF5 file is
@@ -1413,7 +1413,7 @@ def roi_shapes(bin_size, scan, rois, name, preview_output, fast, stride,
             "total detector counts inside ROI per spatial bin"),
         "features": features,
     }
-    output = Path(preview_output) if preview_output else dm.roi_map_json(tag, bin_size, scan)
+    output = Path(preview_output) if preview_output else dm.roi_map_path(tag, bin_size, scan)
     if preview_output:
         _write_json(output, preview_result)
     else:
@@ -1450,7 +1450,7 @@ def roi_save(ctx, rois, name, bin_size, scan, sample_crops, root):
         with open(preview) as handle:
             features = json.load(handle).get("features", [])
         dm = DataManager(root, scan=scan)
-        output = dm.roi_map_json(tag, bin_size, scan)
+        output = dm.roi_map_path(tag, bin_size, scan)
         result = roi_catalog.save_previews(
             output, features, scan=dm.scan_name, bin_size=bin_size, name=tag)
         click.echo(f"Saved {len(features)} exact ROI features "
@@ -1500,7 +1500,7 @@ def batch(ctx, scans, all_scans, bin_size, algorithm, shape_algo, snr, grid_shap
             skipped.append(name)
             continue
         algo = algorithm or Path(dm.detector_script(algorithm, bin_size=bin_size)).stem
-        if skip_existing and dm.shapes_json(shape_algo, bin_size, name).exists():
+        if skip_existing and dm.shapes_path(shape_algo, bin_size, name).exists():
             click.echo("  shapes exist — skipping (--skip-existing)\n")
             continue
         try:
@@ -2147,9 +2147,8 @@ def hd_device_map(bin_size, scan, catalog, win, max_cells, out_name, root):
     beneath the N×N outlines. Real stage (x, y) per pixel is attached when the
     scan has a real position CSV, for the real-position scatter mode.
 
-    Heavy (reads thousands of raw frames); run once — the JSON is cached.
+    Heavy (reads thousands of raw frames); run once — the HDF5 result is cached.
     """
-    import json
     from .core import catalogs, hd_map, io
 
     dm = DataManager(root, scan=scan)
@@ -2232,7 +2231,7 @@ def hd_device_map(bin_size, scan, catalog, win, max_cells, out_name, root):
         "positions_real": bool(cell_xy),
         "features": hd_features,
     }
-    out = dm.hd_map_json(algo, bin_size, scan)
+    out = dm.hd_map_path(algo, bin_size, scan)
     catalogs.save_result(out, result)
     click.echo(
         f"\nDone: {summary['n_features']} features, {summary['n_cells']} 1×1 cells "
@@ -2637,7 +2636,7 @@ def run_study(ctx, scans, bin_size, out_dir, study_name, notes, match_tol,
     if not out.is_absolute():
         out = Path(root) / out
     out.mkdir(parents=True, exist_ok=True)
-    tracks_json = f"{out_dir}/tracks.h5"
+    tracks_path = f"{out_dir}/tracks.h5"
     fails = []
 
     def _step(label, cmd, **kw):
@@ -2655,15 +2654,15 @@ def run_study(ctx, scans, bin_size, out_dir, study_name, notes, match_tol,
     _step("aggregate", aggregate, scans=scans, bin_size=bin_size,
           out_dir=out_dir, root=root)
     _step("track", track, scans=scans, bin_size=bin_size, match_tol=match_tol,
-          out_path=tracks_json, root=root)
-    _step("rocking", rocking, tracks_path=tracks_json,
+          out_path=tracks_path, root=root)
+    _step("rocking", rocking, tracks_path=tracks_path,
           out_path=f"{out_dir}/rocking_curves.csv", root=root)
-    _step("predict", predict, tracks_path=tracks_json, scans=scans,
+    _step("predict", predict, tracks_path=tracks_path, scans=scans,
           bin_size=bin_size, match_tol=match_tol,
           rocking_path=f"{out_dir}/rocking_curves.csv", repeat_pair=repeat_pair,
           out_path=f"{out_dir}/prediction_report.md", root=root)
     _step("combined-device", combined_device,
-          device_map_path=f"{out_dir}/device_map.csv", tracks_path=tracks_json,
+          device_map_path=f"{out_dir}/device_map.csv", tracks_path=tracks_path,
           out_path=f"{out_dir}/combined_device.npz", root=root)
 
     if with_rsm:

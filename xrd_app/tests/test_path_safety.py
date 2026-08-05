@@ -98,12 +98,12 @@ def test_project_discovery_includes_launch_directory_when_it_is_a_project(tmp_pa
 def test_roi_catalog_names_normalize_inside_scan_labels(tmp_path, name, tag):
     dm = DataManager(tmp_path, scan=7)
 
-    output = dm.roi_map_json(name, 3)
+    output = dm.roi_map_path(name, 3)
 
     assert output == tmp_path / "Labels" / "Scan_0007" / f"{tag}_roimap_3x3.h5"
 
 
-@pytest.mark.parametrize("constructor", ["peaks_json", "shapes_json", "hd_map_json"])
+@pytest.mark.parametrize("constructor", ["peaks_path", "shapes_path", "hd_map_path"])
 def test_algorithm_output_names_reject_path_components(tmp_path, constructor):
     dm = DataManager(tmp_path, scan=7)
 

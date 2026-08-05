@@ -15,7 +15,7 @@ within ``match_tol`` bins. If a future series has stage drift, add a per-scan
 (row, col) offset upstream (feature-based registration) before calling this.
 
 Pure module — no click, no Qt. The CLI (`xrd-app track`) feeds it the feature
-rows produced by :mod:`core.aggregate` and writes the JSON/CSV.
+rows produced by :mod:`core.aggregate` and writes the HDF5/CSV outputs.
 """
 
 from __future__ import annotations

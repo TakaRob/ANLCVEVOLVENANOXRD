@@ -397,26 +397,26 @@ class DataManager:
         return (self.metadata_dir / name) if name else self.metadata_dir
 
     # ----- algorithm output files -------------------------------------
-    def peaks_json(self, algo: str, bin_size: int, scan: object = None,
+    def peaks_path(self, algo: str, bin_size: int, scan: object = None,
                    variant: Optional[str] = None) -> Path:
         algo = safe_component(algo, label="algorithm name")
         tag = f"_{safe_component(variant, label='variant')}" if variant else ""
         return self.labels_dir(scan) / f"{algo}_peaks_{bin_size}x{bin_size}{tag}.h5"
 
-    def shapes_json(self, algo: str, bin_size: int, scan: object = None,
+    def shapes_path(self, algo: str, bin_size: int, scan: object = None,
                     variant: Optional[str] = None) -> Path:
         algo = safe_component(algo, label="algorithm name")
         tag = f"_{safe_component(variant, label='variant')}" if variant else ""
         return self.labels_dir(scan) / f"{algo}_shapes_{bin_size}x{bin_size}{tag}.h5"
 
-    def hd_map_json(self, algo: str, bin_size: int, scan: object = None,
+    def hd_map_path(self, algo: str, bin_size: int, scan: object = None,
                     variant: Optional[str] = None) -> Path:
         """High-def (1x1) intensity map sampled beneath a binned feature map."""
         algo = safe_component(algo, label="algorithm name")
         tag = f"_{safe_component(variant, label='variant')}" if variant else ""
         return self.labels_dir(scan) / f"{algo}_hdmap_{bin_size}x{bin_size}{tag}.h5"
 
-    def roi_map_json(self, name: str, bin_size: int, scan: object = None) -> Path:
+    def roi_map_path(self, name: str, bin_size: int, scan: object = None) -> Path:
         """Dedicated ROI > Shape catalog, intentionally separate from shapes."""
         tag = safe_component(name, normalize=True, label="catalog name")
         return self.labels_dir(scan) / f"{tag}_roimap_{bin_size}x{bin_size}.h5"

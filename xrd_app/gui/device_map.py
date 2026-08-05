@@ -11,7 +11,6 @@ pyqtgraph now (fast ImageItem heatmap, IsocurveItem outlines, BarGraphItem
 histogram, hover/click highlight).
 """
 
-import json
 import re
 import sys
 from pathlib import Path
@@ -42,7 +41,7 @@ _DM = None
 _BIN_SIZE = 3
 RESULTS_DIR = None
 HOLDOUT_DIR = None
-CATALOG_PATH = None   # selected feature-map JSON; None → canonical per-bin file
+CATALOG_PATH = None   # selected feature-map HDF5 catalog; None → canonical per-bin file
 GRID_PATH = None      # grid mapping matching the selected catalog's bins
 H5_PATH = None        # binned H5 carrying the same catalog variant
 

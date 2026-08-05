@@ -18,7 +18,6 @@ The heavy sampling lives in the CLI/``core``; this module only renders the cache
 reused from :mod:`gui.device_map` so the two views stay visually consistent.
 """
 
-import json
 import re
 import sys
 from pathlib import Path
@@ -77,7 +76,7 @@ def _parse_cell(key):
 
 
 def load_hd_features(catalog_path):
-    """Parse an hd_map JSON → (features, n_rows, n_cols, positions_real).
+    """Load an HD-map catalog as (features, n_rows, n_cols, positions_real).
 
     Each returned feature gets a 1×1 boolean ``_mask``, cached ``center_row/col``
     and ``center_x/y`` for hover, and keeps its ``hd_profile`` cells.
@@ -1067,7 +1066,7 @@ class HDMapBuilder(QMainWindow):
         detail = QLabel(
             f"Sample 1×1 intensity beneath the {bin_size}×{bin_size} feature map "
             "at each feature's detector peak. Reads raw frames (heavy) — runs "
-            "once, then the JSON is cached. Also builds the 1×1 grid mapping if "
+            "once, then the HDF5 result is cached. Also builds the 1×1 grid mapping if "
             "missing, so the real (x, y) stage-position scatter is available.")
         detail.setAlignment(Qt.AlignCenter); detail.setWordWrap(True)
         detail.setStyleSheet("color:#999; font-size:0.9em;")

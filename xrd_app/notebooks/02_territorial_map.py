@@ -27,11 +27,10 @@ RUN_PEAKS = False
 RUN_SHAPES = False
 OVERWRITE = False
 
-PEAKS_JSON = None
-SHAPES_JSON = None
+PEAKS_PATH = None
+SHAPES_PATH = None
 
 # %% Imports and paths
-import json
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -54,10 +53,10 @@ detector_path = dm.detector_script(PEAK_ALGORITHM, bin_size=1)
 shape_algorithm_path = dm.shape_script("territory")
 peak_name = detector_path.stem
 shape_name = shape_algorithm_path.stem
-peak_path = Path(PEAKS_JSON) if PEAKS_JSON else dm.peaks_json(
+peak_path = Path(PEAKS_PATH) if PEAKS_PATH else dm.peaks_path(
     peak_name, 1, variant=VARIANT
 )
-shape_path = Path(SHAPES_JSON) if SHAPES_JSON else dm.shapes_json(
+shape_path = Path(SHAPES_PATH) if SHAPES_PATH else dm.shapes_path(
     shape_name, 1, variant=VARIANT
 )
 
