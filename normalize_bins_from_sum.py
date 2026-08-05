@@ -48,6 +48,7 @@ Usage:
     python3 normalize_bins_from_sum.py <root> --bin-size 3 --dry-run
 """
 import argparse
+import json
 import os
 import subprocess
 import sys
@@ -66,6 +67,25 @@ def _bin_datasets(handle):
     for key, obj in handle.items():
         if isinstance(obj, h5py.Dataset) and obj.ndim == 2:
             yield key, obj
+
+
+def ensure_grid_h5(grid_path: Path) -> bool:
+    """Guarantee the HDF5 grid mapping exists, restoring it from the sibling JSON.
+
+    Pre-HDF5 trees carry only ``grid_mapping_*.json``; io.load_grid_mapping reads
+    only the ``.h5`` form. The JSON already holds the full frame->bin assignment,
+    so this is a pure format conversion (no raw frames) — and it leaves the ``.h5``
+    in place for the rest of the pipeline (peaks/shapes/the .sh). Returns True if
+    the ``.h5`` is present (already there or just converted), False otherwise.
+    """
+    if grid_path.exists():
+        return True
+    json_path = grid_path.with_suffix(".json")
+    if not json_path.exists():
+        return False
+    io.save_grid_mapping(grid_path, json.loads(json_path.read_text()))
+    io.load_grid_mapping(grid_path)  # verify it reads back
+    return grid_path.exists()
 
 
 def frame_counts(grid_path: Path) -> dict:
@@ -165,8 +185,8 @@ def verify_scan(dm: DataManager, scan: int, bin_size: int, variant: str) -> int:
     if not bins_path.exists():
         print(f"  no summed bins to shortcut: {bins_path}", file=sys.stderr)
         return 2
-    if not grid_path.exists():
-        print(f"  no grid mapping: {grid_path}", file=sys.stderr)
+    if not ensure_grid_h5(grid_path):
+        print(f"  no grid mapping (.h5 or .json): {grid_path}", file=sys.stderr)
         return 2
     if is_normalized(bins_path):
         print("  bins are ALREADY mean-per-frame — cannot verify the shortcut "
@@ -252,8 +272,8 @@ def main() -> int:
             print(f"  {scan_name}: MISSING bins {bins_path}")
             failures += 1
             continue
-        if not grid_path.exists():
-            print(f"  {scan_name}: MISSING grid {grid_path.name}")
+        if not ensure_grid_h5(grid_path):
+            print(f"  {scan_name}: MISSING grid (.h5 or .json) {grid_path.name}")
             failures += 1
             continue
         if is_normalized(bins_path) and not args.force:
