@@ -114,7 +114,8 @@ class ReportTab(QWidget):
 
         reflection_box = QGroupBox("Reflections")
         reflection_layout = QVBoxLayout(reflection_box)
-        reflection_layout.addWidget(QLabel("Ctrl-click or Shift-click to select multiple."))
+        reflection_layout.addWidget(QLabel(
+            "Optional focus. Empty includes all; Ctrl-click or Shift-click for multiple."))
         self.reflection_list = QListWidget()
         self.reflection_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.reflection_list.setMinimumWidth(180)
@@ -202,7 +203,7 @@ class ReportTab(QWidget):
         for reflection in sorted(available):
             item = QListWidgetItem(reflection)
             self.reflection_list.addItem(item)
-            if not previous or reflection in previous:
+            if reflection in previous:
                 item.setSelected(True)
         self.reflection_list.blockSignals(False)
 
@@ -236,8 +237,6 @@ class ReportTab(QWidget):
             "--top-scope", self.top_scope.currentData(),
         ])
         selected_reflections = self.reflection_list.selectedItems()
-        if self.reflection_list.count() and not selected_reflections:
-            raise ValueError("Select at least one reflection")
         for item in selected_reflections:
             arguments.extend(["--reflection", item.text()])
         if self.override.isChecked():

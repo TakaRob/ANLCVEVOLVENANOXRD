@@ -1,42 +1,43 @@
 #!/usr/bin/env bash
-# Run frame-normalized peak detection and shaping on the final project.
+# Start or resume a representative nano-XRD project and run the complete
+# focus-scan workflow: calibration/scan setup, lossless 1x1 territory products,
+# normalized 3x3 bins, peaks, shapes, full detector sums, and PDF reports.
 #
-# Focus scans (FOCUS_SCANS) get a LOSSLESS pair: a territorial 1x1 built at
-# --target-size 1 (one frame per cell, no summing) plus the standard 3x3 mapping
-# — this is what Device View / HD Device View render. All other device scans get
-# the standard 3x3 mapping only. Before detection, summed bins are rebuilt as the
-# mean per contributing frame. A missing HDF5 grid mapping is restored from the
-# scan's grid_mapping_*.json when present (pre-HDF5 trees only carry the JSON,
-# which the current pipeline cannot read), otherwise rebuilt from the scan's real
-# positions.csv. This script does not run cross-scan studies.
+# The default six focus scans are Scan_0179, 0182, 0203, 0207, 0215, and 0218.
+# Set INCLUDE_GRID_SCANS=1 to additionally process the remaining device scans at
+# 3x3. Every stage is resumable; current products are skipped where practical.
 #
-# Example:
+# Fresh-project example:
+#   ROOT=/path/to/new-project \
+#   RAW_ROOT=/path/to/parent-containing-Scan_NNNN \
+#   POSITION_ROOT=/path/to/position-csvs \
+#   TTH_FILE=/path/to/tth.tiff \
+#   REFLECTIONS_FILE=/path/to/reflections.json \
 #   nohup ./run_final_analysis.sh > run_final_analysis.log 2>&1 &
 #
-# ROOT defaults to the directory this script lives in. If your bins live in a
-# sub-project (e.g. .../ANLCVEVOLVENANOXRD/Scans179-226Perovskite), point ROOT
-# at that sub-dir, NOT the parent:
-#   ROOT=/full/path/Scans179-226Perovskite ./run_final_analysis.sh
-#
-# Optional overrides:
-#   ROOT=/path/to/project XRD_APP=/path/to/xrd-app DETECTOR=name SNR=4 WORKERS=4 LINK_TOLERANCE=5
+# ROOT defaults to the directory containing this script. TTH_FILE defaults to
+# its tth.tiff and REFLECTIONS_FILE to the app's bundled perovskite reflections.
+# A fresh ROOT is initialized automatically. Existing projects are never
+# reinitialized, but their calibration, reflections, and optional external roots
+# are updated through `xrd-app link`.
 
 set -uo pipefail
 
-ROOT="${ROOT:-$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)}"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="${ROOT:-$SCRIPT_DIR}"
 XRD_APP="${XRD_APP:-xrd-app}"
+PROJECT_NAME="${PROJECT_NAME:-Nano-XRD focus analysis}"
+TTH_FILE="${TTH_FILE:-${TTH:-$SCRIPT_DIR/tth.tiff}}"
+RAW_ROOT="${RAW_ROOT:-}"
+POSITION_ROOT="${POSITION_ROOT:-}"
+REFLECTIONS_FILE="${REFLECTIONS_FILE:-$SCRIPT_DIR/xrd_app/assets/reflections.json}"
 DETECTOR="${DETECTOR:-5x5_tophat_band_adaptive_snr}"
 SNR="${SNR:-4}"
 WORKERS="${WORKERS:-4}"
 LINK_TOLERANCE="${LINK_TOLERANCE:-5}"
-
-# RAW_ROOT: optional. When set, the focus scans are re-registered from this raw
-# tree before the lossless build, so the scan registry points at THIS host's
-# paths. Needed because Raw/scans.json bakes in absolute dirs — a tree registered
-# under WSL's /mnt/z won't resolve on a beamline host where the same share is
-# /net/micdata/data1. scan-detect merges, so only the focus entries change.
-#   RAW_ROOT=/net/micdata/data1/isn/2026-1/2026-1-Luo/Raw ./run_final_analysis.sh
-RAW_ROOT="${RAW_ROOT:-}"
+INCLUDE_GRID_SCANS="${INCLUDE_GRID_SCANS:-0}"
+BUILD_FOCUS_LOSSLESS="${BUILD_FOCUS_LOSSLESS:-1}"
+REPORT_DIR="${REPORT_DIR:-$ROOT/Figures}"
 
 FOCUS_SCANS=(179 182 203 207 215 218)
 GRID_SCANS=(
@@ -265,16 +266,58 @@ if ! python3 -c 'import h5py' >/dev/null 2>&1; then
   printf 'Python cannot import h5py; normalization provenance cannot be checked.\n' >&2
   exit 2
 fi
+if [[ ! -f "$TTH_FILE" ]]; then
+  printf '2-theta calibration file not found: %s\n' "$TTH_FILE" >&2
+  printf 'Set TTH_FILE=/full/path/to/tth.tiff and retry.\n' >&2
+  exit 2
+fi
+if [[ ! -f "$REFLECTIONS_FILE" ]]; then
+  printf 'Reflection definition file not found: %s\n' "$REFLECTIONS_FILE" >&2
+  printf 'Set REFLECTIONS_FILE=/full/path/to/reflections.json and retry.\n' >&2
+  exit 2
+fi
+
+if [[ ! -f "$ROOT/config.yaml" ]]; then
+  if [[ -z "$RAW_ROOT" ]]; then
+    printf 'A fresh project requires RAW_ROOT to discover the focus scans.\n' >&2
+    exit 2
+  fi
+  printf '[setup] initializing project: %s\n' "$ROOT"
+  "$XRD_APP" init --root "$ROOT" --name "$PROJECT_NAME" || exit 2
+fi
+
+link_args=(
+  link
+  --root "$ROOT"
+  --tth "$TTH_FILE"
+  --reflections "$REFLECTIONS_FILE"
+  --copy
+)
+[[ -n "$RAW_ROOT" ]] && link_args+=(--raw-root "$RAW_ROOT")
+[[ -n "$POSITION_ROOT" ]] && link_args+=(--position-root "$POSITION_ROOT")
+printf '[setup] linking 2-theta calibration, reflections, and external data roots\n'
+"$XRD_APP" "${link_args[@]}" || exit 2
+
+if [[ -n "$RAW_ROOT" ]]; then
+  focus_csv="$(IFS=,; printf '%s' "${FOCUS_SCANS[*]}")"
+  printf '[setup] discovering focus scans (%s)\n' "$focus_csv"
+  "$XRD_APP" scan-detect --root "$ROOT" --scans-dir "$RAW_ROOT" --scans "$focus_csv" || exit 2
+fi
 
 printf 'Project: %s\n' "$ROOT"
+printf '2-theta map: %s\n' "$TTH_FILE"
+printf 'Reflections: %s\n' "$REFLECTIONS_FILE"
+printf 'Focus report reflections: (001), (111)\n'
 printf 'Binning: mean per contributing frame (required and provenance-checked)\n'
 printf 'Detector: %s, SNR: %s, workers: %s, link tolerance: %s\n' \
   "$DETECTOR" "$SNR" "$WORKERS" "$LINK_TOLERANCE"
 printf 'Started: %s\n' "$(timestamp)"
 
-for scan in "${GRID_SCANS[@]}"; do
-  run_grid_scan "$scan"
-done
+if [[ "$INCLUDE_GRID_SCANS" == 1 ]]; then
+  for scan in "${GRID_SCANS[@]}"; do
+    run_grid_scan "$scan"
+  done
+fi
 
 # ── Focus-scan lossless build (appended) ────────────────────────────────
 # The six focus scans are the ones we inspect in Device View / HD Device View,
@@ -286,21 +329,6 @@ done
 # Scans whose raw frames are gone in this tree (no archive) can't be rebuilt
 # losslessly — they are reported as failures, never silently summed.
 # Set BUILD_FOCUS_LOSSLESS=0 to fall back to the old summed territorial pass.
-BUILD_FOCUS_LOSSLESS="${BUILD_FOCUS_LOSSLESS:-1}"
-
-territory_reregister_focus() {
-  # Optional: re-point the registry at THIS host's raw tree (RAW_ROOT) so
-  # 'archive-unbinned' resolves. scan-detect merges, so only the focus scans
-  # are rewritten; the 40 grid-scan entries are left as-is.
-  [[ -n "$RAW_ROOT" ]] || return 0
-  local focus_csv
-  focus_csv="$(IFS=,; printf '%s' "${FOCUS_SCANS[*]}")"
-  printf '[raw] re-registering focus scans (%s) from %s\n' "$focus_csv" "$RAW_ROOT"
-  if ! "$XRD_APP" scan-detect --root "$ROOT" --scans-dir "$RAW_ROOT" --scans "$focus_csv"; then
-    printf 'RAW RE-REGISTRATION reported problems from %s (some focus builds may not find raw)\n' \
-      "$RAW_ROOT" >&2
-  fi
-}
 
 territory_is_lossless() {
   # True only when the territory grid mapping was built at --target-size 1.
@@ -351,14 +379,68 @@ run_focus_lossless_scan() {
 }
 
 if [[ "$BUILD_FOCUS_LOSSLESS" == 1 ]]; then
-  territory_reregister_focus
   for scan in "${FOCUS_SCANS[@]}"; do
     run_focus_lossless_scan "$scan"
   done
 else
   for scan in "${FOCUS_SCANS[@]}"; do
     run_territory_scan "$scan"
+    run_grid_scan "$scan"
   done
+fi
+
+# Reports use the full scan detector sum, not a preview subset. Recompute it
+# after binning so stale or max-bin-limited artifacts cannot enter the PDFs.
+for scan in "${FOCUS_SCANS[@]}"; do
+  scan_name="Scan_$(printf '%04d' "$scan")"
+  printf '\n========== %s full detector sum (%s) ==========\n' "$scan_name" "$(timestamp)"
+  if ! "$XRD_APP" reflection-sum \
+      --root "$ROOT" \
+      --scan "$scan" \
+      --max-bins 0 \
+      --overwrite; then
+    failures+=("reflection-sum:$scan")
+  fi
+done
+
+report_targets=()
+for scan in "${FOCUS_SCANS[@]}"; do
+  report_targets+=(--target "Scan_$(printf '%04d' "$scan"):3")
+done
+
+printf '\n========== Full focus-scan report (%s) ==========\n' "$(timestamp)"
+if ! "$XRD_APP" report \
+    --root "$ROOT" \
+    "${report_targets[@]}" \
+    --output "$REPORT_DIR/focus_scans_full_report.pdf" \
+    --summed-images \
+    --all-reflections \
+    --features-by-reflection \
+    --top-features \
+    --top-count 5 \
+    --top-scope total \
+    --reflection '(001)' \
+    --reflection '(111)' \
+    --source-images \
+    --roi-images \
+    --calculate-rois \
+    --territory-maps; then
+  failures+=("report:full")
+fi
+
+printf '\n========== Summed image and device-map report (%s) ==========\n' "$(timestamp)"
+if ! "$XRD_APP" report \
+    --root "$ROOT" \
+    "${report_targets[@]}" \
+    --output "$REPORT_DIR/focus_scans_detector_and_device_maps.pdf" \
+    --summed-images \
+    --all-reflections \
+    --no-features-by-reflection \
+    --no-top-features \
+    --no-source-images \
+    --no-roi-images \
+    --no-territory-maps; then
+  failures+=("report:detector-device")
 fi
 
 printf '\n========== FINISHED (%s) ==========\n' "$(timestamp)"
@@ -367,4 +449,4 @@ if ((${#failures[@]})); then
   exit 1
 fi
 
-printf 'All peak and shape stages completed successfully.\n'
+printf 'Complete focus-scan analysis and both PDF reports finished successfully.\n'
