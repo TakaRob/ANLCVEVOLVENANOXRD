@@ -15,11 +15,12 @@ GUI stays a thin face over the CLI engine.
 from __future__ import annotations
 
 import math
+from pathlib import Path
 
 from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtWidgets import (
-    QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QHBoxLayout, QLabel,
-    QPushButton, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
+    QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QHBoxLayout,
+    QLabel, QPushButton, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
 from ..config import DataManager
@@ -126,6 +127,10 @@ class ScanSummaryTab(QWidget):
         self._copy_btn.setToolTip("Copy the current table to the clipboard as CSV.")
         self._copy_btn.clicked.connect(self._copy_csv)
         bar.addWidget(self._copy_btn)
+        self._save_btn = QPushButton("Save CSV…")
+        self._save_btn.setToolTip("Save the current table to a CSV file.")
+        self._save_btn.clicked.connect(self._save_csv)
+        bar.addWidget(self._save_btn)
 
         self._status = QLabel("")
         self._status.setStyleSheet("color:#888; padding-left:8px;")
@@ -284,11 +289,9 @@ class ScanSummaryTab(QWidget):
             return f"{v:,.0f}"
         return str(v)
 
-    def _copy_csv(self):
-        if not self._rows:
-            return
-        headers = self._headers()
-        lines = [",".join(headers)]
+    def _csv_text(self):
+        """The current table as CSV text (header row + one line per scan row)."""
+        lines = [",".join(self._headers())]
         for row in self._rows:
             cells = []
             for key in st.COLUMNS:
@@ -300,8 +303,33 @@ class ScanSummaryTab(QWidget):
                 else:
                     cells.append(str(v))
             lines.append(",".join(cells))
-        QApplication.clipboard().setText("\n".join(lines))
+        return "\n".join(lines)
+
+    def _copy_csv(self):
+        if not self._rows:
+            return
+        QApplication.clipboard().setText(self._csv_text())
         self._status.setText(f"copied {len(self._rows)} rows as CSV")
+
+    def _save_csv(self):
+        if not self._rows:
+            return
+        t = self._current_type()
+        stem = f"scan_summary_{self._bin_size}x{self._bin_size}"
+        if t:
+            stem += f"_{t['key']}"
+        default = Path(self._project_root) / "Figures" / f"{stem}.csv"
+        output, _ = QFileDialog.getSaveFileName(
+            self, "Save scan summary CSV", str(default), "CSV files (*.csv)")
+        if not output:
+            return
+        try:
+            Path(output).parent.mkdir(parents=True, exist_ok=True)
+            Path(output).write_text(self._csv_text() + "\n", encoding="utf-8")
+        except OSError as error:
+            self._status.setText(f"save failed: {error}")
+            return
+        self._status.setText(f"saved {len(self._rows)} rows to {Path(output).name}")
 
 
 def make_tab(project_root=".", scan=None, bin_size=3):

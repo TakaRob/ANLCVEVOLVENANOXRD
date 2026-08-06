@@ -5,6 +5,12 @@ from __future__ import annotations
 import numpy as np
 
 
+REFLECTION_PALETTE = [
+    "#4363d8", "#e6194b", "#3cb44b", "#f58231",
+    "#911eb4", "#42d4f4", "#f032e6", "#9a6324",
+    "#800000", "#008080", "#fabebe", "#aaffc3",
+]
+
 PER_FEATURE_METRICS = {
     "chi_breadth": "chi_fwhm",
     "tth_breadth": "tth_fwhm",
@@ -61,6 +67,24 @@ def build_device_grids(features, n_rows, n_cols, metric="intensity"):
                     grid[row, col] = np.nanmax([grid[row, col], value])
         grids[reflection] = grid
     return grids
+
+
+def feature_masks(features, n_rows, n_cols):
+    """Return merged occupied-cell masks per reflection, as Device View does."""
+    masks = {
+        reflection: np.zeros((n_rows, n_cols), dtype=bool)
+        for reflection in sorted({feature["reflection"] for feature in features})
+    }
+    for feature in features:
+        mask = masks[feature["reflection"]]
+        for bin_key in feature.get("intensity_profile", {}):
+            try:
+                row, col = (int(value) for value in bin_key.split("_", 1))
+            except (AttributeError, ValueError):
+                continue
+            if 0 <= row < n_rows and 0 <= col < n_cols:
+                mask[row, col] = True
+    return masks
 
 
 def territory_intensities(features, reflection=None, predicate=None):

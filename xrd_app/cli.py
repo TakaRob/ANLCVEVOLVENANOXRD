@@ -1282,9 +1282,11 @@ def roi_cvevolve_init(dest, holdout_pct, seed, root):
               help='Detection threshold override (default: algorithm setting)')
 @click.option('--max-rois', type=int, default=None,
               help='Maximum proposals override (default: algorithm setting)')
+@click.option('--noise-reduction', is_flag=True,
+              help='Apply Manual Reflections radial-background subtraction first.')
 @click.option('--output', required=True, help='Output candidate JSON')
 @click.option('--root', default='.', help='Project root directory')
-def roi_detect(scan, algorithm, sensitivity, max_rois, output, root):
+def roi_detect(scan, algorithm, sensitivity, max_rois, noise_reduction, output, root):
     """Detect candidate feature ROIs on the scan's fully summed image."""
     from .core import reflection_sum, roi_detection
 
@@ -1294,6 +1296,10 @@ def roi_detect(scan, algorithm, sensitivity, max_rois, output, root):
     import numpy as np
     with np.load(sum_path) as saved:
         image = saved["image"].astype(np.float64)
+    if noise_reduction:
+        from .core import detector_display, io
+        image = detector_display.radial_median_subtract(
+            image, io.load_tth_map(dm.tth_map(scan=scan)))
     algorithm_path = Path(algorithm) if algorithm else roi_detection.default_algorithm()
     _require(algorithm_path, "ROI detector")
     overrides = {}

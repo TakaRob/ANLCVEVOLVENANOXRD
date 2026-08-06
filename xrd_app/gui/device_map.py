@@ -65,11 +65,7 @@ def configure(project_root=".", bin_size=3, scan=None, catalog=None):
 REFLECTIONS = []
 REF_COLORS = {}
 
-_PALETTE = [
-    "#4363d8", "#e6194b", "#3cb44b", "#f58231",
-    "#911eb4", "#42d4f4", "#f032e6", "#9a6324",
-    "#800000", "#008080", "#fabebe", "#aaffc3",
-]
+_PALETTE = device_maps.REFLECTION_PALETTE
 
 
 def _assign_ref_colors(reflections):
@@ -137,12 +133,14 @@ def load_features():
     path = CATALOG_PATH or catalogs.default_feature_source(RESULTS_DIR, _BIN_SIZE)
     if not path:
         return []
-    kept, _ = catalogs.load_features_any(path)
+    from ..core import scan_cache
+    kept, _ = scan_cache.load_features_any(path)
     return kept
 
 
 def load_grid_info():
-    gm = io.load_grid_mapping(GRID_PATH or _DM.grid_mapping(bin_size=_BIN_SIZE))
+    from ..core import scan_cache
+    gm = scan_cache.load_grid_mapping(GRID_PATH or _DM.grid_mapping(bin_size=_BIN_SIZE))
     return gm["n_bin_rows"], gm["n_bin_cols"]
 
 

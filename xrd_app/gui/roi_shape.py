@@ -20,7 +20,9 @@ from PyQt5.QtWidgets import (
 )
 
 from ..config import DataManager
-from ..core import catalogs, io, reflection_sum, roi_detection, roi_map
+from ..core import (
+    catalogs, detector_display, io, reflection_sum, roi_detection, roi_map,
+)
 from .lifecycle import start_process, stop_process, stop_process_async
 from .palette import _get_cmap
 from .viewer import DetectorView, HeatmapView, _RectItem, _scalar_to_rgba
@@ -43,6 +45,8 @@ class ROIShapeWindow(QMainWindow):
         self.embedded = embedded
         self.source = None
         self.image = None
+        self.selection_image = None
+        self.display_image = None
         self.roi = None
         self.sample_crop_rect = None
         self.sample_grid_rect = None
@@ -57,6 +61,7 @@ class ROIShapeWindow(QMainWindow):
         self._save_process = None
         self._output_buffers = {}
         self._sum_prompted = False
+        self._noise_applied = False
 
         self.setWindowTitle("ROI > Shape")
         self.resize(1500, 900)
@@ -144,7 +149,10 @@ class ROIShapeWindow(QMainWindow):
         self.detector.click_while_drag_enabled = True
         self.detector.set_drag_callback(self._roi_selected)
         self.detector.set_click_callback(self._detector_clicked)
-        dl.addWidget(self.detector, 1)
+        detector_row = QHBoxLayout()
+        detector_row.addWidget(self.detector, 1)
+        detector_row.addWidget(self.detector.intensity_bar())
+        dl.addLayout(detector_row, 1)
         self.detector_status = QLabel("Click a feature or drag a detector ROI.")
         dl.addWidget(self.detector_status)
         split.addWidget(detector_host)
@@ -184,7 +192,13 @@ class ROIShapeWindow(QMainWindow):
         self.fast_stride = QSpinBox()
         self.fast_stride.setRange(2, 10); self.fast_stride.setValue(3)
         self.fast_stride.setPrefix("stride ")
-        fl.addWidget(self.fast_preview_cb); fl.addWidget(self.fast_stride); fl.addStretch()
+        self.noise_cb = QCheckBox("Noise reduction")
+        self.noise_cb.setToolTip(
+            "Apply Manual Reflections radial-background subtraction to the detector "
+            "display and click targeting. ROI maps still integrate original counts.")
+        self.noise_cb.toggled.connect(self._redraw_detector_image)
+        fl.addWidget(self.fast_preview_cb); fl.addWidget(self.fast_stride)
+        fl.addWidget(self.noise_cb); fl.addStretch()
         form.addRow(fast_row)
         self.name = QLineEdit("manual_roi")
         form.addRow("Catalog tag", self.name)
@@ -550,20 +564,45 @@ class ROIShapeWindow(QMainWindow):
             if image is None:
                 raise ValueError("selected image is empty")
             self.image = np.asarray(image, dtype=float)
-            finite = self.image[np.isfinite(self.image)]
-            vmin, vmax = (np.percentile(finite, [2, 99.7]) if finite.size else (0, 1))
-            self.detector.show_image(self.image, float(vmin), float(vmax), "inferno")
-            self.detector.set_title(title)
-            self._redraw_pending_rects()
+            self._detector_title = title
+            self._redraw_detector_image()
         except Exception as exc:
             self.detector.clear_image()
             self.status.setText(f"Could not load detector image: {exc}")
         finally:
             self._update_compute_btn()
 
+    def _redraw_detector_image(self, *_):
+        """Render the current raw image using Manual Reflections display controls."""
+        if self.image is None:
+            return
+        try:
+            tth_map = None
+            requested_noise = self.noise_cb.isChecked()
+            if requested_noise:
+                tth_map = io.load_tth_map(self.dm.tth_map(scan=self.scan))
+            self.selection_image = detector_display.prepare(
+                self.image, tth_map=tth_map,
+                noise_reduction=self.noise_cb.isChecked(), log_scale=False)
+            self.display_image = detector_display.prepare(
+                self.selection_image, log_scale=True)
+            self._noise_applied = requested_noise
+        except Exception as error:
+            self.selection_image = self.image
+            self.display_image = detector_display.prepare(self.image, log_scale=True)
+            self._noise_applied = False
+            self.status.setText(f"Noise reduction unavailable; showing raw image: {error}")
+        vmin, vmax = detector_display.auto_levels(self.display_image)
+        self.detector.show_image(self.display_image, vmin, vmax, "inferno")
+        suffix = " | radial background removed" if self._noise_applied else ""
+        self.detector.set_title(self._detector_title + suffix)
+        self._redraw_pending_rects()
+
     def _show_grand_sum_placeholder(self):
         """Render nothing but explain how to get the grand sum, without blocking."""
         self.image = None
+        self.selection_image = None
+        self.display_image = None
         self.detector.clear_image()
         self.detector.set_title("Grand sum not loaded")
         self.detector_status.setText(
@@ -704,7 +743,8 @@ class ROIShapeWindow(QMainWindow):
         self._roi_selected(x0, y0, x1, y1, rect)
 
     def _auto_roi_from_click(self, x, y):
-        return roi_map.auto_roi_from_click(self.image, x, y)
+        image = self.selection_image if self.selection_image is not None else self.image
+        return roi_map.auto_roi_from_click(image, x, y)
 
     def _detect_rois(self):
         if self._expensive_job_active() or self._detect_process is not None:
@@ -717,6 +757,8 @@ class ROIShapeWindow(QMainWindow):
                 "--algorithm", str(algorithm.get("file")),
                 "--sensitivity", str(self.roi_sensitivity.value()),
                 "--output", str(output)]
+        if self.noise_cb.isChecked():
+            args.append("--noise-reduction")
         if self.scan:
             args += ["--scan", str(self.scan)]
         cmd = [sys.executable, "-m", "xrd_app.cli", *args]

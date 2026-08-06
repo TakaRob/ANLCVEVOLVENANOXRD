@@ -6,8 +6,21 @@ from click.testing import CliRunner
 
 from xrd_app.cli import main
 from xrd_app.config import ProjectConfig, default_config
-from xrd_app.core import device_maps
+from xrd_app.core import detector_display, device_maps
 from xrd_app.core.report import ReportOptions, ReportTarget, generate_pdf
+
+
+def test_feature_masks_match_device_view_footprints():
+    features = [
+        {"reflection": "(001)", "intensity_profile": {"0_0": {}, "0_1": {}}},
+        {"reflection": "(001)", "intensity_profile": {"1_1": {}}},
+        {"reflection": "(011)", "intensity_profile": {"1_0": {}, "bad": {}}},
+    ]
+
+    masks = device_maps.feature_masks(features, 2, 2)
+
+    assert masks["(001)"].tolist() == [[True, True], [False, True]]
+    assert masks["(011)"].tolist() == [[False, False], [True, False]]
 
 
 def test_device_grid_matches_existing_max_intensity_semantics():
@@ -26,6 +39,40 @@ def test_device_grid_matches_existing_max_intensity_semantics():
     assert grids["(001)"][0, 1] == 2.0
     assert np.isnan(grids["(001)"][1, 1])
     assert grids["(011)"][1, 0] == 3.0
+
+
+def test_report_detector_render_uses_shared_noise_and_levels(monkeypatch):
+    from xrd_app.core import report
+
+    calls = []
+    monkeypatch.setattr(
+        detector_display, "prepare",
+        lambda image, **kwargs: calls.append(("prepare", kwargs)) or np.asarray(image))
+    monkeypatch.setattr(
+        detector_display, "auto_levels",
+        lambda image: calls.append(("levels", np.asarray(image).shape)) or (2.0, 8.0))
+
+    class Axis:
+        def imshow(self, image, **kwargs):
+            calls.append(("imshow", kwargs))
+            return object()
+
+        def set_title(self, _title):
+            pass
+
+        def set_xlabel(self, _label):
+            pass
+
+        def set_ylabel(self, _label):
+            pass
+
+    report._show_detector(
+        Axis(), np.ones((3, 4)), "sum", tth_map=np.ones((3, 4)),
+        noise_reduction=True)
+
+    assert calls[0][1]["noise_reduction"] is True
+    assert calls[-1][1]["vmin"] == 2.0
+    assert calls[-1][1]["vmax"] == 8.0
 
 
 def test_report_options_require_explicit_top_five_override():

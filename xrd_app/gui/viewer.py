@@ -40,6 +40,7 @@ from PyQt5.QtWidgets import (
     QSizePolicy, QSlider, QSpinBox, QSplitter, QVBoxLayout, QWidget, QCheckBox,
 )
 
+from ..core import scan_cache
 from .lifecycle import stop_thread
 
 pg.setConfigOptions(imageAxisOrder="row-major", antialias=True)
@@ -204,7 +205,7 @@ def shapes_for_peaks(peaks_name):
 
 def load_features_from_shapes(path):
     """(kept, filtered) from any feature catalog (shapes/combined/plain list)."""
-    return catalogs.load_features_any(path)
+    return scan_cache.load_features_any(path)
 
 
 # Re-exported from core.catalogs so existing call sites keep working.
@@ -213,7 +214,7 @@ peaks_to_features = catalogs.peaks_to_features
 
 def load_features_from_peaks(path):
     """Return a peaks HDF5 catalog rendered as point features."""
-    return catalogs.load_features_any(path)
+    return scan_cache.load_features_any(path)
 
 
 def shape_catalog_peak_source(path):
@@ -583,6 +584,7 @@ class DetectorView(pg.GraphicsLayoutWidget):
         self.plot.addItem(self.img)
         self._overlay_items = []
         self._display_data = None
+        self._histogram = None
         self._hover_cb = None
         self._click_cb = None
         self.click_while_drag_enabled = False
@@ -616,6 +618,12 @@ class DetectorView(pg.GraphicsLayoutWidget):
         self.img.setImage(display, autoLevels=False)
         self.img.setLookupTable(cmap.getLookupTable(0.0, 1.0, 256))
         self.img.setLevels((vmin, vmax))
+        if self._histogram is not None:
+            self._histogram.item.setImageItem(self.img)
+            self._histogram.item.gradient.setColorMap(cmap)
+            self._histogram.item.setLevels(vmin, vmax)
+            pad = (vmax - vmin) * 0.1 or 1.0
+            self._histogram.item.setHistogramRange(vmin - pad, vmax + pad)
         self.img.setZValue(0)
         # Frame the full frame explicitly (auto-range is off). Only re-fit when
         # the image shape changes so panning/zooming a same-size frame (e.g.
@@ -623,6 +631,14 @@ class DetectorView(pg.GraphicsLayoutWidget):
         h, w = display.shape[:2]
         if prev is None or prev.shape[:2] != (h, w):
             self.vb.setRange(QRectF(0, 0, w, h), padding=0.02)
+
+    def intensity_bar(self):
+        """Return an interactive histogram/LUT bar linked to this detector image."""
+        if self._histogram is None:
+            self._histogram = pg.HistogramLUTWidget()
+            self._histogram.setMinimumWidth(105)
+            self._histogram.item.setImageItem(self.img)
+        return self._histogram
 
     def clear_image(self):
         self.clear_overlays()
@@ -929,7 +945,7 @@ class FeatureViewer(QMainWindow):
                 p = Path(RESULTS_DIR) / sel
                 if p.exists():
                     try:
-                        return catalogs.load_features_any(p)
+                        return scan_cache.load_features_any(p)
                     except Exception:
                         pass
         return [], []   # blank until a valid scan + feature catalog is chosen
@@ -954,7 +970,7 @@ class FeatureViewer(QMainWindow):
                 self._bin_to_all_features[bk].append(feat)
 
         self._grid_path = self._resolve_grid_mapping()
-        gm = io.load_grid_mapping(self._grid_path)
+        gm = scan_cache.load_grid_mapping(self._grid_path)
         self._n_rows = gm["n_bin_rows"]
         self._n_cols = gm["n_bin_cols"]
         self._build_territory_remap(gm)
@@ -962,8 +978,8 @@ class FeatureViewer(QMainWindow):
         # bridged to the 1×1 territory cells (keyed by frame index) under it.
         self._binned_bins = gm.get("bins")
 
-        import tifffile
-        self._tth_map = tifffile.imread(str(_DM.tth_map())).astype(np.float64)
+        tth_data = scan_cache.load_tth_data(_DM.tth_map())
+        self._tth_map = tth_data["map"]
 
         det = load_module(DETECTOR_PATH)
         self._det = det
@@ -977,9 +993,11 @@ class FeatureViewer(QMainWindow):
         from ..core.processing import estimate_beam_center
         self._beam_center = estimate_beam_center(self._tth_map)
 
-        from ..core.algorithms import compute_tth_binning
-        self._tth_edges, self._tth_centers, self._n_tth_bins, \
-            self._tth_bin_indices, self._tth_radial_counts = compute_tth_binning(self._tth_map)
+        self._tth_edges = tth_data["edges"]
+        self._tth_centers = tth_data["centers"]
+        self._n_tth_bins = tth_data["n_bins"]
+        self._tth_bin_indices = tth_data["indices"]
+        self._tth_radial_counts = tth_data["counts"]
 
     def _resolve_grid_mapping(self):
         """Grid mapping matching the selected catalog's scan/bin/variant."""
@@ -1223,7 +1241,7 @@ class FeatureViewer(QMainWindow):
         if not gm_path:
             return None
         try:
-            gm = io.load_grid_mapping(gm_path)
+            gm = scan_cache.load_grid_mapping(gm_path)
         except Exception:
             return None
         self._sub_variant = variant
@@ -1796,7 +1814,7 @@ class FeatureViewer(QMainWindow):
             return
         self._grid_path = new_grid
         try:
-            gm = io.load_grid_mapping(new_grid)
+            gm = scan_cache.load_grid_mapping(new_grid)
             self._n_rows = gm["n_bin_rows"]
             self._n_cols = gm["n_bin_cols"]
             self._build_territory_remap(gm)
@@ -2193,7 +2211,7 @@ class FeatureViewer(QMainWindow):
         try:
             p = _DM.grid_mapping(bin_size=grid, scan=scan, variant=variant)
             if p and Path(p).exists():
-                gm = io.load_grid_mapping(p)
+                gm = scan_cache.load_grid_mapping(p)
         except Exception:
             gm = None
         self._xrf_gm_cache[key] = gm

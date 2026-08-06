@@ -9,7 +9,10 @@ from typing import Callable, Optional
 import numpy as np
 
 from ..config import DataManager
-from . import catalogs, device_maps, io, processing, reflection_sum, reflections
+from . import (
+    catalogs, detector_display, device_maps, io, processing, reflection_sum,
+    reflections,
+)
 
 
 @dataclass(frozen=True)
@@ -51,11 +54,12 @@ def _detector_image(dm, scan):
     return image, max_bins
 
 
-def _show_detector(axis, image, title):
-    display = np.log1p(np.clip(image, 0, None))
-    positive = display[np.isfinite(display) & (display > 0)]
-    high = float(np.percentile(positive, 99.8)) if positive.size else 1.0
-    artist = axis.imshow(display, origin="upper", cmap="inferno", vmin=0, vmax=high)
+def _show_detector(axis, image, title, *, tth_map=None, noise_reduction=False):
+    display = detector_display.prepare(
+        image, tth_map=tth_map, noise_reduction=noise_reduction, log_scale=True)
+    low, high = detector_display.auto_levels(display)
+    artist = axis.imshow(
+        display, origin="upper", cmap="inferno", vmin=low, vmax=high)
     axis.set_title(title)
     axis.set_xlabel("Detector x / column (pixels)")
     axis.set_ylabel("Detector y / row (pixels)")
@@ -87,6 +91,30 @@ def _show_grid(axis, grid, title):
     axis.set_xlabel("Spatial bin column")
     axis.set_ylabel("Spatial bin row")
     return artist
+
+
+def _show_segmentation(axis, masks, title):
+    from matplotlib.colors import to_rgb
+    from matplotlib.patches import Patch
+
+    shape = next(iter(masks.values())).shape
+    rgba = np.zeros((*shape, 4), dtype=float)
+    handles = []
+    for index, (reflection, mask) in enumerate(masks.items()):
+        color = to_rgb(device_maps.REFLECTION_PALETTE[
+            index % len(device_maps.REFLECTION_PALETTE)])
+        pastel = tuple(channel * 0.35 + 0.65 for channel in color)
+        rgba[mask, :3] = pastel
+        rgba[mask, 3] = 1.0
+        axis.contour(mask.astype(float), levels=[0.5], colors=[color], linewidths=1.2)
+        handles.append(Patch(facecolor=pastel, edgecolor=color, label=reflection))
+    axis.imshow(rgba, origin="upper", interpolation="nearest", aspect="equal")
+    axis.set_title(title)
+    axis.set_xlabel("Spatial bin column")
+    axis.set_ylabel("Spatial bin row")
+    if handles:
+        axis.legend(handles=handles, loc="upper left", bbox_to_anchor=(1.01, 1),
+                    borderaxespad=0, fontsize=8, title="Reflection")
 
 
 def _feature_size(feature):
@@ -139,10 +167,13 @@ def _load_target(dm, target):
 
 def _sum_page(pdf, dm, target):
     image, max_bins = _detector_image(dm, target.scan)
+    tth_map = io.load_tth_map(dm.tth_map(scan=target.scan))
 
     def draw(figure):
         axis = figure.add_subplot(111)
-        artist = _show_detector(axis, image, "Full scan detector sum")
+        artist = _show_detector(
+            axis, image, "Full scan detector sum | radial background removed",
+            tth_map=tth_map, noise_reduction=True)
         figure.colorbar(artist, ax=axis, label="log(1 + summed detector counts)")
         if max_bins:
             axis.text(0.01, 0.01, f"PREVIEW SUM: first {max_bins} bins", color="white",
@@ -156,22 +187,30 @@ def _feature_pages(pdf, dm, target, *, split_reflections):
     image, _ = _detector_image(dm, target.scan)
     tth_map = io.load_tth_map(dm.tth_map(scan=target.scan))
     reflection_set = reflections.read_json(dm.reflections(scan=target.scan))
+    n_rows, n_cols = int(grid["n_bin_rows"]), int(grid["n_bin_cols"])
     grids = device_maps.build_device_grids(
-        features, int(grid["n_bin_rows"]), int(grid["n_bin_cols"]), metric="intensity")
+        features, n_rows, n_cols, metric="intensity")
+    masks = device_maps.feature_masks(features, n_rows, n_cols)
     groups = sorted(grids) if split_reflections else [None]
     for reflection in groups:
         names = [reflection] if reflection is not None else None
-        device = grids[reflection] if reflection is not None else np.nanmax(
-            np.stack(list(grids.values())), axis=0)
+        device = grids[reflection] if reflection is not None else None
         label = reflection or "All reflections"
 
         def draw(figure, names=names, device=device, label=label):
             left, right = figure.subplots(1, 2)
-            det = _show_detector(left, image, f"Detector sum | {label}")
+            det = _show_detector(
+                left, image, f"Detector sum | {label} | radial background removed",
+                tth_map=tth_map, noise_reduction=True)
             _overlay_reflections(left, tth_map, reflection_set, names)
             figure.colorbar(det, ax=left, fraction=0.046, label="log summed counts")
-            mapped = _show_grid(right, device, f"Device intensity map | {label}")
-            figure.colorbar(mapped, ax=right, fraction=0.046, label="Integrated intensity")
+            if device is None:
+                _show_segmentation(
+                    right, masks, "Crystal segmentation | transparent reflection view")
+            else:
+                mapped = _show_grid(right, device, f"Device intensity map | {label}")
+                figure.colorbar(
+                    mapped, ax=right, fraction=0.046, label="Integrated intensity")
 
         _page(pdf, f"{target.scan} | {label} | {target.bin_size}x{target.bin_size} | "
               f"{catalog.name}", draw)
@@ -268,6 +307,7 @@ def _roi_pages(pdf, dm, target, options):
         raise FileNotFoundError(
             "No saved ROI catalog. Enable on-demand ROI calculation to use top features.")
     detector, _ = _detector_image(dm, target.scan)
+    tth_map = io.load_tth_map(dm.tth_map(scan=target.scan))
     for feature in features:
         roi = feature.get("manual_roi") or {}
         n_rows = int(feature.get("n_bin_rows") or 0)
@@ -276,7 +316,10 @@ def _roi_pages(pdf, dm, target, options):
 
         def draw(figure, feature=feature, roi=roi, feature_grid=feature_grid):
             left, right = figure.subplots(1, 2)
-            det = _show_detector(left, detector, "Detector sum and selected ROI")
+            det = _show_detector(
+                left, detector,
+                "Detector sum and selected ROI | radial background removed",
+                tth_map=tth_map, noise_reduction=True)
             if roi:
                 left.add_patch(Rectangle(
                     (roi["x0"], roi["y0"]), roi["x1"] - roi["x0"],

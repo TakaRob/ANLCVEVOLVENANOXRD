@@ -22,6 +22,7 @@ from PyQt5.QtWidgets import (
 from xrd_app import workspace
 from xrd_app.app import MainWindow
 from xrd_app.config import DataManager, ProjectConfig, default_config
+from xrd_app.core import scan_cache
 from xrd_app.gui.roi_shape import ROIShapeWindow
 
 from xrd_app.gui.device_map import QRangeSlider
@@ -268,6 +269,21 @@ def _roi_window():
     window.log = QPlainTextEdit()
     window._grand_sum_cached = lambda: False
     return window
+
+
+def test_detector_view_intensity_bar_tracks_image_levels():
+    _app()
+    from xrd_app.gui.viewer import DetectorView
+
+    view = DetectorView()
+    bar = view.intensity_bar()
+    image = np.arange(100, dtype=float).reshape(10, 10)
+
+    view.show_image(image, 10.0, 80.0, "inferno")
+
+    assert bar.item.imageItem() is view.img
+    assert bar.item.getLevels() == (10.0, 80.0)
+    view.close()
 
 
 def test_labeling_finds_nearest_readable_built_bins_without_raw_frames(tmp_path):
@@ -537,6 +553,65 @@ def test_roi_heatmap_click_selects_requested_bin(monkeypatch):
     assert window.spatial_index == 1
     assert window.image_mode.currentIndex() == 1
     assert "2_3" in window.spatial_label.text()
+
+
+def test_scan_cache_reuses_tth_preprocessing(tmp_path, monkeypatch):
+    import tifffile
+
+    tth = tmp_path / "tth.tiff"
+    tifffile.imwrite(tth, np.arange(16, dtype=np.float32).reshape(4, 4))
+    scan_cache.clear()
+    calls = []
+    real = __import__("xrd_app.core.algorithms", fromlist=["compute_tth_binning"]).compute_tth_binning
+    monkeypatch.setattr("xrd_app.core.algorithms.compute_tth_binning",
+                        lambda image: calls.append(image) or real(image))
+
+    first = scan_cache.load_tth_data(tth)
+    second = scan_cache.load_tth_data(tth)
+
+    assert first is second
+    assert len(calls) == 1
+    assert first["map"].dtype == np.float64
+    scan_cache.clear()
+
+
+def test_scan_cache_catalog_returns_private_copies(tmp_path):
+    from xrd_app.core import catalogs
+
+    catalog = tmp_path / "features.h5"
+    catalogs.save_result(catalog, {"features": [
+        {"feature_id": 1, "reflection": "(001)"}
+    ]})
+    scan_cache.clear()
+
+    first, _ = scan_cache.load_features_any(catalog)
+    first[0]["_mask"] = "mutated"
+    second, _ = scan_cache.load_features_any(catalog)
+
+    assert "_mask" not in second[0]
+    scan_cache.clear()
+
+
+def test_labeling_prefetches_adjacent_images(monkeypatch):
+    window = LabelingTool.__new__(LabelingTool)
+    window._current_bin_idx = 1
+    window.n_bins = 4
+    window._source_generation = 3
+    window._prefetch_future = None
+    loaded = []
+
+    class ImmediateExecutor:
+        def submit(self, func):
+            func()
+            return SimpleNamespace(cancel=lambda: None)
+
+    window._prefetch_executor = ImmediateExecutor()
+    monkeypatch.setattr(window, "_load_image_at",
+                        lambda index, generation=None: loaded.append((index, generation)))
+
+    window._prefetch_adjacent()
+
+    assert loaded == [(2, 3), (0, 3)]
 
 
 def test_job_console_adds_transient_environment(monkeypatch):

@@ -14,6 +14,11 @@ from .core import reflections
 ADDON_DIR = "XRF"
 CONFIG_FILENAME = "xrf_config.yaml"
 PROJECT_DIRS = ("Raw", "Metadata", "Cache", "Processed", "Figures")
+DEFAULT_CALIBRATION = {
+    "quadratic_kev": 5.263744e-7,
+    "linear_kev": 8.41967e-3,
+    "offset_kev": 1.136032,
+}
 
 
 def scan_name(value):
@@ -39,11 +44,7 @@ def default_config(name):
             "position_root": None,
             "xrd_identity_root": None,
         },
-        "calibration": {
-            "quadratic_kev": 5.263744e-7,
-            "linear_kev": 8.41967e-3,
-            "offset_kev": 1.136032,
-        },
+        "calibration": dict(DEFAULT_CALIBRATION),
         "paths": {
             "raw_dir": "Raw",
             "metadata_dir": "Metadata",
@@ -91,6 +92,7 @@ class XRFProject:
         if project.config_path.exists():
             with project.config_path.open() as stream:
                 project.data = yaml.safe_load(stream) or {}
+            project.data.setdefault("calibration", dict(DEFAULT_CALIBRATION))
         return project
 
     def xrd_exists(self):

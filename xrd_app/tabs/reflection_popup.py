@@ -24,7 +24,7 @@ from PyQt5.QtWidgets import (
 
 from ..config import DataManager
 from ..core import algorithms as nralgo
-from ..core import io
+from ..core import detector_display, io
 from ..core import reflection_sum
 from ..core import reflections as refl_io
 from ..gui.palette import ARC_COLORS, COLORMAPS, _get_cmap, _hex_rgb
@@ -312,11 +312,7 @@ class ReflectionDialog(QDialog):
         """
         algo = self.noise_algo_combo.currentData() or _RADIAL_MEDIAN
         if algo == _RADIAL_MEDIAN:
-            if self._det is None:
-                self._det = io.load_module(
-                    self.dm.detector_script(bin_size=self.bin_size))
-            tth_data = self._det.precompute_tth(self._tth)
-            return self._det.radial_median_subtract(image, tth_data)
+            return detector_display.radial_median_subtract(image, self._tth)
         edges, centers, n_bins, indices, counts = nralgo.compute_tth_binning(self._tth)
         valid = counts > 50
         profile = nralgo.compute_radial_profile(image, indices, n_bins)
@@ -706,21 +702,10 @@ class ReflectionDialog(QDialog):
 
     # ----- drawing ----------------------------------------------------
     def _auto_level(self, disp):
-        """Robust (percentile) intensity levels for the summed image.
-
-        Raw min/max spans XRD's full dynamic range, which is unusable as a
-        colormap window; the 1st–99.5th percentile gives a scale where features
-        are visible in both linear and log1p display. Returns ``(lo, hi)`` or
-        ``None`` if the image has no finite pixels.
-        """
-        finite = disp[np.isfinite(disp)]
-        if finite.size == 0:
+        """Robust 1st-99.5th percentile levels shared by detector views."""
+        if not np.isfinite(disp).any():
             return None
-        lo = float(np.percentile(finite, 1.0))
-        hi = float(np.percentile(finite, 99.5))
-        if hi <= lo:
-            hi = lo + 1.0
-        return lo, hi
+        return detector_display.auto_levels(disp)
 
     def _redraw_image(self):
         vb = self.img_view.getView()

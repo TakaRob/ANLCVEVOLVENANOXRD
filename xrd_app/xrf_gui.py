@@ -464,6 +464,11 @@ class XRFAnalysisWindow(QMainWindow):
         self.cut_material_combo.clear()
         self.cut_material_combo.addItems(sorted(self.selection["materials"]))
         self.cut_material_combo.blockSignals(False)
+        active_calibration = self.selection["attrs"].get("energy_calibration")
+        if active_calibration and "quadratic_kev" in active_calibration:
+            self.calibration_quadratic.setValue(float(active_calibration["quadratic_kev"]))
+            self.calibration_linear.setValue(float(active_calibration["linear_kev"]))
+            self.calibration_offset.setValue(float(active_calibration["offset_kev"]))
         info = xrf_selection.summary(self.selection)
         self.status.setText(
             f"{info['n_registered_frames']:,} registered frames | "
@@ -497,10 +502,12 @@ class XRFAnalysisWindow(QMainWindow):
         calibration = self.selection["attrs"].get("energy_calibration") or {}
         for name, material in sorted(self.selection["materials"].items()):
             bounds = material["attrs"].get("energy_range_kev")
-            if bounds is None:
+            if bounds is None and "pixel_range" in material["attrs"]:
                 bounds = xrf_selection.pixel_to_kev(
                     material["attrs"]["pixel_range"], calibration
                 )
+            if bounds is None:
+                bounds = xrf_selection.pixel_to_kev([0, 1], calibration)
             row = self.roi_table.rowCount()
             self.roi_table.insertRow(row)
             for column, value in enumerate((name, *bounds)):

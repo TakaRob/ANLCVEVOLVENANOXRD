@@ -29,13 +29,14 @@ import time
 import copy
 import inspect
 import importlib.util
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from datetime import datetime
 from collections import OrderedDict
 
 import numpy as np
 import h5py
-import tifffile
 import matplotlib
 matplotlib.use("Qt5Agg")
 import matplotlib.pyplot as plt
@@ -61,10 +62,11 @@ from PyQt5.QtGui import QColor
 
 from ..core.algorithms import (
     ALGORITHM_NAMES, ALGORITHM_DISPLAY,
-    compute_tth_binning, compute_radial_profile, fit_all_models,
+    compute_radial_profile, fit_all_models,
     build_background_image, subtract_background,
 )
 from ..core.processing import detect_peaks_on_image
+from ..core import scan_cache
 from ..config import DataManager
 
 
@@ -780,6 +782,11 @@ class LabelingTool(QMainWindow):
         self._labeling_enabled = False
         self._init_done = False
 
+        self._source_lock = threading.RLock()
+        self._prefetch_executor = ThreadPoolExecutor(max_workers=1,
+                                                        thread_name_prefix="xrd-prefetch")
+        self._prefetch_future = None
+        self._source_generation = 0
         self._load_project_data()
         self._current_bin_idx = 0
 
@@ -819,21 +826,13 @@ class LabelingTool(QMainWindow):
         except Exception:
             pass
 
-        tth_path = self.dm.tth_map()
-        self.tth = tifffile.imread(str(tth_path)).astype(np.float64)
-
-        self.tth_edges, self.tth_centers, self.n_tth_bins, \
-            self.tth_bin_indices, self.tth_radial_counts = compute_tth_binning(self.tth)
-
-        order = np.argsort(self.tth_bin_indices)
-        sorted_idx = self.tth_bin_indices[order]
-        boundaries = np.searchsorted(sorted_idx, np.arange(self.n_tth_bins + 1))
-        self.tth_data = {
-            "edges": self.tth_edges, "centers": self.tth_centers,
-            "n_bins": self.n_tth_bins, "indices": self.tth_bin_indices,
-            "counts": self.tth_radial_counts, "valid_mask": self.tth_radial_counts > 50,
-            "order": order, "boundaries": boundaries,
-        }
+        self.tth_data = scan_cache.load_tth_data(self.dm.tth_map())
+        self.tth = self.tth_data["map"]
+        self.tth_edges = self.tth_data["edges"]
+        self.tth_centers = self.tth_data["centers"]
+        self.n_tth_bins = self.tth_data["n_bins"]
+        self.tth_bin_indices = self.tth_data["indices"]
+        self.tth_radial_counts = self.tth_data["counts"]
 
         self._load_initial_bin_data()
 
@@ -934,9 +933,14 @@ class LabelingTool(QMainWindow):
 
     def _load_bin_data_for_size(self, bin_size):
         """Load bin keys and mapping for the given bin size."""
+        self._source_generation += 1
+        future = getattr(self, "_prefetch_future", None)
+        if future is not None:
+            future.cancel()
         old_source = getattr(self, "_bin_source", None)
         if old_source is not None:
-            old_source.close()
+            with self._source_lock:
+                old_source.close()
         self._bin_source = None
         self.bin_size = bin_size
         # Prefer a built HDF5 for any bin size, including 1×1 (one frame per
@@ -948,14 +952,18 @@ class LabelingTool(QMainWindow):
         raw_keys = None
         if self.bins_h5_path and os.path.exists(self.bins_h5_path):
             try:
-                with h5py.File(self.bins_h5_path, "r") as f:
-                    raw_keys = list(f.keys())
-            except OSError as e:
+                from ..core import io as _io
+                self._bin_source = _io.open_bin_source(self.dm, bin_size)
+                raw_keys = self._bin_source.keys()
+            except (OSError, ValueError) as e:
                 # Missing/corrupt bins file (e.g. an interrupted binning run).
                 # Warn once and fall back to summing raw frames so the tab still
                 # works instead of crashing with raw OSError tracebacks.
                 self._warn_bins_unreadable(e)
                 self.bins_h5_path = None
+                if self._bin_source is not None:
+                    self._bin_source.close()
+                    self._bin_source = None
 
         if raw_keys is not None:
             self.bin_keys = sorted(raw_keys, key=lambda k: (int(k.split("_")[0]), int(k.split("_")[1])))
@@ -1702,33 +1710,62 @@ class LabelingTool(QMainWindow):
 
     # ----- Image loading -----
 
+    def _load_image_at(self, index, generation=None):
+        if generation is not None and generation != self._source_generation:
+            return None
+        bk = self.bin_keys[index]
+        bin_key_str = self._bin_key_str(bk)
+        with self._source_lock:
+            if generation is not None and generation != self._source_generation:
+                return None
+            if bin_key_str in self._image_cache:
+                self._image_cache.move_to_end(bin_key_str)
+                return self._image_cache[bin_key_str]
+
+            img = None
+            if self._bin_source is not None:
+                try:
+                    img = self._bin_source.image(bin_key_str)
+                except OSError:
+                    # Prefetch runs off the GUI thread, so leave user-facing error
+                    # reporting to the next foreground read.
+                    if generation is None:
+                        raise
+            elif self.bin_mapping is not None:
+                frames = self.bin_mapping[bk]
+                img = load_and_sum_frames(frames, self.xrd_files, self.xrd_file_map)
+
+            if generation is not None and generation != self._source_generation:
+                return None
+            self._image_cache[bin_key_str] = img
+            while len(self._image_cache) > IMAGE_CACHE_MAX:
+                self._image_cache.popitem(last=False)
+            return img
+
     def _load_current_image(self):
-        bk = self.bin_keys[self._current_bin_idx]
-        bin_key_str = bk if isinstance(bk, str) else f"{bk[0]}_{bk[1]}"
+        try:
+            return self._load_image_at(self._current_bin_idx)
+        except OSError as error:
+            self._warn_bins_unreadable(error)
+            return None
 
-        if bin_key_str in self._image_cache:
-            self._image_cache.move_to_end(bin_key_str)
-            return self._image_cache[bin_key_str]
+    def _prefetch_adjacent(self):
+        generation = self._source_generation
+        indices = [i for i in (self._current_bin_idx + 1, self._current_bin_idx - 1)
+                   if 0 <= i < self.n_bins]
+        if not indices:
+            return
 
-        img = None
-        if self._bin_source is not None:
-            img = self._bin_source.image(bin_key_str)
-        elif self.bins_h5_path and os.path.exists(self.bins_h5_path):
-            try:
-                with h5py.File(self.bins_h5_path, "r") as f:
-                    if bin_key_str in f:
-                        img = f[bin_key_str][:].astype(np.float64)
-            except OSError as e:
-                self._warn_bins_unreadable(e)
-        elif self.bin_mapping is not None:
-            frames = self.bin_mapping[bk]
-            img = load_and_sum_frames(frames, self.xrd_files, self.xrd_file_map)
+        def load():
+            for index in indices:
+                if generation != self._source_generation:
+                    return
+                self._load_image_at(index, generation=generation)
 
-        self._image_cache[bin_key_str] = img
-        while len(self._image_cache) > IMAGE_CACHE_MAX:
-            self._image_cache.popitem(last=False)
-
-        return img
+        future = self._prefetch_future
+        if future is not None:
+            future.cancel()
+        self._prefetch_future = self._prefetch_executor.submit(load)
 
     def _get_display_image(self):
         raw = self._load_current_image()
@@ -1794,6 +1831,7 @@ class LabelingTool(QMainWindow):
 
         if self.arc_btn.isChecked():
             self.canvas.show_arcs(self.tth, self.degs, self.deg_labels)
+        self._prefetch_adjacent()
 
     def _load_annotations_for_bin(self):
         bk = self.bin_keys[self._current_bin_idx]
@@ -2160,10 +2198,16 @@ class LabelingTool(QMainWindow):
             elif reply == QMessageBox.Cancel:
                 event.ignore()
                 return
+        self._source_generation += 1
+        executor = getattr(self, "_prefetch_executor", None)
+        if executor is not None:
+            executor.shutdown(wait=True, cancel_futures=True)
+            self._prefetch_executor = None
         source = getattr(self, "_bin_source", None)
         if source is not None:
-            source.close()
-            self._bin_source = None
+            with self._source_lock:
+                source.close()
+                self._bin_source = None
         event.accept()
 
 

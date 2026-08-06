@@ -14,7 +14,6 @@ import sys
 from collections import defaultdict
 
 import numpy as np
-import tifffile
 import matplotlib
 import pyqtgraph as pg
 
@@ -86,12 +85,14 @@ def load_features():
     path = CATALOG_PATH or catalogs.default_feature_source(RESULTS_DIR, _BIN_SIZE)
     if not path:
         return []
-    kept, _ = catalogs.load_features_any(path)
+    from ..core import scan_cache
+    kept, _ = scan_cache.load_features_any(path)
     return kept
 
 
 def load_tth_map():
-    return tifffile.imread(str(_DM.tth_map())).astype(np.float64)
+    from ..core import scan_cache
+    return scan_cache.load_tth_data(_DM.tth_map())["map"]
 
 
 estimate_beam_center = orientation_core.estimate_beam_center

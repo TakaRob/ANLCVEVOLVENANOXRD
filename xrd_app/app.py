@@ -224,6 +224,8 @@ class MainWindow(QMainWindow):
         """
         def _do():
             self._dispose_tabs()
+            from .core import scan_cache
+            scan_cache.clear()
             self._load_project(project_root, bin_size=self.bin_size)
             for idx in range(len(self._defs)):
                 self._built[idx] = False
@@ -469,6 +471,8 @@ class MainWindow(QMainWindow):
     def _refresh_context(self):
         """Rebuild scan-dependent tabs; push context to persistent ones."""
         self._dispose_tabs(scan_dependent_only=True)
+        from .core import scan_cache
+        scan_cache.clear()
         for idx, (mod, meta) in enumerate(self._defs):
             if meta.get("scan_dependent", True):
                 self._built[idx] = False  # lazy rebuild on next view
@@ -515,6 +519,8 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event):  # noqa: N802 (Qt signature)
         self._save_state()
         self._dispose_tabs()
+        from .core import scan_cache
+        scan_cache.clear()
         super().closeEvent(event)
 
     def resizeEvent(self, event):  # noqa: N802 (Qt signature)

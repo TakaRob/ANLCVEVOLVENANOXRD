@@ -97,8 +97,75 @@ def test_xrf_gui_discovers_project_local_processed_files(
     window = XRFAnalysisWindow(root)
     try:
         assert window.scan_combo.currentText() == "Scan_0024"
-        assert window.threshold_table.rowCount() == 1
+        assert window.roi_table.rowCount() == 1
+        assert window.cut_material_combo.count() == 1
         assert "Scan_0024" in window.data_status.text()
+    finally:
+        window.close()
+
+
+def test_predictions_do_not_modify_manual_roi_table(application, isolated_workspace):
+    root = _xrd_project(isolated_workspace / "predictions")
+    addon = XRFProject.load(root).create_addon()
+    from xrd_app.core import xrf_selection
+    spectrum = np.ones(4096)
+    spectrum[1192] = 10000
+    selection = {
+        "attrs": {
+            "scan": 24, "n_total_frames": 1,
+            "energy_calibration": {"ev_per_bin": 10.0, "offset_ev": 0.0},
+        },
+        "source_files": ["a.h5"],
+        "frames": {
+            "global_frame_index": [0], "source_file_index": [0],
+            "source_frame_index": [0], "x": [0.0], "y": [0.0],
+        },
+        "materials": {
+            "Manual": {
+                "intensity": [1.0], "keep": [True],
+                "attrs": {"energy_range_kev": [11.7, 12.0]},
+            },
+        },
+        "spectrum": {
+            "energy_kev": np.arange(4096) * 0.01, "summed_counts": spectrum,
+        },
+    }
+    xrf_selection.save(addon.selection_path(24), selection)
+    window = XRFAnalysisWindow(root)
+    try:
+        before = window.roi_table.rowCount()
+        window._predict_materials()
+        assert window.prediction_list.count() >= 1
+        assert window.roi_table.rowCount() == before
+        assert window.roi_table.item(0, 0).text() == "Manual"
+    finally:
+        window.close()
+
+
+def test_intensity_cut_updates_selected_material_only(application, isolated_workspace):
+    root = _xrd_project(isolated_workspace / "cut")
+    addon = XRFProject.load(root).create_addon()
+    from xrd_app.core import xrf_selection
+    selection = {
+        "attrs": {"scan": 24, "n_total_frames": 3},
+        "source_files": ["a.h5"],
+        "frames": {
+            "global_frame_index": [0, 1, 2], "source_file_index": [0, 0, 0],
+            "source_frame_index": [0, 1, 2], "x": [0.0, 1.0, 2.0],
+            "y": [0.0, 0.0, 0.0],
+        },
+        "materials": {
+            "Br": {"intensity": [1.0, 5.0, 10.0], "keep": [True] * 3, "attrs": {}},
+            "Pb": {"intensity": [2.0, 3.0, 4.0], "keep": [True] * 3, "attrs": {}},
+        },
+    }
+    xrf_selection.save(addon.selection_path(24), selection)
+    window = XRFAnalysisWindow(root)
+    try:
+        window.cut_material_combo.setCurrentText("Br")
+        window.cut_minimum.setValue(6.0)
+        np.testing.assert_array_equal(window.selection["materials"]["Br"]["keep"], [False, False, True])
+        np.testing.assert_array_equal(window.selection["materials"]["Pb"]["keep"], [True, True, True])
     finally:
         window.close()
 
