@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
 # Start or resume a representative nano-XRD project and run the complete
 # focus-scan workflow: calibration/scan setup, lossless 1x1 territory products,
-# normalized 3x3 bins, peaks, shapes, full detector sums, and PDF reports.
+# normalized 3x3 bins, peaks, shapes, HD device maps, full detector sums, and PDF
+# reports.
 #
-# The default six focus scans are Scan_0179, 0182, 0203, 0207, 0215, and 0218.
-# Set INCLUDE_GRID_SCANS=1 to additionally process the remaining device scans at
-# 3x3. Every stage is resumable; current products are skipped where practical.
+# The six focus scans are Scan_0179, 0182, 0203, 0207, 0215, and 0218. As in
+# the established Scans179-226 runner, the remaining device scans are processed
+# at 3x3 by default; set INCLUDE_GRID_SCANS=0 for a focus-only run. Every stage
+# is resumable, and current products are skipped where practical.
 #
 # Fresh-project example:
 #   ROOT=/path/to/new-project \
@@ -33,9 +35,10 @@ POSITION_ROOT="${POSITION_ROOT:-}"
 REFLECTIONS_FILE="${REFLECTIONS_FILE:-$SCRIPT_DIR/xrd_app/assets/reflections.json}"
 DETECTOR="${DETECTOR:-5x5_tophat_band_adaptive_snr}"
 SNR="${SNR:-4}"
-WORKERS="${WORKERS:-4}"
+WORKERS="${WORKERS:-16}"
 LINK_TOLERANCE="${LINK_TOLERANCE:-5}"
-INCLUDE_GRID_SCANS="${INCLUDE_GRID_SCANS:-0}"
+HD_WIN="${HD_WIN:-4}"
+INCLUDE_GRID_SCANS="${INCLUDE_GRID_SCANS:-1}"
 BUILD_FOCUS_LOSSLESS="${BUILD_FOCUS_LOSSLESS:-1}"
 REPORT_DIR="${REPORT_DIR:-$ROOT/Figures}"
 
@@ -203,6 +206,30 @@ run_grid_scan() {
   fi
 }
 
+run_focus_hd_map() {
+  local scan=$1
+  local scan_name shapes hd_map
+  scan_name="Scan_$(printf '%04d' "$scan")"
+  shapes="$ROOT/Labels/$scan_name/gaussian_shapes_3x3.h5"
+  hd_map="$ROOT/Labels/$scan_name/gaussian_hdmap_3x3.h5"
+
+  printf '\n========== %s HD device map 3x3 (%s) ==========\n' "$scan_name" "$(timestamp)"
+  if [[ ! -s "$shapes" ]]; then
+    printf 'MISSING 3x3 SHAPES; cannot build HD device map: %s\n' "$shapes" >&2
+    failures+=("hd3:$scan")
+  elif is_current "$hd_map" "$shapes"; then
+    printf '[skip] HD device map is current: %s\n' "$hd_map"
+  elif ! "$XRD_APP" hd-device-map \
+      --root "$ROOT" \
+      --scan "$scan" \
+      --bin-size 3 \
+      --catalog "$shapes" \
+      --name gaussian \
+      --win "$HD_WIN"; then
+    failures+=("hd3:$scan")
+  fi
+}
+
 run_territory_scan() {
   local scan=$1
   local scan_name
@@ -299,9 +326,13 @@ printf '[setup] linking 2-theta calibration, reflections, and external data root
 "$XRD_APP" "${link_args[@]}" || exit 2
 
 if [[ -n "$RAW_ROOT" ]]; then
-  focus_csv="$(IFS=,; printf '%s' "${FOCUS_SCANS[*]}")"
-  printf '[setup] discovering focus scans (%s)\n' "$focus_csv"
-  "$XRD_APP" scan-detect --root "$ROOT" --scans-dir "$RAW_ROOT" --scans "$focus_csv" || exit 2
+  scans_to_register=("${FOCUS_SCANS[@]}")
+  if [[ "$INCLUDE_GRID_SCANS" == 1 ]]; then
+    scans_to_register+=("${GRID_SCANS[@]}")
+  fi
+  scan_csv="$(IFS=,; printf '%s' "${scans_to_register[*]}")"
+  printf '[setup] discovering selected scans (%s)\n' "$scan_csv"
+  "$XRD_APP" scan-detect --root "$ROOT" --scans-dir "$RAW_ROOT" --scans "$scan_csv" || exit 2
 fi
 
 printf 'Project: %s\n' "$ROOT"
@@ -309,8 +340,8 @@ printf '2-theta map: %s\n' "$TTH_FILE"
 printf 'Reflections: %s\n' "$REFLECTIONS_FILE"
 printf 'Focus report reflections: (001), (111)\n'
 printf 'Binning: mean per contributing frame (required and provenance-checked)\n'
-printf 'Detector: %s, SNR: %s, workers: %s, link tolerance: %s\n' \
-  "$DETECTOR" "$SNR" "$WORKERS" "$LINK_TOLERANCE"
+printf 'Detector: %s, SNR: %s, workers: %s, link tolerance: %s, HD window: %s\n' \
+  "$DETECTOR" "$SNR" "$WORKERS" "$LINK_TOLERANCE" "$HD_WIN"
 printf 'Started: %s\n' "$(timestamp)"
 
 if [[ "$INCLUDE_GRID_SCANS" == 1 ]]; then
@@ -388,6 +419,12 @@ else
     run_grid_scan "$scan"
   done
 fi
+
+# Cache the high-definition intensity layer used by HD Device View. The 3x3
+# shapes and lossless 1x1 source needed here were built immediately above.
+for scan in "${FOCUS_SCANS[@]}"; do
+  run_focus_hd_map "$scan"
+done
 
 # Reports use the full scan detector sum, not a preview subset. Recompute it
 # after binning so stale or max-bin-limited artifacts cannot enter the PDFs.
