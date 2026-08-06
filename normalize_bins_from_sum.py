@@ -103,9 +103,18 @@ def is_normalized(bins_path: Path) -> bool:
 def convert(bins_path: Path, grid_path: Path, out_path: Path) -> str:
     """Divide each summed bin by its frame count → mean-per-frame at out_path.
 
-    Writes atomically when out_path == bins_path (tmp file + os.replace).
+    The divisor is chosen per bin, most-authoritative first:
+      1. the bin's own stored ``n_frames`` attr — exactly how many frames were
+         summed into THIS bin when it was built (works for territory bins that
+         sum many frames, and is immune to a bins-vs-grid mismatch);
+      2. else the grid mapping's contributing-frame count for that bin.
+    A bin with count 0 holds no signal and is copied through untouched (no
+    divide-by-zero). Writes atomically when out_path == bins_path.
     """
-    counts = frame_counts(grid_path)
+    try:
+        grid_counts = frame_counts(grid_path)
+    except Exception:  # noqa: BLE001 - grid optional when bins carry n_frames
+        grid_counts = {}
     comp_kwargs, comp_label = io.get_compression_kwargs("zstd")
 
     in_place = out_path.resolve() == bins_path.resolve()
@@ -113,7 +122,9 @@ def convert(bins_path: Path, grid_path: Path, out_path: Path) -> str:
     tmp.parent.mkdir(parents=True, exist_ok=True)
 
     n_bins = 0
-    missing = []
+    empty = []          # bins with no frame count anywhere
+    mismatched = []     # stored n_frames disagrees with grid count
+    used_attr = 0
     with h5py.File(bins_path, "r") as fin, h5py.File(tmp, "w") as fout:
         # Carry over file attrs (bin_size, n_bin_rows/cols, detector_shape, …),
         # then stamp the normalization provenance the pipeline checks for.
@@ -123,10 +134,18 @@ def convert(bins_path: Path, grid_path: Path, out_path: Path) -> str:
         fout.attrs["normalized_by"] = "contributing_frame_count"
 
         for key, dset in _bin_datasets(fin):
-            count = counts.get(key)
+            stored = dset.attrs.get("n_frames")
+            stored = int(stored) if stored is not None else None
+            grid_n = grid_counts.get(key)
+            if stored is not None and grid_n is not None and stored != grid_n:
+                mismatched.append(key)
+            count = stored if stored else grid_n  # prefer the bin's own count
+            if stored:
+                used_attr += 1
+
             if not count:
-                missing.append(key)
-                # No frames recorded for this bin: it must be all-zero already.
+                empty.append(key)
+                # No frames for this bin: all-zero signal, copy through as-is.
                 data = dset[()].astype(np.float32)
             else:
                 arr = dset[()].astype(np.float64) / float(count)
@@ -141,9 +160,14 @@ def convert(bins_path: Path, grid_path: Path, out_path: Path) -> str:
     if in_place:
         os.replace(tmp, bins_path)
 
-    note = f"OK ({n_bins} bins, {comp_label})"
-    if missing:
-        note += f"  [WARN {len(missing)} bins had 0 frames in grid: {missing[:3]}…]"
+    src = "stored n_frames" if used_attr == n_bins else \
+          f"{used_attr}/{n_bins} stored n_frames, rest from grid"
+    note = f"OK ({n_bins} bins, {comp_label}, divisor: {src})"
+    if empty:
+        note += f"  [WARN {len(empty)} bins had 0 frames: {empty[:3]}…]"
+    if mismatched:
+        note += (f"  [NOTE {len(mismatched)} bins: stored n_frames != grid count, "
+                 f"used the bin's own (e.g. {mismatched[:2]})]")
     return note
 
 

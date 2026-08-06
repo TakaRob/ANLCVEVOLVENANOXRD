@@ -32,6 +32,7 @@ notebook = ["ipykernel", "jupyter"]
 
 [project.scripts]
 xrd-app = "xrd_app.cli:main"
+xrf-app = "xrd_app.xrf_cli:main"
 
 [tool.setuptools.packages.find]
 where = ["."]

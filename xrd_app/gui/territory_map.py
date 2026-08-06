@@ -34,7 +34,7 @@ from PyQt5.QtWidgets import (
 )
 
 from ..config import DataManager
-from ..core import catalogs, scan_table as st
+from ..core import catalogs, device_maps, scan_table as st
 from . import palette
 from .lifecycle import start_process, stop_process
 
@@ -375,17 +375,9 @@ class TerritoryMap(QWidget):
     def _shape_intensity_by_territory(self) -> dict:
         """Max per-territory peak intensity over kept shapes (reflection + χ filtered)."""
         want = self.reflection.currentText()
-        out: dict = {}
-        for s in self.shapes:
-            if want != "(all reflections)" and s.get("reflection") != want:
-                continue
-            if not self._chi_pass(s):
-                continue
-            for key, entry in (s.get("intensity_profile") or {}).items():
-                if isinstance(entry, dict):
-                    v = entry.get("intensity", 0)
-                    out[key] = max(out.get(key, 0), v)
-        return out
+        reflection = None if want == "(all reflections)" else want
+        return device_maps.territory_intensities(
+            self.shapes, reflection=reflection, predicate=self._chi_pass)
 
     # ── selection ────────────────────────────────────────────────────
     def _on_select(self, cur, _prev):

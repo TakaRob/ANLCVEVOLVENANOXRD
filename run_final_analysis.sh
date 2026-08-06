@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # Run frame-normalized peak detection and shaping on the final project.
 #
-# Focus scans use the lossless territorial 1x1 variant. All other device scans
-# use the standard 3x3 mapping. Before detection, summed bins are rebuilt as the
+# Focus scans (FOCUS_SCANS) get a LOSSLESS pair: a territorial 1x1 built at
+# --target-size 1 (one frame per cell, no summing) plus the standard 3x3 mapping
+# — this is what Device View / HD Device View render. All other device scans get
+# the standard 3x3 mapping only. Before detection, summed bins are rebuilt as the
 # mean per contributing frame. A missing HDF5 grid mapping is restored from the
 # scan's grid_mapping_*.json when present (pre-HDF5 trees only carry the JSON,
 # which the current pipeline cannot read), otherwise rebuilt from the scan's real
@@ -27,6 +29,14 @@ DETECTOR="${DETECTOR:-5x5_tophat_band_adaptive_snr}"
 SNR="${SNR:-4}"
 WORKERS="${WORKERS:-4}"
 LINK_TOLERANCE="${LINK_TOLERANCE:-5}"
+
+# RAW_ROOT: optional. When set, the focus scans are re-registered from this raw
+# tree before the lossless build, so the scan registry points at THIS host's
+# paths. Needed because Raw/scans.json bakes in absolute dirs — a tree registered
+# under WSL's /mnt/z won't resolve on a beamline host where the same share is
+# /net/micdata/data1. scan-detect merges, so only the focus entries change.
+#   RAW_ROOT=/net/micdata/data1/isn/2026-1/2026-1-Luo/Raw ./run_final_analysis.sh
+RAW_ROOT="${RAW_ROOT:-}"
 
 FOCUS_SCANS=(179 182 203 207 215 218)
 GRID_SCANS=(
@@ -145,14 +155,20 @@ run_grid_scan() {
   grid="$ROOT/Metadata/$scan_name/grid_mapping_3x3.h5"
 
   printf '\n========== %s 3x3 (%s) ==========\n' "$scan_name" "$(timestamp)"
-  if [[ ! -s "$bins" ]]; then
-    printf 'MISSING BINS: %s\n' "$bins" >&2
-    failures+=("bins3:$scan")
-    return
-  fi
   if ! ensure_grid "$grid" grid --root "$ROOT" --scan "$scan" --bin-size 3; then
     failures+=("grid3:$scan")
     return
+  fi
+  if [[ ! -s "$bins" ]]; then
+    # No pre-built bins: build them fresh as mean-per-frame. 'bin' reads the
+    # unbinned archive when present (fast) else the raw frames; if neither
+    # exists it fails and we report it rather than silently skipping the scan.
+    printf '[bin] building 3x3 bins (mean per frame): %s\n' "$bins"
+    if ! "$XRD_APP" bin --root "$ROOT" --scan "$scan" --bin-size 3 --normalize-frames; then
+      printf 'MISSING BINS and could not build them (no archive/raw?): %s\n' "$bins" >&2
+      failures+=("bins3:$scan")
+      return
+    fi
   fi
   if ! ensure_normalized_bins "$scan" 3 "" "$bins"; then
     failures+=("normalize3:$scan")
@@ -256,13 +272,94 @@ printf 'Detector: %s, SNR: %s, workers: %s, link tolerance: %s\n' \
   "$DETECTOR" "$SNR" "$WORKERS" "$LINK_TOLERANCE"
 printf 'Started: %s\n' "$(timestamp)"
 
-for scan in "${FOCUS_SCANS[@]}"; do
-  run_territory_scan "$scan"
-done
-
 for scan in "${GRID_SCANS[@]}"; do
   run_grid_scan "$scan"
 done
+
+# ── Focus-scan lossless build (appended) ────────────────────────────────
+# The six focus scans are the ones we inspect in Device View / HD Device View,
+# so they get a LOSSLESS pair instead of the summed territorial reference:
+#   (1) territorial 1x1 at --target-size 1 — one frame per cell, no summing,
+#       built via 'territory-build' (which also builds the unbinned archive)
+#   (2) the standard 3x3 mapping (run_grid_scan, which reads that same archive
+#       so binning is fast)
+# Scans whose raw frames are gone in this tree (no archive) can't be rebuilt
+# losslessly — they are reported as failures, never silently summed.
+# Set BUILD_FOCUS_LOSSLESS=0 to fall back to the old summed territorial pass.
+BUILD_FOCUS_LOSSLESS="${BUILD_FOCUS_LOSSLESS:-1}"
+
+territory_reregister_focus() {
+  # Optional: re-point the registry at THIS host's raw tree (RAW_ROOT) so
+  # 'archive-unbinned' resolves. scan-detect merges, so only the focus scans
+  # are rewritten; the 40 grid-scan entries are left as-is.
+  [[ -n "$RAW_ROOT" ]] || return 0
+  local focus_csv
+  focus_csv="$(IFS=,; printf '%s' "${FOCUS_SCANS[*]}")"
+  printf '[raw] re-registering focus scans (%s) from %s\n' "$focus_csv" "$RAW_ROOT"
+  if ! "$XRD_APP" scan-detect --root "$ROOT" --scans-dir "$RAW_ROOT" --scans "$focus_csv"; then
+    printf 'RAW RE-REGISTRATION reported problems from %s (some focus builds may not find raw)\n' \
+      "$RAW_ROOT" >&2
+  fi
+}
+
+territory_is_lossless() {
+  # True only when the territory grid mapping was built at --target-size 1.
+  local grid=$1
+  [[ -s "$grid" ]] || return 1
+  python3 - "$grid" <<'PY'
+import sys
+from xrd_app.core import io
+try:
+    gm = io.load_grid_mapping(sys.argv[1])
+except Exception:
+    raise SystemExit(1)
+raise SystemExit(0 if int(gm.get("target_size", 0)) == 1 else 1)
+PY
+}
+
+run_focus_lossless_scan() {
+  local scan=$1
+  local scan_name grid shapes
+  scan_name="Scan_$(printf '%04d' "$scan")"
+  grid="$ROOT/Metadata/$scan_name/grid_mapping_1x1_territory.h5"
+  shapes="$ROOT/Labels/$scan_name/territory_shapes_1x1_territory_coord.h5"
+
+  printf '\n========== %s focus lossless 1x1 (%s) ==========\n' "$scan_name" "$(timestamp)"
+  if territory_is_lossless "$grid" && [[ -s "$shapes" ]]; then
+    printf '[skip] lossless territorial 1x1 already built (target-size 1): %s\n' "$grid"
+  else
+    printf '[territory] building lossless territorial reference (target-size 1): %s\n' "$scan_name"
+    if ! "$XRD_APP" territory-build \
+        --root "$ROOT" \
+        --scan "$scan" \
+        --target-size 1 \
+        --algorithm "$DETECTOR" \
+        --snr "$SNR"; then
+      printf 'LOSSLESS TERRITORY BUILD FAILED (raw frames may be absent): %s\n' "$scan_name" >&2
+      failures+=("focus-territory:$scan")
+      return
+    fi
+    if ! territory_is_lossless "$grid"; then
+      printf 'TERRITORY GRID IS NOT TARGET-SIZE 1 AFTER BUILD: %s\n' "$grid" >&2
+      failures+=("focus-territory:$scan")
+      return
+    fi
+  fi
+
+  # Standard 3x3 for the same scan (records its own failures).
+  run_grid_scan "$scan"
+}
+
+if [[ "$BUILD_FOCUS_LOSSLESS" == 1 ]]; then
+  territory_reregister_focus
+  for scan in "${FOCUS_SCANS[@]}"; do
+    run_focus_lossless_scan "$scan"
+  done
+else
+  for scan in "${FOCUS_SCANS[@]}"; do
+    run_territory_scan "$scan"
+  done
+fi
 
 printf '\n========== FINISHED (%s) ==========\n' "$(timestamp)"
 if ((${#failures[@]})); then

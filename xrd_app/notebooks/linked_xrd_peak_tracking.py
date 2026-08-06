@@ -34,13 +34,17 @@ FRAME_TO_SHOW = 0
 BIN_WIDTHS = (0.10, 0.25, 0.50, 1.00)
 BIN_WIDTH = 0.25
 
+# Spatial bin to preview as a summed detector image. None selects the bin that
+# contains the maximum XRF-intensity position; otherwise use a key such as "3_4".
+BINNED_IMAGE_BIN_KEY = None
+
 # Limit expensive raw-frame reads to a small physical region. Set to None to use
 # the complete cropped material map (usually too expensive for initial testing).
 # Format: (x_min, x_max, y_min, y_max)
 SAMPLE_ROI = None
 
 # Build a detector sum from evenly spaced linked frames to choose peak locations.
-DETECTOR_SUM_SAMPLE = 100
+DETECTOR_SUM_SAMPLE = 1000
 
 # Choose detector peaks manually as [(x, y), ...], or leave empty for automatic
 # candidates from the sampled detector sum. Detector x is column; y is row.
@@ -311,6 +315,37 @@ occupancy = binned_links.groupby("bin_key").size().sort_values(ascending=False)
 print(f"{BIN_WIDTH:g}-unit bins: {len(occupancy):,} occupied")
 print(occupancy.describe())
 
+# Preview the summed XRD detector image for the spatial bin at peak XRF intensity.
+peak_xrf_row = binned_links.loc[binned_links["XRF Intensity"].idxmax()]
+preview_bin_key = (
+    str(BINNED_IMAGE_BIN_KEY)
+    if BINNED_IMAGE_BIN_KEY is not None
+    else str(peak_xrf_row["bin_key"])
+)
+preview_rows = binned_links.loc[binned_links["bin_key"] == preview_bin_key]
+if preview_rows.empty:
+    raise KeyError(
+        f"BINNED_IMAGE_BIN_KEY {preview_bin_key!r} is not occupied; "
+        f"choose from {sorted(occupancy.index)}"
+    )
+preview_peak_xrf_row = preview_rows.loc[preview_rows["XRF Intensity"].idxmax()]
+binned_detector_sum = sum_linked_rows(preview_rows)
+vmin, vmax = robust_positive_limits(binned_detector_sum)
+fig, ax = plt.subplots(figsize=(9, 8), constrained_layout=True)
+binned_artist = ax.imshow(
+    np.clip(binned_detector_sum, vmin, None), origin="upper", cmap="inferno",
+    norm=LogNorm(vmin=vmin, vmax=vmax),
+)
+ax.set(
+    title=(f"{MATERIAL}: bin {preview_bin_key}, sum of {len(preview_rows)} frames\n"
+           f"Bin XRF-peak position: X={preview_peak_xrf_row['X']:.3f}, "
+           f"Y={preview_peak_xrf_row['Y']:.3f}"),
+    xlabel="detector x / column", ylabel="detector y / row",
+)
+fig.colorbar(binned_artist, ax=ax, label="summed detector counts")
+plt.show()
+display(preview_rows[["Point", "X", "Y", "XRF Intensity"]])
+
 # The notebook invokes the same Click command as the terminal, so all raw-frame
 # binning and tracking behavior stays in xrd_app.core.linked_xrd.
 if RUN_SPATIAL_BINNING:
@@ -415,3 +450,5 @@ if not tracking.empty:
         tracking_summary["com_y_max"] - tracking_summary["com_y_min"]
     )
     display(tracking_summary)
+
+# %%

@@ -27,7 +27,7 @@ from PyQt5.QtCore import Qt, pyqtSignal, QTimer, QRectF
 from PyQt5.QtGui import QPainter, QColor, QBrush, QFont
 
 from ..config import DataManager
-from ..core import catalogs, io
+from ..core import catalogs, device_maps, io
 from .palette import element_colors as _element_colors, hex_to_rgba as _hex_to_rgba
 
 pg.setConfigOptions(imageAxisOrder="row-major", antialias=True)
@@ -146,64 +146,8 @@ def load_grid_info():
     return gm["n_bin_rows"], gm["n_bin_cols"]
 
 
-PER_FEATURE_METRICS = {
-    "chi_breadth": "chi_fwhm", "tth_breadth": "tth_fwhm", "chi": "chi_deg",
-}
-
-
-def _extract_metric(entry, feat, metric):
-    if not isinstance(entry, dict):
-        return float(entry) if metric == "intensity" else None
-    if metric == "intensity":
-        return entry.get("integrated", entry.get("intensity", 0))
-    if metric == "tth_dev":
-        tth = entry.get("tth")
-        ref_tth = feat.get("ref_tth")
-        if tth is not None and ref_tth is not None:
-            return tth - ref_tth
-        return None
-    return None
-
-
-def build_device_grids(features, n_rows, n_cols, metric="intensity"):
-    reflections = sorted(set(f["reflection"] for f in features))
-    grids = {}
-    is_per_feature = metric in PER_FEATURE_METRICS
-    feat_key = PER_FEATURE_METRICS.get(metric)
-
-    for ref in reflections:
-        grid = np.full((n_rows, n_cols), np.nan)
-        ref_feats = [f for f in features if f["reflection"] == ref]
-        for feat in ref_feats:
-            profile = feat.get("intensity_profile", {})
-            if is_per_feature:
-                val = feat.get(feat_key)
-                if val is None:
-                    continue
-                for bk in profile:
-                    parts = bk.split("_")
-                    if len(parts) != 2:
-                        continue
-                    r, c = int(parts[0]), int(parts[1])
-                    if 0 <= r < n_rows and 0 <= c < n_cols:
-                        grid[r, c] = val
-            else:
-                for bk, entry in profile.items():
-                    parts = bk.split("_")
-                    if len(parts) != 2:
-                        continue
-                    r, c = int(parts[0]), int(parts[1])
-                    if 0 <= r < n_rows and 0 <= c < n_cols:
-                        val = _extract_metric(entry, feat, metric)
-                        if val is None:
-                            continue
-                        if metric == "tth_dev":
-                            if np.isnan(grid[r, c]) or abs(val) > abs(grid[r, c]):
-                                grid[r, c] = val
-                        else:
-                            grid[r, c] = np.nanmax([grid[r, c], val])
-        grids[ref] = grid
-    return grids
+PER_FEATURE_METRICS = device_maps.PER_FEATURE_METRICS
+build_device_grids = device_maps.build_device_grids
 
 
 def _feat_grid_rc(feat):

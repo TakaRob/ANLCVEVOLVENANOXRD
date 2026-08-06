@@ -32,7 +32,8 @@ from .tabs._embed import placeholder
 # still hides territorial catalogs from its grid dropdown (they can't render on a
 # fixed grid) but no longer opens the map as a popup.
 _BUILTIN_TABS = ["setup", "programs", "view_label", "shape_verify", "roi_shape",
-                 "device", "hd_device", "territory", "orientation", "scan_summary"]
+                 "device", "hd_device", "territory", "orientation", "scan_summary",
+                 "report"]
 
 _BIN_SIZES = [1, 3, 4, 5]
 

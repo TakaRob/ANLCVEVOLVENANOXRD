@@ -2745,6 +2745,68 @@ def run_study(ctx, scans, bin_size, out_dir, study_name, notes, match_tol,
     click.echo("  all steps OK.")
 
 
+# ─────────────────────────────────────────────────────────────────────
+# report — resilient Sarah-style PDF slide deck
+# ─────────────────────────────────────────────────────────────────────
+@main.command(name='report')
+@click.option('--target', 'targets', multiple=True, required=True,
+              help='SCAN:BIN[:CATALOG] target; repeat for multiple scans.')
+@click.option('--output', type=click.Path(path_type=Path), required=True,
+              help='Destination PDF path.')
+@click.option('--preview', is_flag=True,
+              help='Generate only the first selected scan.')
+@click.option('--summed-images/--no-summed-images', default=True)
+@click.option('--all-reflections/--no-all-reflections', default=True)
+@click.option('--features-by-reflection/--no-features-by-reflection', default=True)
+@click.option('--top-features/--no-top-features', default=True)
+@click.option('--top-count', type=click.IntRange(min=1), default=5)
+@click.option('--allow-more-than-five', is_flag=True,
+              help='Override the default maximum of five top features per reflection.')
+@click.option('--source-images/--no-source-images', default=True,
+              help='Include each top feature source-bin detector image.')
+@click.option('--roi-images/--no-roi-images', default=False)
+@click.option('--calculate-rois', is_flag=True,
+              help='If no saved ROI catalog exists, calculate exact ROIs around top features.')
+@click.option('--territory-maps/--no-territory-maps', default=False)
+@click.option('--root', default='.', help='Project root directory')
+def report_cmd(targets, output, preview, summed_images, all_reflections,
+               features_by_reflection, top_features, top_count,
+               allow_more_than_five, source_images, roi_images, calculate_rois,
+               territory_maps, root):
+    """Create a landscape PDF report from selected scan/bin/catalog targets.
+
+    Missing data produces an explanatory page and generation continues. CATALOG
+    may be omitted to use the default shape/combined catalog for that scan/bin.
+    """
+    from .core.report import ReportOptions, ReportTarget, generate_pdf
+
+    parsed = []
+    for value in targets:
+        parts = value.split(':', 2)
+        if len(parts) < 2:
+            raise click.BadParameter(
+                f"Invalid target {value!r}; expected SCAN:BIN[:CATALOG]", param_hint='--target')
+        try:
+            bin_size = int(parts[1])
+        except ValueError as error:
+            raise click.BadParameter(
+                f"Invalid bin size in target {value!r}", param_hint='--target') from error
+        catalog = Path(parts[2]).resolve() if len(parts) == 3 and parts[2] else None
+        parsed.append(ReportTarget(DataManager.scan_name_of(parts[0]), bin_size, catalog))
+    options = ReportOptions(
+        summed_images=summed_images, all_reflections=all_reflections,
+        features_by_reflection=features_by_reflection, top_features=top_features,
+        top_count=top_count, allow_more_than_five=allow_more_than_five,
+        source_images=source_images, roi_images=roi_images,
+        calculate_rois=calculate_rois, territory_maps=territory_maps)
+    try:
+        result = generate_pdf(root, parsed, output, options, preview=preview, log=click.echo)
+    except (ValueError, OSError) as error:
+        raise click.ClickException(str(error)) from error
+    click.echo(f"Report: {result['pages']} page(s), {len(result['failures'])} unavailable "
+               f"section(s) -> {result['path']}")
+
+
 def _resolve_scan_list(scans, all_scans, root):
     if scans:
         return [DataManager.scan_name_of(s.strip()) for s in scans.split(',') if s.strip()]
