@@ -29,6 +29,7 @@ class ReportOptions:
     features_by_reflection: bool = True
     top_features: bool = True
     top_count: int = 5
+    top_scope: str = "reflection"
     allow_more_than_five: bool = False
     source_images: bool = True
     roi_images: bool = False
@@ -38,6 +39,8 @@ class ReportOptions:
     def validated(self):
         if self.top_count < 1:
             raise ValueError("Top feature count must be at least one")
+        if self.top_scope not in ("reflection", "total"):
+            raise ValueError("Top feature scope must be 'reflection' or 'total'")
         if self.top_count > 5 and not self.allow_more_than_five:
             raise ValueError("Top feature count is capped at five unless override is enabled")
         return self
@@ -216,6 +219,31 @@ def _feature_pages(pdf, dm, target, *, split_reflections):
               f"{catalog.name}", draw)
 
 
+def _rank_top_features(features, count, scope):
+    """Return ``(reflection, rank, feature)`` entries in report-page order."""
+    rank_key = lambda feature: (
+        _feature_size(feature), float(feature.get("peak_intensity") or 0))
+    if scope == "total":
+        selected = sorted(features, key=rank_key, reverse=True)[:count]
+        overall_rank = {id(feature): rank for rank, feature in enumerate(selected, 1)}
+        return [
+            (reflection, overall_rank[id(feature)], feature)
+            for reflection in sorted({feature.get("reflection", "unknown")
+                                      for feature in selected})
+            for feature in selected
+            if feature.get("reflection", "unknown") == reflection
+        ]
+    return [
+        (reflection, rank, feature)
+        for reflection in sorted({feature.get("reflection", "unknown")
+                                  for feature in features})
+        for rank, feature in enumerate(sorted(
+            (feature for feature in features
+             if feature.get("reflection", "unknown") == reflection),
+            key=rank_key, reverse=True)[:count], 1)
+    ]
+
+
 def _top_feature_pages(pdf, dm, target, options):
     catalog, features, sources, grid = _load_target(dm, target)
     n_rows, n_cols = int(grid["n_bin_rows"]), int(grid["n_bin_cols"])
@@ -223,40 +251,39 @@ def _top_feature_pages(pdf, dm, target, options):
         dm, target.bin_size, scan=target.scan, grid_mapping=sources.grid_mapping,
         variant=sources.variant)
     try:
-        for reflection in sorted({feature.get("reflection", "unknown") for feature in features}):
-            ranked = sorted(
-                (feature for feature in features if feature.get("reflection", "unknown") == reflection),
-                key=lambda feature: (_feature_size(feature),
-                                     float(feature.get("peak_intensity") or 0)), reverse=True)
-            for rank, feature in enumerate(ranked[:options.top_count], 1):
-                source_image = source.image(feature.get("center_bin")) if options.source_images else None
-                feature_grid = _profile_grid(feature, n_rows, n_cols)
+        ranked = _rank_top_features(
+            features, options.top_count, options.top_scope)
+        for reflection, rank, feature in ranked:
+            source_image = source.image(feature.get("center_bin")) if options.source_images else None
+            feature_grid = _profile_grid(feature, n_rows, n_cols)
 
-                def draw(figure, feature=feature, source_image=source_image,
-                         feature_grid=feature_grid, rank=rank, reflection=reflection):
-                    if source_image is None:
-                        axis = figure.add_subplot(111)
-                        mapped = _show_grid(axis, feature_grid, "Feature intensity profile")
-                        figure.colorbar(mapped, ax=axis, label="Integrated intensity")
-                    else:
-                        left, right = figure.subplots(1, 2)
-                        det = _show_detector(left, source_image,
-                                             f"Source bin {feature.get('center_bin', '?')}")
-                        x, y = feature.get("detector_x"), feature.get("detector_y")
-                        if x is not None and y is not None:
-                            left.plot(x, y, "+", color="cyan", markersize=12, markeredgewidth=1.5)
-                        figure.colorbar(det, ax=left, fraction=0.046, label="log counts")
-                        mapped = _show_grid(right, feature_grid, "Feature intensity profile")
-                        figure.colorbar(mapped, ax=right, fraction=0.046,
-                                        label="Integrated intensity")
-                    figure.text(0.5, 0.015,
-                                f"feature #{feature.get('feature_id', '?')} | "
-                                f"size {_feature_size(feature)} bins | "
-                                f"peak {float(feature.get('peak_intensity') or 0):.4g}",
-                                ha="center", fontsize=9)
+            def draw(figure, feature=feature, source_image=source_image,
+                     feature_grid=feature_grid, rank=rank, reflection=reflection):
+                if source_image is None:
+                    axis = figure.add_subplot(111)
+                    mapped = _show_grid(axis, feature_grid, "Feature intensity profile")
+                    figure.colorbar(mapped, ax=axis, label="Integrated intensity")
+                else:
+                    left, right = figure.subplots(1, 2)
+                    det = _show_detector(left, source_image,
+                                         f"Source bin {feature.get('center_bin', '?')}")
+                    x, y = feature.get("detector_x"), feature.get("detector_y")
+                    if x is not None and y is not None:
+                        left.plot(x, y, "+", color="cyan", markersize=12,
+                                  markeredgewidth=1.5)
+                    figure.colorbar(det, ax=left, fraction=0.046, label="log counts")
+                    mapped = _show_grid(right, feature_grid, "Feature intensity profile")
+                    figure.colorbar(mapped, ax=right, fraction=0.046,
+                                    label="Integrated intensity")
+                figure.text(0.5, 0.015,
+                            f"feature #{feature.get('feature_id', '?')} | "
+                            f"size {_feature_size(feature)} bins | "
+                            f"peak {float(feature.get('peak_intensity') or 0):.4g}",
+                            ha="center", fontsize=9)
 
-                _page(pdf, f"{target.scan} | {reflection} | Top by size #{rank} | "
-                      f"{catalog.name}", draw)
+            scope_label = "overall" if options.top_scope == "total" else "reflection"
+            _page(pdf, f"{target.scan} | {reflection} | Top {scope_label} by size "
+                  f"#{rank} | {catalog.name}", draw)
     finally:
         source.close()
 

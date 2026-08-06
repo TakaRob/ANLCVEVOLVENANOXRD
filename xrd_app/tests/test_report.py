@@ -7,7 +7,9 @@ from click.testing import CliRunner
 from xrd_app.cli import main
 from xrd_app.config import ProjectConfig, default_config
 from xrd_app.core import detector_display, device_maps
-from xrd_app.core.report import ReportOptions, ReportTarget, generate_pdf
+from xrd_app.core.report import (
+    ReportOptions, ReportTarget, _rank_top_features, generate_pdf,
+)
 
 
 def test_feature_masks_match_device_view_footprints():
@@ -75,11 +77,43 @@ def test_report_detector_render_uses_shared_noise_and_levels(monkeypatch):
     assert calls[-1][1]["vmax"] == 8.0
 
 
+def test_top_feature_total_scope_selects_globally_then_groups_by_reflection():
+    features = [
+        {"feature_id": 1, "reflection": "B", "n_bins": 10, "peak_intensity": 5},
+        {"feature_id": 2, "reflection": "A", "n_bins": 9, "peak_intensity": 5},
+        {"feature_id": 3, "reflection": "B", "n_bins": 8, "peak_intensity": 5},
+        {"feature_id": 4, "reflection": "A", "n_bins": 7, "peak_intensity": 5},
+    ]
+
+    ranked = _rank_top_features(features, 3, "total")
+
+    assert [(reflection, rank, feature["feature_id"])
+            for reflection, rank, feature in ranked] == [
+                ("A", 2, 2), ("B", 1, 1), ("B", 3, 3)]
+
+
+def test_top_feature_reflection_scope_keeps_count_per_reflection():
+    features = [
+        {"feature_id": 1, "reflection": "A", "n_bins": 5},
+        {"feature_id": 2, "reflection": "A", "n_bins": 4},
+        {"feature_id": 3, "reflection": "B", "n_bins": 3},
+        {"feature_id": 4, "reflection": "B", "n_bins": 2},
+    ]
+
+    ranked = _rank_top_features(features, 1, "reflection")
+
+    assert [(reflection, rank, feature["feature_id"])
+            for reflection, rank, feature in ranked] == [
+                ("A", 1, 1), ("B", 1, 3)]
+
+
 def test_report_options_require_explicit_top_five_override():
     with pytest.raises(ValueError, match="capped at five"):
         ReportOptions(top_count=6).validated()
 
     assert ReportOptions(top_count=6, allow_more_than_five=True).validated().top_count == 6
+    with pytest.raises(ValueError, match="scope"):
+        ReportOptions(top_scope="invalid").validated()
 
 
 def test_preview_uses_first_scan_and_continues_missing_data(tmp_path):

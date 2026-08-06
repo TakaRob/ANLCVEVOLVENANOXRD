@@ -126,8 +126,18 @@ class ReportTab(QWidget):
         self.top_count.setRange(1, 50)
         self.top_count.setValue(5)
         self.top_count.setPrefix("Top ")
-        self.top_count.setSuffix(" / reflection")
-        grid.addWidget(self.top_count, 3, 1)
+        self.top_scope = QComboBox()
+        self.top_scope.addItem("Reflection", "reflection")
+        self.top_scope.addItem("Total", "total")
+        self.top_scope.setToolTip(
+            "Reflection: Top X within every reflection. Total: Top X largest "
+            "features overall, then place them under their respective reflections.")
+        top_controls = QWidget()
+        top_layout = QHBoxLayout(top_controls)
+        top_layout.setContentsMargins(0, 0, 0, 0)
+        top_layout.addWidget(self.top_count)
+        top_layout.addWidget(self.top_scope)
+        grid.addWidget(top_controls, 3, 1)
         self.override = QCheckBox("Override five-feature maximum")
         grid.addWidget(self.override, 4, 1)
         grid.addWidget(self.source_images, 4, 0)
@@ -176,7 +186,10 @@ class ReportTab(QWidget):
         ]
         for checkbox, yes, no in flags:
             arguments.append(yes if checkbox.isChecked() else no)
-        arguments.extend(["--top-count", str(self.top_count.value())])
+        arguments.extend([
+            "--top-count", str(self.top_count.value()),
+            "--top-scope", self.top_scope.currentData(),
+        ])
         if self.override.isChecked():
             arguments.append("--allow-more-than-five")
         if self.calculate_rois.isChecked():
@@ -186,7 +199,7 @@ class ReportTab(QWidget):
     def _run(self, preview=False):
         if self.top_count.value() > 5 and not self.override.isChecked():
             self.console.log.setPlainText(
-                "Top features is capped at five per reflection. Enable the override to continue.")
+                "Top features is capped at five. Enable the override to continue.")
             return
         default = Path(self.project_root) / "Figures" / (
             "report_preview.pdf" if preview else "xrd_report.pdf")
