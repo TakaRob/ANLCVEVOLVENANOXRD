@@ -6,7 +6,7 @@ from pathlib import Path
 
 from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import (
-    QCheckBox, QComboBox, QFileDialog, QGridLayout, QGroupBox, QHBoxLayout,
+    QAbstractItemView, QCheckBox, QComboBox, QFileDialog, QGridLayout, QGroupBox, QHBoxLayout,
     QLabel, QListWidget, QListWidgetItem, QPushButton, QSpinBox, QVBoxLayout,
     QWidget,
 )
@@ -31,15 +31,18 @@ TAB_META = {
 
 
 class _TargetRow(QWidget):
-    def __init__(self, dm, scan, selected=False, active_bin=3):
+    def __init__(self, dm, scan, selected=False, active_bin=3, on_changed=None):
         super().__init__()
         self.dm = dm
         self.scan = scan
+        self._on_changed = on_changed
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         self.enabled = QCheckBox(scan)
         self.enabled.setChecked(selected)
         self.enabled.setMinimumWidth(130)
+        if self._on_changed is not None:
+            self.enabled.toggled.connect(self._on_changed)
         layout.addWidget(self.enabled)
         self.bin = QComboBox()
         bins = set(existing_bins(dm, scan))
@@ -49,11 +52,15 @@ class _TargetRow(QWidget):
         index = self.bin.findData(active_bin)
         self.bin.setCurrentIndex(index if index >= 0 else 0)
         self.bin.currentIndexChanged.connect(self._populate_catalogs)
+        if self._on_changed is not None:
+            self.bin.currentIndexChanged.connect(self._on_changed)
         layout.addWidget(self.bin)
         self.catalog = QComboBox()
         self.catalog.setMinimumWidth(420)
         layout.addWidget(self.catalog, 1)
         self._populate_catalogs()
+        if self._on_changed is not None:
+            self.catalog.currentIndexChanged.connect(self._on_changed)
 
     def _populate_catalogs(self):
         previous = self.catalog.currentData()
@@ -88,19 +95,34 @@ class ReportTab(QWidget):
         intro.setWordWrap(True)
         root.addWidget(intro)
 
+        selection_row = QHBoxLayout()
         targets = QGroupBox("Scans and feature maps")
         targets_layout = QVBoxLayout(targets)
         self.target_list = QListWidget()
         self.target_list.setMinimumHeight(150)
         targets_layout.addWidget(self.target_list)
         for name in self.dm.discover_scans(selected_only=True):
-            row = _TargetRow(self.dm, name, selected=(name == scan), active_bin=bin_size)
+            row = _TargetRow(
+                self.dm, name, selected=(name == scan), active_bin=bin_size,
+                on_changed=self._populate_reflections)
             item = QListWidgetItem()
             item.setSizeHint(row.sizeHint())
             self.target_list.addItem(item)
             self.target_list.setItemWidget(item, row)
             self._rows.append(row)
-        root.addWidget(targets)
+        selection_row.addWidget(targets, 3)
+
+        reflection_box = QGroupBox("Reflections")
+        reflection_layout = QVBoxLayout(reflection_box)
+        reflection_layout.addWidget(QLabel("Ctrl-click or Shift-click to select multiple."))
+        self.reflection_list = QListWidget()
+        self.reflection_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.reflection_list.setMinimumWidth(180)
+        self.reflection_list.setMinimumHeight(150)
+        reflection_layout.addWidget(self.reflection_list)
+        selection_row.addWidget(reflection_box, 1)
+        root.addLayout(selection_row)
+        self._populate_reflections()
 
         pages = QGroupBox("Pages")
         grid = QGridLayout(pages)
@@ -161,6 +183,29 @@ class ReportTab(QWidget):
         self.console = JobConsole()
         root.addWidget(self.console, 1)
 
+    def _populate_reflections(self, *_):
+        previous = {item.text() for item in self.reflection_list.selectedItems()}
+        available = set()
+        active_rows = [row for row in self._rows if row.enabled.isChecked()]
+        for row in active_rows or self._rows:
+            catalog = row.catalog.currentData()
+            if not catalog:
+                continue
+            try:
+                features, _ = catalogs.load_features_any(catalog)
+                available.update(str(feature.get("reflection", "unknown"))
+                                 for feature in features)
+            except Exception:
+                continue
+        self.reflection_list.blockSignals(True)
+        self.reflection_list.clear()
+        for reflection in sorted(available):
+            item = QListWidgetItem(reflection)
+            self.reflection_list.addItem(item)
+            if not previous or reflection in previous:
+                item.setSelected(True)
+        self.reflection_list.blockSignals(False)
+
     def update_context(self, scan=None, bin_size=None):
         for row in self._rows:
             if row.scan == scan and not any(candidate.enabled.isChecked() for candidate in self._rows):
@@ -190,6 +235,11 @@ class ReportTab(QWidget):
             "--top-count", str(self.top_count.value()),
             "--top-scope", self.top_scope.currentData(),
         ])
+        selected_reflections = self.reflection_list.selectedItems()
+        if self.reflection_list.count() and not selected_reflections:
+            raise ValueError("Select at least one reflection")
+        for item in selected_reflections:
+            arguments.extend(["--reflection", item.text()])
         if self.override.isChecked():
             arguments.append("--allow-more-than-five")
         if self.calculate_rois.isChecked():

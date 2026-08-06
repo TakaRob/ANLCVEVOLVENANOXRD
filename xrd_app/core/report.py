@@ -30,6 +30,7 @@ class ReportOptions:
     top_features: bool = True
     top_count: int = 5
     top_scope: str = "reflection"
+    reflections: Optional[tuple[str, ...]] = None
     allow_more_than_five: bool = False
     source_images: bool = True
     roi_images: bool = False
@@ -120,6 +121,14 @@ def _show_segmentation(axis, masks, title):
                     borderaxespad=0, fontsize=8, title="Reflection")
 
 
+def _filter_features(features, selected):
+    """Keep selected reflections; ``None`` means all available reflections."""
+    if selected is None:
+        return list(features)
+    wanted = set(selected)
+    return [feature for feature in features if feature.get("reflection") in wanted]
+
+
 def _feature_size(feature):
     return int(feature.get("n_bins") or len(feature.get("intensity_profile") or {}) or 1)
 
@@ -185,8 +194,11 @@ def _sum_page(pdf, dm, target):
     _page(pdf, f"{target.scan} | Summed detector image", draw)
 
 
-def _feature_pages(pdf, dm, target, *, split_reflections):
+def _feature_pages(pdf, dm, target, options, *, split_reflections):
     catalog, features, _sources, grid = _load_target(dm, target)
+    features = _filter_features(features, options.reflections)
+    if not features:
+        raise ValueError("No features match the selected reflections")
     image, _ = _detector_image(dm, target.scan)
     tth_map = io.load_tth_map(dm.tth_map(scan=target.scan))
     reflection_set = reflections.read_json(dm.reflections(scan=target.scan))
@@ -246,6 +258,9 @@ def _rank_top_features(features, count, scope):
 
 def _top_feature_pages(pdf, dm, target, options):
     catalog, features, sources, grid = _load_target(dm, target)
+    features = _filter_features(features, options.reflections)
+    if not features:
+        raise ValueError("No features match the selected reflections")
     n_rows, n_cols = int(grid["n_bin_rows"]), int(grid["n_bin_cols"])
     source = io.open_bin_source(
         dm, target.bin_size, scan=target.scan, grid_mapping=sources.grid_mapping,
@@ -288,17 +303,19 @@ def _top_feature_pages(pdf, dm, target, options):
         source.close()
 
 
-def _roi_features(dm, target, calculate, top_count):
+def _roi_features(dm, target, calculate, top_count, selected_reflections=None):
     from . import roi_catalog, roi_map
 
     paths = roi_catalog.discover(dm.labels_dir(target.scan), target.bin_size)
     features = []
     for path in paths:
         features.extend(roi_catalog.load(path).get("features") or [])
+    features = _filter_features(features, selected_reflections)
     if features or not calculate:
         return features
 
     _catalog, source_features, sources, grid = _load_target(dm, target)
+    source_features = _filter_features(source_features, selected_reflections)
     selected = sorted(source_features, key=_feature_size, reverse=True)[:top_count]
     detector, _ = _detector_image(dm, target.scan)
     rois = []
@@ -329,7 +346,8 @@ def _roi_features(dm, target, calculate, top_count):
 def _roi_pages(pdf, dm, target, options):
     from matplotlib.patches import Rectangle
 
-    features = _roi_features(dm, target, options.calculate_rois, options.top_count)
+    features = _roi_features(
+        dm, target, options.calculate_rois, options.top_count, options.reflections)
     if not features:
         raise FileNotFoundError(
             "No saved ROI catalog. Enable on-demand ROI calculation to use top features.")
@@ -358,7 +376,7 @@ def _roi_pages(pdf, dm, target, options):
         _page(pdf, f"{target.scan} | ROI | {feature.get('reflection', 'manual ROI')}", draw)
 
 
-def _territory_pages(pdf, dm, target):
+def _territory_pages(pdf, dm, target, options):
     from matplotlib.collections import PatchCollection
     from matplotlib.patches import Polygon
     import matplotlib.pyplot as plt
@@ -373,6 +391,9 @@ def _territory_pages(pdf, dm, target):
     if not candidates:
         raise FileNotFoundError("No territorial shape catalog found")
     features, _ = catalogs.load_features_any(candidates[-1])
+    features = _filter_features(features, options.reflections)
+    if not features:
+        raise ValueError("No territorial features match the selected reflections")
     polygons = {key: Polygon(info["polygon"], closed=True)
                 for key, info in territories.items() if len(info.get("polygon") or []) >= 3}
     for reflection in sorted({feature.get("reflection", "unknown") for feature in features}):
@@ -416,16 +437,18 @@ def generate_pdf(project_root, targets, output, options=None, *, preview=False,
         ("Summed detector image", options.summed_images, _sum_page),
         ("All reflections", options.all_reflections,
          lambda pdf, manager, target: _feature_pages(
-             pdf, manager, target, split_reflections=False)),
+             pdf, manager, target, options, split_reflections=False)),
         ("Features by reflection", options.features_by_reflection,
          lambda pdf, manager, target: _feature_pages(
-             pdf, manager, target, split_reflections=True)),
+             pdf, manager, target, options, split_reflections=True)),
         ("Top features", options.top_features,
          lambda pdf, manager, target: _top_feature_pages(
              pdf, manager, target, options)),
         ("ROI images", options.roi_images,
          lambda pdf, manager, target: _roi_pages(pdf, manager, target, options)),
-        ("Territorial maps", options.territory_maps, _territory_pages),
+        ("Territorial maps", options.territory_maps,
+         lambda pdf, manager, target: _territory_pages(
+             pdf, manager, target, options)),
     ]
     with PdfPages(output) as pdf:
         for target in targets:

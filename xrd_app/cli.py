@@ -2768,6 +2768,8 @@ def run_study(ctx, scans, bin_size, out_dir, study_name, notes, match_tol,
 @click.option('--top-count', type=click.IntRange(min=1), default=5)
 @click.option('--top-scope', type=click.Choice(['reflection', 'total']), default='reflection',
               help='Rank Top X within each reflection or across all features.')
+@click.option('--reflection', 'selected_reflections', multiple=True,
+              help='Include this reflection; repeat to select multiple (default: all).')
 @click.option('--allow-more-than-five', is_flag=True,
               help='Override the default maximum of five top features.')
 @click.option('--source-images/--no-source-images', default=True,
@@ -2779,7 +2781,8 @@ def run_study(ctx, scans, bin_size, out_dir, study_name, notes, match_tol,
 @click.option('--root', default='.', help='Project root directory')
 def report_cmd(targets, output, preview, summed_images, all_reflections,
                features_by_reflection, top_features, top_count, top_scope,
-               allow_more_than_five, source_images, roi_images, calculate_rois,
+               selected_reflections, allow_more_than_five, source_images, roi_images,
+               calculate_rois,
                territory_maps, root):
     """Create a landscape PDF report from selected scan/bin/catalog targets.
 
@@ -2805,6 +2808,7 @@ def report_cmd(targets, output, preview, summed_images, all_reflections,
         summed_images=summed_images, all_reflections=all_reflections,
         features_by_reflection=features_by_reflection, top_features=top_features,
         top_count=top_count, top_scope=top_scope,
+        reflections=tuple(selected_reflections) if selected_reflections else None,
         allow_more_than_five=allow_more_than_five,
         source_images=source_images, roi_images=roi_images,
         calculate_rois=calculate_rois, territory_maps=territory_maps)

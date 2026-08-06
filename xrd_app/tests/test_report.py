@@ -8,7 +8,7 @@ from xrd_app.cli import main
 from xrd_app.config import ProjectConfig, default_config
 from xrd_app.core import detector_display, device_maps
 from xrd_app.core.report import (
-    ReportOptions, ReportTarget, _rank_top_features, generate_pdf,
+    ReportOptions, ReportTarget, _filter_features, _rank_top_features, generate_pdf,
 )
 
 
@@ -77,6 +77,18 @@ def test_report_detector_render_uses_shared_noise_and_levels(monkeypatch):
     assert calls[-1][1]["vmax"] == 8.0
 
 
+def test_reflection_filter_keeps_only_requested_features():
+    features = [
+        {"feature_id": 1, "reflection": "A"},
+        {"feature_id": 2, "reflection": "B"},
+        {"feature_id": 3, "reflection": "C"},
+    ]
+
+    assert [feature["feature_id"] for feature in
+            _filter_features(features, ("A", "C"))] == [1, 3]
+    assert _filter_features(features, None) == features
+
+
 def test_top_feature_total_scope_selects_globally_then_groups_by_reflection():
     features = [
         {"feature_id": 1, "reflection": "B", "n_bins": 10, "peak_intensity": 5},
@@ -138,6 +150,18 @@ def test_preview_uses_first_scan_and_continues_missing_data(tmp_path):
     assert result["targets"] == 1
     assert result["pages"] == 1
     assert [failure["scan"] for failure in result["failures"]] == ["Scan_0001"]
+
+
+def test_report_cli_accepts_multiple_reflection_filters(tmp_path):
+    output = tmp_path / "report.pdf"
+    result = CliRunner().invoke(main, [
+        "report", "--root", str(tmp_path), "--target", "Scan_0001:3",
+        "--output", str(output), "--reflection", "(001)",
+        "--reflection", "(011)", "--no-summed-images", "--no-all-reflections",
+        "--no-features-by-reflection", "--no-top-features",
+    ])
+
+    assert result.exit_code == 0, result.output
 
 
 def test_report_cli_rejects_top_count_over_five_without_override(tmp_path):
