@@ -168,6 +168,11 @@ def test_range_slider_remains_linear_by_default():
     assert slider._x_to_val(108) in (50, 51)
 
 
+def test_cursor_overlay_is_opt_in(monkeypatch):
+    monkeypatch.delenv("XRD_CURSOR_OVERLAY", raising=False)
+    assert os.environ.get("XRD_CURSOR_OVERLAY") is None
+
+
 def test_visible_cursor_uses_mouse_transparent_window_overlay(monkeypatch):
     app = _app()
     window = QWidget()

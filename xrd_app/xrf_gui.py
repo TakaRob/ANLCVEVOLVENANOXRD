@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -1265,8 +1266,9 @@ class XRFAnalysisWindow(QMainWindow):
 def launch(project_root=None):
     """Launch XRF setup and analysis; project selection can happen in the GUI."""
     application = QApplication.instance() or QApplication(sys.argv)
-    from .gui.lifecycle import install_visible_cursor
-    install_visible_cursor(application)
+    if os.environ.get("XRD_CURSOR_OVERLAY") == "1":
+        from .gui.lifecycle import install_visible_cursor
+        install_visible_cursor(application)
     window = XRFAnalysisWindow(project_root)
     window.show()
     return application.exec_()

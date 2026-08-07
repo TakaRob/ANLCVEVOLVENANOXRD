@@ -653,6 +653,7 @@ def _harden_env_for_remote_x():
 
 def launch_app(project_root=None, scan=None, bin_size=None, fresh=False):
     """Create the QApplication and run the single-window app."""
+    import os
     import signal
     import sys
     # Harden the environment for forwarded/remote X *before* QApplication reads
@@ -664,8 +665,9 @@ def launch_app(project_root=None, scan=None, bin_size=None, fresh=False):
     QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
     app = QApplication.instance() or QApplication(sys.argv)
     app.setStyle("Fusion")
-    from .gui.lifecycle import install_visible_cursor
-    install_visible_cursor(app)
+    if os.environ.get("XRD_CURSOR_OVERLAY") == "1":
+        from .gui.lifecycle import install_visible_cursor
+        install_visible_cursor(app)
     win = MainWindow(project_root, scan=scan, bin_size=bin_size, fresh=fresh)
     win.show()
 
