@@ -1575,7 +1575,12 @@ def run_pipeline(ctx, bin_size, scan, algorithm, shape_algo, snr, workers, root)
 @click.pass_context
 def make_bins(ctx, bin_size, scan, grid_shape, compression, normalize_frames, root):
     """Archive raw frames once, then build the requested grid and bins."""
-    ctx.invoke(archive_unbinned, scan=scan, compression=compression, root=root)
+    dm = DataManager(root, scan=scan)
+    cut_path = dm.metadata_scan_dir(scan) / "xrf_frame_cut.npz"
+    if cut_path.exists():
+        click.echo("Active XRF frame cut detected; skipping the full unbinned archive.")
+    else:
+        ctx.invoke(archive_unbinned, scan=scan, compression=compression, root=root)
     ctx.invoke(grid, bin_size=bin_size, scan=scan, shape=grid_shape, root=root)
     ctx.invoke(bin, bin_size=bin_size, scan=scan, compression=compression,
                normalize_frames=normalize_frames, root=root)

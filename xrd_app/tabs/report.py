@@ -12,7 +12,7 @@ from PyQt5.QtWidgets import (
 )
 
 from ..config import DataManager
-from ..core import catalogs
+from ..core import catalogs, reflections
 from ._console import JobConsole
 from ._embed import existing_bins, placeholder
 
@@ -51,9 +51,7 @@ class _TargetRow(QWidget):
             self.bin.addItem(f"{size}x{size}", size)
         index = self.bin.findData(active_bin)
         self.bin.setCurrentIndex(index if index >= 0 else 0)
-        self.bin.currentIndexChanged.connect(self._populate_catalogs)
-        if self._on_changed is not None:
-            self.bin.currentIndexChanged.connect(self._on_changed)
+        self.bin.currentIndexChanged.connect(self._bin_changed)
         layout.addWidget(self.bin)
         self.catalog = QComboBox()
         self.catalog.setMinimumWidth(420)
@@ -62,8 +60,14 @@ class _TargetRow(QWidget):
         if self._on_changed is not None:
             self.catalog.currentIndexChanged.connect(self._on_changed)
 
+    def _bin_changed(self):
+        self._populate_catalogs()
+        if self._on_changed is not None:
+            self._on_changed()
+
     def _populate_catalogs(self):
         previous = self.catalog.currentData()
+        self.catalog.blockSignals(True)
         self.catalog.clear()
         size = self.bin.currentData()
         for path in catalogs.feature_sources(self.dm.labels_dir(self.scan), size):
@@ -73,6 +77,12 @@ class _TargetRow(QWidget):
             self.catalog.setCurrentIndex(index)
         if not self.catalog.count():
             self.catalog.addItem("(default / unavailable)", None)
+        self.catalog.blockSignals(False)
+
+    def set_bin_size(self, size):
+        index = self.bin.findData(size)
+        if index >= 0:
+            self.bin.setCurrentIndex(index)
 
     def target_argument(self):
         value = f"{self.scan}:{self.bin.currentData()}"
@@ -86,6 +96,7 @@ class ReportTab(QWidget):
         self.project_root = str(Path(project_root).resolve())
         self.dm = DataManager(project_root)
         self._rows = []
+        self._updating_bins = False
         root = QVBoxLayout(self)
         root.setContentsMargins(8, 8, 8, 8)
 
@@ -98,6 +109,20 @@ class ReportTab(QWidget):
         selection_row = QHBoxLayout()
         targets = QGroupBox("Scans and feature maps")
         targets_layout = QVBoxLayout(targets)
+        bin_row = QHBoxLayout()
+        bin_row.addWidget(QLabel("Set bin for all scans:"))
+        self.all_bins = QComboBox()
+        all_sizes = set()
+        for name in self.dm.discover_scans(selected_only=True):
+            all_sizes.update(existing_bins(self.dm, name))
+            all_sizes.update(catalogs.available_bins(self.dm.labels_dir(name)))
+        for size in sorted(all_sizes):
+            self.all_bins.addItem(f"{size}x{size}", size)
+        index = self.all_bins.findData(bin_size)
+        self.all_bins.setCurrentIndex(index if index >= 0 else 0)
+        bin_row.addWidget(self.all_bins)
+        bin_row.addStretch()
+        targets_layout.addLayout(bin_row)
         self.target_list = QListWidget()
         self.target_list.setMinimumHeight(150)
         targets_layout.addWidget(self.target_list)
@@ -110,6 +135,7 @@ class ReportTab(QWidget):
             self.target_list.addItem(item)
             self.target_list.setItemWidget(item, row)
             self._rows.append(row)
+        self.all_bins.currentIndexChanged.connect(self._set_all_bins)
         selection_row.addWidget(targets, 3)
 
         reflection_box = QGroupBox("Reflections")
@@ -184,18 +210,28 @@ class ReportTab(QWidget):
         self.console = JobConsole()
         root.addWidget(self.console, 1)
 
+    def _set_all_bins(self):
+        size = self.all_bins.currentData()
+        if size is None:
+            return
+        self._updating_bins = True
+        try:
+            for row in self._rows:
+                row.set_bin_size(size)
+        finally:
+            self._updating_bins = False
+        self._populate_reflections()
+
     def _populate_reflections(self, *_):
+        if self._updating_bins:
+            return
         previous = {item.text() for item in self.reflection_list.selectedItems()}
         available = set()
         active_rows = [row for row in self._rows if row.enabled.isChecked()]
         for row in active_rows or self._rows:
-            catalog = row.catalog.currentData()
-            if not catalog:
-                continue
             try:
-                features, _ = catalogs.load_features_any(catalog)
-                available.update(str(feature.get("reflection", "unknown"))
-                                 for feature in features)
+                available.update(str(item["name"]) for item in reflections.read_json(
+                    self.dm.reflections(scan=row.scan)) if item.get("name"))
             except Exception:
                 continue
         self.reflection_list.blockSignals(True)

@@ -81,6 +81,37 @@ def test_help_lists_workflow_and_defaults():
             main, [command.name, "--help"]).output
 
 
+def test_make_bins_skips_full_archive_for_active_xrf_cut(monkeypatch, tmp_path):
+    runner = CliRunner()
+    project = tmp_path / "project"
+    assert runner.invoke(main, [
+        "init", "--name", "test", "--scan-number", "24", "--root", str(project),
+    ]).exit_code == 0
+    cut_dir = project / "Metadata" / "Scan_0024"
+    cut_dir.mkdir(parents=True)
+    np.savez_compressed(
+        cut_dir / "xrf_frame_cut.npz", source_file=np.asarray(["scan_0024_00001.h5"]),
+        source_frame_index=np.asarray([0]), material=np.asarray("Br"),
+    )
+    invoked = []
+    monkeypatch.setattr("xrd_app.cli.archive_unbinned.callback",
+                        lambda **kwargs: invoked.append("archive"))
+    monkeypatch.setattr("xrd_app.cli.grid.callback", lambda **kwargs: invoked.append("grid"))
+    monkeypatch.setattr("xrd_app.cli.bin.callback", lambda **kwargs: invoked.append("bin"))
+    monkeypatch.setattr(
+        "xrd_app.core.reflection_sum.compute_and_save",
+        lambda *args, **kwargs: {"path": project / "sum.npz", "shape": (2, 2)},
+    )
+
+    result = runner.invoke(main, [
+        "make-bins", "--root", str(project), "--scan", "24", "--bin-size", "1",
+    ])
+
+    assert result.exit_code == 0, result.output
+    assert invoked == ["grid", "bin"]
+    assert "Active XRF frame cut detected" in result.output
+
+
 def test_init_requires_name_without_prompting(tmp_path):
     result = CliRunner().invoke(main, ["init", "--root", str(tmp_path)])
 
