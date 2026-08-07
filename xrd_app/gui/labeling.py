@@ -789,6 +789,8 @@ class LabelingTool(QMainWindow):
                                                         thread_name_prefix="xrd-prefetch")
         self._prefetch_future = None
         self._source_generation = 0
+        self._raw_broker = None
+        self._last_good_image = None
         self._load_project_data()
         self._current_bin_idx = 0
 
@@ -798,6 +800,9 @@ class LabelingTool(QMainWindow):
         self._available_algorithms = discover_algorithms(self.project_root, self.dm)
 
         self._build_ui()
+        self._broker_timer = QTimer(self)
+        self._broker_timer.timeout.connect(self._poll_raw_broker)
+        self._broker_timer.start(50)
         if hasattr(self, "_startup_source_note"):
             self.status_label.setText(self._startup_source_note)
             self.bin_size_status.setText("built fallback")
@@ -943,6 +948,10 @@ class LabelingTool(QMainWindow):
         if old_source is not None:
             with self._source_lock:
                 old_source.close()
+        broker = getattr(self, "_raw_broker", None)
+        if broker is not None:
+            broker.close()
+            self._raw_broker = None
         self._bin_source = None
         self.bin_size = bin_size
         # Prefer a built HDF5 for any bin size, including 1×1 (one frame per
@@ -952,17 +961,7 @@ class LabelingTool(QMainWindow):
         self.bins_h5_path = str(resolved) if resolved else None
 
         raw_keys = None
-        if not self._allow_raw_fallback:
-            from ..core import io as _io
-            local_archive = self.dm.local_frame_cache_h5()
-            local_grid = self.dm.local_grid_mapping(bin_size)
-            current_grid = self.dm.grid_mapping(bin_size=bin_size)
-            if (local_grid.is_file() and current_grid.is_file()
-                    and _io.local_frame_cache_matches(local_archive, current_grid)):
-                self._bin_source = _io.open_local_frame_cache(self.dm, bin_size)
-                raw_keys = self._bin_source.keys()
-                self.bins_h5_path = str(local_archive)
-        if raw_keys is None and self.bins_h5_path and os.path.exists(self.bins_h5_path):
+        if self.bins_h5_path and os.path.exists(self.bins_h5_path):
             try:
                 from ..core import io as _io
                 self._bin_source = _io.open_bin_source(self.dm, bin_size)
@@ -988,11 +987,24 @@ class LabelingTool(QMainWindow):
             self.n_bins = len(self.bin_keys)
             self.bin_mapping = None
         elif not self._allow_raw_fallback:
-            raise RuntimeError(
-                f"No local {bin_size}x{bin_size} bins or usable unbinned archive. "
-                "View/Label will not probe loose raw frames during GUI startup because "
-                "an unavailable network mount can block the X11 session. Build this bin "
-                "size in Programs, then reopen the tab.")
+            from ..core import io as _io
+            from ..core.raw_broker import RawImageBroker
+
+            grid_path = self.dm.grid_mapping(bin_size=bin_size)
+            if not grid_path.is_file():
+                raise RuntimeError(
+                    f"No {bin_size}x{bin_size} grid mapping is available. Prepare the "
+                    "raw view to build its small frame index without loading detector images.")
+            mapping = _io.load_grid_mapping(grid_path)
+            broker = getattr(self, "_raw_broker", None)
+            if broker is not None:
+                broker.close()
+            self._raw_broker = RawImageBroker(mapping)
+            self.bin_keys = sorted(
+                self._raw_broker.keys(),
+                key=lambda k: (int(k.split("_")[0]), int(k.split("_")[1])))
+            self.n_bins = len(self.bin_keys)
+            self.bin_mapping = None
         elif bin_size == 1:
             self._ensure_raw_grid()
             self.bin_mapping = {}
@@ -1742,6 +1754,10 @@ class LabelingTool(QMainWindow):
 
             img = None
             try:
+                broker = self.__dict__.get("_raw_broker")
+                if broker is not None:
+                    broker.request(self._source_generation, bin_key_str)
+                    return self._last_good_image
                 if self._bin_source is not None:
                     img = self._bin_source.image(bin_key_str)
                 elif self.bin_mapping is not None:
@@ -1759,9 +1775,32 @@ class LabelingTool(QMainWindow):
             if img is None:
                 return None
             self._image_cache[bin_key_str] = img
+            self._last_good_image = img
             while len(self._image_cache) > IMAGE_CACHE_MAX:
                 self._image_cache.popitem(last=False)
             return img
+
+    def _poll_raw_broker(self):
+        broker = getattr(self, "_raw_broker", None)
+        if broker is None:
+            return
+        for generation, key, image, error in broker.poll():
+            if generation != self._source_generation:
+                continue
+            if error:
+                self.status_label.setText(
+                    f"Raw detector source unavailable: {error}. The last image is "
+                    "being held; reconnect /net and select the bin again to retry.")
+                continue
+            if image is None:
+                continue
+            self._image_cache[key] = image
+            self._last_good_image = image
+            while len(self._image_cache) > IMAGE_CACHE_MAX:
+                self._image_cache.popitem(last=False)
+            current_key = self._bin_key_str(self.bin_keys[self._current_bin_idx])
+            if key == current_key:
+                self._load_and_display()
 
     def _load_current_image(self):
         try:
@@ -1776,6 +1815,8 @@ class LabelingTool(QMainWindow):
         return image
 
     def _prefetch_adjacent(self):
+        if self.__dict__.get("_raw_broker") is not None:
+            return
         generation = self._source_generation
         indices = [i for i in (self._current_bin_idx + 1, self._current_bin_idx - 1)
                    if 0 <= i < self.n_bins]
@@ -2234,6 +2275,10 @@ class LabelingTool(QMainWindow):
             with self._source_lock:
                 source.close()
                 self._bin_source = None
+        broker = getattr(self, "_raw_broker", None)
+        if broker is not None:
+            broker.close()
+            self._raw_broker = None
         event.accept()
 
 

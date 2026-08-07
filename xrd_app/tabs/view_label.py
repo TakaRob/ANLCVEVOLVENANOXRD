@@ -5,7 +5,7 @@ from __future__ import annotations
 from ..gui import labeling
 
 
-def _cache_panel(project_root, scan, bin_size, error):
+def _prepare_panel(project_root, scan, bin_size, error):
     from PyQt5.QtCore import Qt
     from PyQt5.QtWidgets import QLabel, QPushButton, QVBoxLayout, QWidget
 
@@ -14,16 +14,16 @@ def _cache_panel(project_root, scan, bin_size, error):
     panel = QWidget()
     layout = QVBoxLayout(panel)
     message = QLabel(
-        "No local detector data is available for View/Label. Build a machine-local "
-        "cache from the raw source; the copy runs in a separate process so a stalled "
-        "network mount cannot freeze the GUI.")
+        "View/Label needs a small frame-to-grid index before it can request raw "
+        "detector images through the isolated in-memory broker. No detector-image "
+        "cache will be created.")
     message.setWordWrap(True)
     message.setAlignment(Qt.AlignCenter)
     detail = QLabel(str(error))
     detail.setWordWrap(True)
     detail.setAlignment(Qt.AlignCenter)
     detail.setStyleSheet("color:#888;")
-    button = QPushButton("Build local raw cache")
+    button = QPushButton("Prepare raw view")
     console = JobConsole()
     console.setVisible(False)
     layout.addStretch()
@@ -46,17 +46,17 @@ def _cache_panel(project_root, scan, bin_size, error):
         layout.addWidget(replacement)
         panel._embedded_window = replacement
 
-    def build_cache():
+    def prepare():
         button.setEnabled(False)
         console.setVisible(True)
         console.run([
-            "cache-raw", "--root", project_root, "--scan", str(scan),
+            "grid", "--root", project_root, "--scan", str(scan),
             "--bin-size", str(bin_size),
         ], on_finished=finished)
 
-    button.clicked.connect(build_cache)
-    panel._cache_button = button
-    panel._cache_console = console
+    button.clicked.connect(prepare)
+    panel._prepare_button = button
+    panel._prepare_console = console
     return panel
 
 TAB_META = {
@@ -84,7 +84,7 @@ def make_tab(project_root=".", scan=None, bin_size=3):
         win = labeling.build_window(
             project_root, scan=scan, bin_size=bin_size, allow_raw_fallback=False)
     except (RuntimeError, FileNotFoundError, OSError) as error:
-        return _cache_panel(project_root, scan, bin_size, error)
+        return _prepare_panel(project_root, scan, bin_size, error)
 
     def save_algo():
         from .save_algorithm_dialog import SaveAlgorithmDialog

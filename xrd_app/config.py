@@ -26,7 +26,6 @@ project-owned ``Algorithms/`` libraries.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import re
@@ -431,20 +430,6 @@ class DataManager:
         """Per-scan metadata dir (grid mapping, per-scan reflections/tth)."""
         name = self._scan(scan)
         return (self.metadata_dir / name) if name else self.metadata_dir
-
-    def local_cache_dir(self, scan: object = None) -> Path:
-        """Machine-local cache directory, isolated by project identity and scan."""
-        base = Path(os.environ.get("XRD_APP_CACHE_DIR", "~/.cache/xrd-app")).expanduser()
-        project_id = hashlib.sha256(str(self.root.resolve()).encode()).hexdigest()[:16]
-        return base / project_id / (self._scan(scan) or "project")
-
-    def local_frame_cache_h5(self, scan: object = None) -> Path:
-        """Sparse lossless raw-frame cache used by interactive viewers."""
-        return self.local_cache_dir(scan) / "xrd_frame_cache.h5"
-
-    def local_grid_mapping(self, bin_size: int, scan: object = None) -> Path:
-        """Grid mapping copied beside the machine-local frame cache."""
-        return self.local_cache_dir(scan) / f"grid_mapping_{bin_size}x{bin_size}.h5"
 
     # ----- algorithm output files -------------------------------------
     def peaks_path(self, algo: str, bin_size: int, scan: object = None,

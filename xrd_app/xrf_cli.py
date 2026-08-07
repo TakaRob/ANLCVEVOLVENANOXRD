@@ -295,6 +295,11 @@ def link_dataset(scan, definitions, root):
               help="Optional xrd-app project root (otherwise choose in Setup)")
 def gui(root):
     """Launch XRF setup and analysis; no project path is required."""
+    click.echo(
+        "If xrd-app has not loaded after about 8 seconds, or the X11 connection "
+        "breaks, restart the whole computer or kill your window manager process; a stalled "
+        "GUI/data-loading connection is likely the reason."
+    )
     from .xrf_gui import launch
 
     raise SystemExit(launch(root))

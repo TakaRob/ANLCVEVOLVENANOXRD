@@ -360,17 +360,38 @@ def test_labeling_finds_nearest_readable_built_bins_without_raw_frames(tmp_path)
     assert "opened built 3x3" in window._startup_source_note
 
 
-def test_labeling_embedded_startup_does_not_probe_raw_network(monkeypatch, tmp_path):
+def test_labeling_embedded_startup_uses_broker_without_raw_probe(monkeypatch, tmp_path):
+    from xrd_app.core import io
+
     window = LabelingTool.__new__(LabelingTool)
     window.dm = DataManager(tmp_path, scan=7)
     window._allow_raw_fallback = False
     window._source_generation = 0
     window._prefetch_future = None
     window._bin_source = None
+    window._raw_broker = None
     window._ensure_raw_grid = lambda: pytest.fail("raw network was probed")
+    grid = window.dm.grid_mapping(bin_size=1)
+    io.save_grid_mapping(grid, {
+        "bin_size": 1, "bins": {"0_0": [0]},
+        "xrd_files": ["/net/raw.h5"], "frame_map": [[0, 0]],
+    })
 
-    with pytest.raises(RuntimeError, match="will not probe loose raw frames"):
-        window._load_bin_data_for_size(1)
+    class Broker:
+        def __init__(self, mapping):
+            self.mapping = mapping
+
+        def keys(self):
+            return ["0_0"]
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr("xrd_app.core.raw_broker.RawImageBroker", Broker)
+    window._load_bin_data_for_size(1)
+
+    assert window.bin_keys == ["0_0"]
+    assert isinstance(window._raw_broker, Broker)
 
 
 def test_labeling_prefetch_does_not_cache_transient_read_failure():

@@ -81,6 +81,18 @@ def test_help_lists_workflow_and_defaults():
             main, [command.name, "--help"]).output
 
 
+def test_gui_prints_ssh_x11_recovery_notice(monkeypatch):
+    monkeypatch.setattr("xrd_app.app.launch_app", lambda *args, **kwargs: 0)
+
+    result = CliRunner().invoke(main, ["gui", "--fresh"])
+
+    assert result.exit_code == 0
+    assert "after about 8 seconds" in result.output
+    assert "X11 connection breaks" in result.output
+    assert "restart the whole computer" in result.output
+    assert "kill your window manager process" in result.output
+
+
 def test_make_bins_skips_full_archive_for_active_xrf_cut(monkeypatch, tmp_path):
     runner = CliRunner()
     project = tmp_path / "project"
