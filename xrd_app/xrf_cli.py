@@ -293,19 +293,8 @@ def link_dataset(scan, definitions, root):
 @main.command()
 @click.option("--root", type=click.Path(path_type=Path), default=None,
               help="Optional xrd-app project root (otherwise choose in Setup)")
-@click.option("--safe-rendering", is_flag=True,
-              help="Disable GPU/GL integration when local or forwarded rendering fails")
-def gui(root, safe_rendering):
+def gui(root):
     """Launch XRF setup and analysis; no project path is required."""
-    from .cli import _prepare_qt_environment, _probe_qt_display
-
-    missing = _prepare_qt_environment(safe_rendering=safe_rendering)
-    if missing:
-        raise click.ClickException(
-            "Qt's xcb platform plugin is missing dependencies: " + ", ".join(missing)
-        )
-    if os.environ.get("SSH_CONNECTION") or os.environ.get("SSH_CLIENT") or safe_rendering:
-        _probe_qt_display()
     from .xrf_gui import launch
 
     raise SystemExit(launch(root))

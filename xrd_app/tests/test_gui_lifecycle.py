@@ -13,7 +13,8 @@ import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PyQt5.QtCore import QProcess, QThread, pyqtSignal
+from PyQt5.QtCore import QPoint, QProcess, QThread, Qt, pyqtSignal
+from PyQt5.QtGui import QCursor
 from PyQt5.QtWidgets import (
     QApplication, QComboBox, QLabel, QListWidget, QMainWindow, QPlainTextEdit,
     QProgressBar, QPushButton, QSpinBox, QWidget,
@@ -28,7 +29,9 @@ from xrd_app.gui.roi_shape import ROIShapeWindow
 from xrd_app.gui.device_map import QRangeSlider
 from xrd_app.gui.labeling import LabelingTool
 from xrd_app.gui import lifecycle
-from xrd_app.gui.lifecycle import dispose_widget, start_process, stop_process, stop_thread
+from xrd_app.gui.lifecycle import (
+    dispose_widget, install_visible_cursor, start_process, stop_process, stop_thread,
+)
 from xrd_app.tabs import _console
 from xrd_app.tabs._console import JobConsole
 from xrd_app.tabs.cvevolve_dialog import CVEvolveDialog
@@ -163,6 +166,24 @@ def test_range_slider_remains_linear_by_default():
     slider.resize(216, slider.height())
 
     assert slider._x_to_val(108) in (50, 51)
+
+
+def test_visible_cursor_uses_mouse_transparent_window_overlay(monkeypatch):
+    app = _app()
+    window = QWidget()
+    window.setGeometry(10, 10, 200, 200)
+    window.show()
+    app.processEvents()
+    manager = install_visible_cursor(app)
+    monkeypatch.setattr(QCursor, "pos", lambda: window.mapToGlobal(QPoint(20, 30)))
+
+    manager._update()
+
+    overlay = manager.overlays[window]
+    assert overlay.isVisible()
+    assert overlay.testAttribute(Qt.WA_TransparentForMouseEvents)
+    assert overlay.pos() == QPoint(18, 29)
+    window.close()
 
 
 def test_dispose_widget_closes_before_deferred_delete():

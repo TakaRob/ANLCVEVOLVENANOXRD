@@ -5,10 +5,79 @@ import shutil
 import signal
 import time
 
-from PyQt5.QtCore import QProcess, QTimer
+from PyQt5.QtCore import QObject, QPoint, QProcess, Qt, QTimer
+from PyQt5.QtGui import QColor, QCursor, QPainter, QPen, QPixmap, QPolygon
+from PyQt5.QtWidgets import QWidget
 
 
 _PROCESS_GROUP_PROPERTY = "_xrd_owned_process_group"
+
+
+class _CursorOverlay(QWidget):
+    """Draw an arrow inside a window without relying on the native cursor plane."""
+
+    def __init__(self, window):
+        super().__init__(window)
+        self.setAttribute(Qt.WA_TransparentForMouseEvents)
+        self.setAttribute(Qt.WA_TranslucentBackground)
+        self.setFocusPolicy(Qt.NoFocus)
+        self.resize(24, 32)
+
+    def paintEvent(self, event):  # noqa: N802 (Qt signature)
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        points = QPolygon([
+            QPoint(2, 1), QPoint(2, 25), QPoint(8, 19), QPoint(13, 30),
+            QPoint(18, 28), QPoint(13, 17), QPoint(22, 17),
+        ])
+        painter.setPen(QPen(QColor("white"), 3, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        painter.setBrush(QColor("black"))
+        painter.drawPolygon(points)
+        painter.setPen(QPen(QColor("black"), 1, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        painter.drawPolygon(points)
+
+
+class _CursorOverlayManager(QObject):
+    def __init__(self, application):
+        super().__init__(application)
+        self.application = application
+        self.overlays = {}
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self._update)
+        self.timer.start(16)
+
+    def _update(self):
+        position = QCursor.pos()
+        active = None
+        for window in self.application.topLevelWidgets():
+            if not window.isWindow() or not window.isVisible():
+                continue
+            local = window.mapFromGlobal(position)
+            if window.rect().contains(local):
+                active = window
+                overlay = self.overlays.get(window)
+                if overlay is None:
+                    overlay = _CursorOverlay(window)
+                    self.overlays[window] = overlay
+                overlay.move(local.x() - 2, local.y() - 1)
+                overlay.raise_()
+                overlay.show()
+                break
+        for window, overlay in list(self.overlays.items()):
+            if not window.isVisible():
+                overlay.deleteLater()
+                del self.overlays[window]
+            elif window is not active:
+                overlay.hide()
+
+
+def install_visible_cursor(application):
+    """Install a cursor rendered as normal window content on all app windows."""
+    manager = getattr(application, "_xrd_cursor_overlay_manager", None)
+    if manager is None:
+        manager = _CursorOverlayManager(application)
+        application._xrd_cursor_overlay_manager = manager
+    return manager
 
 
 def start_process(process, program, arguments=()):
