@@ -341,6 +341,48 @@ def test_grid_rebuild_uses_positions_embedded_in_archive(tmp_path):
     assert sorted(i for frames in gm["bins"].values() for i in frames) == [0, 1, 2, 3]
 
 
+def test_sparse_local_frame_cache_reads_only_retained_frames(tmp_path, monkeypatch):
+    dm = _project(tmp_path)
+    monkeypatch.setenv("XRD_APP_CACHE_DIR", str(tmp_path / "local-cache"))
+    raw_file = tmp_path / "Raw" / "Scan_0007" / "XRD" / "scan_0007_00001.h5"
+    _raw_file(raw_file, np.stack([
+        np.full((2, 2), value, dtype=np.uint16) for value in (1, 10, 100)
+    ]))
+    mapping = {
+        "bin_size": 1, "n_bin_rows": 1, "n_bin_cols": 2,
+        "xrd_files": [str(raw_file)], "frame_map": [[0, 0], [0, 1], [0, 2]],
+        "bins": {"0_0": [0], "0_1": [2]},
+    }
+    local_grid = dm.local_grid_mapping(1)
+    io.save_grid_mapping(local_grid, mapping)
+    cache = io.build_local_frame_cache(
+        mapping, dm.local_frame_cache_h5(), compression="gzip", log=lambda _: None)
+
+    assert io.local_frame_cache_matches(cache, mapping)
+    changed = dict(mapping, bins={"0_0": [1]})
+    assert not io.local_frame_cache_matches(cache, changed)
+    with h5py.File(cache, "r") as handle:
+        np.testing.assert_array_equal(
+            handle["metadata/cached_global_index"][:], [0, 2])
+    source = io.open_local_frame_cache(dm, 1)
+    try:
+        np.testing.assert_array_equal(source.image("0_0"), np.full((2, 2), 1.0))
+        np.testing.assert_array_equal(source.image("0_1"), np.full((2, 2), 100.0))
+    finally:
+        source.close()
+
+
+def test_local_cache_path_honors_override_and_isolates_projects(tmp_path, monkeypatch):
+    cache_root = tmp_path / "cache"
+    monkeypatch.setenv("XRD_APP_CACHE_DIR", str(cache_root))
+    first = _project(tmp_path / "first")
+    second = _project(tmp_path / "second")
+
+    assert cache_root in first.local_frame_cache_h5().parents
+    assert first.local_frame_cache_h5() != second.local_frame_cache_h5()
+    assert first.local_frame_cache_h5().name == "xrd_frame_cache.h5"
+
+
 def test_unbinned_archive_path_is_separate_from_1x1_bins(tmp_path):
     dm = _project(tmp_path)
     assert dm.unbinned_archive_h5(scan=7).name == "xrd_unbinned_archive.h5"

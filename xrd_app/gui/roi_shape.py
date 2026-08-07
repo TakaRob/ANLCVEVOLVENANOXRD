@@ -995,7 +995,6 @@ class ROIShapeWindow(QMainWindow):
         self._update_crop_controls()
         self._draw_sample_crop()
         self._render_feature()
-        self._load_detector_image()
 
     def _remove_pending(self):
         row = self.pending_list.currentRow()

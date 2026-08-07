@@ -1270,6 +1270,112 @@ def build_unbinned_archive(
     return output
 
 
+def local_frame_cache_matches(cache: Union[str, Path], grid_mapping) -> bool:
+    """Return whether a sparse local cache contains exactly the retained frames."""
+    cache = Path(cache)
+    if not cache.is_file():
+        return False
+    gm = load_grid_mapping(grid_mapping)
+    selected = np.asarray(sorted({
+        int(gi) for values in gm["bins"].values() for gi in values
+    }), dtype=np.int64)
+    try:
+        with h5py.File(cache, "r") as handle:
+            if handle.attrs.get("format") != ARCHIVE_FORMAT:
+                return False
+            cached = handle[f"{ARCHIVE_METADATA}/cached_global_index"][:]
+    except (OSError, KeyError, ValueError):
+        return False
+    return np.array_equal(cached, selected)
+
+
+def build_local_frame_cache(
+    grid_mapping: Union[str, Path],
+    output: Union[str, Path],
+    compression: str = "zstd",
+    log: Callable[[str], None] = print,
+    progress: Optional[Callable[[int, int], None]] = None,
+) -> Path:
+    """Cache only grid-retained raw frames in a sparse acquisition-indexed archive."""
+    gm = load_grid_mapping(grid_mapping)
+    frame_map = gm["frame_map"]
+    xrd_files = [Path(path) for path in gm["xrd_files"]]
+    selected = sorted({int(gi) for values in gm["bins"].values() for gi in values})
+    if not selected:
+        raise ValueError("The grid/XRF cut retains no detector frames")
+
+    first_file, first_local = frame_map[selected[0]]
+    with h5py.File(xrd_files[int(first_file)], "r") as source:
+        dataset = source[H5_DATASET]
+        shape = tuple(int(value) for value in dataset.shape[1:])
+        dtype = dataset.dtype
+
+    output = Path(output)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    tmp = output.with_name(output.name + ".tmp")
+    if tmp.exists():
+        tmp.unlink()
+    comp_kwargs, compression_label = get_compression_kwargs(compression, bitshuffle=True)
+    log(f"Caching {len(selected)} selected frames locally -> {output}")
+
+    handle = None
+    try:
+        handle = h5py.File(tmp, "w")
+        handle.attrs["format"] = ARCHIVE_FORMAT
+        handle.attrs["format_version"] = ARCHIVE_VERSION
+        handle.attrs["n_frames"] = len(frame_map)
+        handle.attrs["n_cached_frames"] = len(selected)
+        handle.attrs["detector_shape"] = shape
+        handle.attrs["source_dtype"] = np.dtype(dtype).str
+        handle.attrs["source_dataset"] = H5_DATASET
+        handle.attrs["compression"] = compression_label
+        handle.attrs["local_sparse_cache"] = True
+        frames = handle.create_dataset(
+            ARCHIVE_FRAMES, shape=(len(frame_map), *shape), dtype=dtype,
+            chunks=(1, *shape), fillvalue=0, **comp_kwargs)
+        meta = handle.create_group(ARCHIVE_METADATA)
+        strings = h5py.string_dtype(encoding="utf-8")
+        meta.create_dataset("source_files", data=[str(path) for path in xrd_files],
+                            dtype=strings)
+        meta.create_dataset("source_file_index", data=np.asarray(
+            [pair[0] for pair in frame_map], dtype=np.int32))
+        meta.create_dataset("source_frame_index", data=np.asarray(
+            [pair[1] for pair in frame_map], dtype=np.int32))
+        meta.create_dataset("cached_global_index", data=np.asarray(selected, dtype=np.int64))
+
+        open_file = open_index = None
+        try:
+            for done, global_index in enumerate(selected, start=1):
+                file_index, local_index = frame_map[global_index]
+                file_index = int(file_index)
+                if file_index != open_index:
+                    if open_file is not None:
+                        open_file.close()
+                    open_file = h5py.File(xrd_files[file_index], "r")
+                    open_index = file_index
+                frames[global_index] = open_file[H5_DATASET][int(local_index)]
+                if progress is not None:
+                    progress(done, len(selected))
+                elif done == 1 or done % 100 == 0 or done == len(selected):
+                    log(f"PROGRESS {done}/{len(selected)} frames")
+        finally:
+            if open_file is not None:
+                open_file.close()
+        handle.flush()
+        handle.close()
+        handle = None
+        os.replace(tmp, output)
+    finally:
+        if handle is not None:
+            handle.close()
+        if tmp.exists():
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+    return output
+
+
 class FrameStore:
     """Acquisition-indexed detector frames from an archive or loose raw files."""
 
@@ -1846,6 +1952,16 @@ class _RawSource(BinImageSource):
 
     def close(self):
         self._cache.clear()
+
+
+def open_local_frame_cache(dm, bin_size, scan=None) -> BinImageSource:
+    """Open a machine-local sparse frame cache with its copied grid mapping."""
+    archive = dm.local_frame_cache_h5(scan)
+    mapping = dm.local_grid_mapping(bin_size, scan)
+    if not archive.is_file() or not mapping.is_file():
+        raise FileNotFoundError(
+            f"No local {bin_size}x{bin_size} frame cache for {dm._scan(scan)}")
+    return _ArchiveSource(archive, mapping)
 
 
 def open_bin_source(dm, bin_size, scan=None, n_cols=None, grid_mapping=None,

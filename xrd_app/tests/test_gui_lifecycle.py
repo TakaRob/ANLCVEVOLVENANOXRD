@@ -4,6 +4,7 @@ import os
 import json
 import shutil
 import sys
+import threading
 import time
 from types import SimpleNamespace
 
@@ -312,6 +313,23 @@ def test_detector_view_intensity_bar_tracks_image_levels():
     view.close()
 
 
+def test_roi_selection_does_not_reload_detector_image():
+    _app()
+    window = SimpleNamespace(
+        pending=[{"roi": (1, 2, 3, 4), "rect": None, "feature": None}],
+        roi_label=QLabel(),
+        _update_crop_controls=lambda: None,
+        _draw_sample_crop=lambda: None,
+        _render_feature=lambda: None,
+        _load_detector_image=lambda: pytest.fail("ROI selection reset detector levels"),
+    )
+
+    ROIShapeWindow._pending_selected(window, 0)
+
+    assert window.roi == (1, 2, 3, 4)
+    assert window.roi_label.text() == "1, 2, 3, 4"
+
+
 def test_labeling_finds_nearest_readable_built_bins_without_raw_frames(tmp_path):
     binned = tmp_path / "Binned" / "Scan_0007"
     binned.mkdir(parents=True)
@@ -340,6 +358,46 @@ def test_labeling_finds_nearest_readable_built_bins_without_raw_frames(tmp_path)
     assert loaded == [3]
     assert window.bin_size == 3
     assert "opened built 3x3" in window._startup_source_note
+
+
+def test_labeling_embedded_startup_does_not_probe_raw_network(monkeypatch, tmp_path):
+    window = LabelingTool.__new__(LabelingTool)
+    window.dm = DataManager(tmp_path, scan=7)
+    window._allow_raw_fallback = False
+    window._source_generation = 0
+    window._prefetch_future = None
+    window._bin_source = None
+    window._ensure_raw_grid = lambda: pytest.fail("raw network was probed")
+
+    with pytest.raises(RuntimeError, match="will not probe loose raw frames"):
+        window._load_bin_data_for_size(1)
+
+
+def test_labeling_prefetch_does_not_cache_transient_read_failure():
+    window = LabelingTool.__new__(LabelingTool)
+    window.bin_keys = ["0_0"]
+    window._source_generation = 1
+    window._source_lock = threading.RLock()
+    window._image_cache = {}
+    window.bin_mapping = None
+    window._bin_source = SimpleNamespace(
+        image=lambda _key: (_ for _ in ()).throw(RuntimeError("network unavailable")))
+
+    assert window._load_image_at(0, generation=1) is None
+    assert window._image_cache == {}
+    with pytest.raises(RuntimeError, match="network unavailable"):
+        window._load_image_at(0)
+
+
+def test_labeling_foreground_network_failure_updates_status():
+    window = LabelingTool.__new__(LabelingTool)
+    window._current_bin_idx = 0
+    window.status_label = QLabel()
+    window._load_image_at = lambda _index: (_ for _ in ()).throw(
+        RuntimeError("network unavailable"))
+
+    assert window._load_current_image() is None
+    assert "temporarily unavailable" in window.status_label.text()
 
 
 def test_roi_job_controls_and_overlap_guard(monkeypatch):

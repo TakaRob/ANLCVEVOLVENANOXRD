@@ -764,7 +764,8 @@ class LabelingTool(QMainWindow):
 
     bin_size_changed = pyqtSignal(int)
 
-    def __init__(self, project_root=None, data_manager=None, scan=None, bin_size=None):
+    def __init__(self, project_root=None, data_manager=None, scan=None, bin_size=None,
+                 allow_raw_fallback=True):
         super().__init__()
         self.setWindowTitle("XRD Bin Analysis & Labeling Tool")
         self.setGeometry(60, 30, 1600, 1000)
@@ -781,6 +782,7 @@ class LabelingTool(QMainWindow):
         self.bin_size = int(bin_size) if bin_size is not None and int(bin_size) > 0 else 5
         self._labeling_enabled = False
         self._init_done = False
+        self._allow_raw_fallback = bool(allow_raw_fallback)
 
         self._source_lock = threading.RLock()
         self._prefetch_executor = ThreadPoolExecutor(max_workers=1,
@@ -950,7 +952,15 @@ class LabelingTool(QMainWindow):
         self.bins_h5_path = str(resolved) if resolved else None
 
         raw_keys = None
-        if self.bins_h5_path and os.path.exists(self.bins_h5_path):
+        if not self._allow_raw_fallback:
+            from ..core import io as _io
+            local_archive = self.dm.local_frame_cache_h5()
+            local_grid = self.dm.local_grid_mapping(bin_size)
+            if local_archive.is_file() and local_grid.is_file():
+                self._bin_source = _io.open_local_frame_cache(self.dm, bin_size)
+                raw_keys = self._bin_source.keys()
+                self.bins_h5_path = str(local_archive)
+        if raw_keys is None and self.bins_h5_path and os.path.exists(self.bins_h5_path):
             try:
                 from ..core import io as _io
                 self._bin_source = _io.open_bin_source(self.dm, bin_size)
@@ -975,6 +985,12 @@ class LabelingTool(QMainWindow):
             self.bin_keys = self._bin_source.keys()
             self.n_bins = len(self.bin_keys)
             self.bin_mapping = None
+        elif not self._allow_raw_fallback:
+            raise RuntimeError(
+                f"No local {bin_size}x{bin_size} bins or usable unbinned archive. "
+                "View/Label will not probe loose raw frames during GUI startup because "
+                "an unavailable network mount can block the X11 session. Build this bin "
+                "size in Programs, then reopen the tab.")
         elif bin_size == 1:
             self._ensure_raw_grid()
             self.bin_mapping = {}
@@ -1723,19 +1739,22 @@ class LabelingTool(QMainWindow):
                 return self._image_cache[bin_key_str]
 
             img = None
-            if self._bin_source is not None:
-                try:
+            try:
+                if self._bin_source is not None:
                     img = self._bin_source.image(bin_key_str)
-                except OSError:
-                    # Prefetch runs off the GUI thread, so leave user-facing error
-                    # reporting to the next foreground read.
-                    if generation is None:
-                        raise
-            elif self.bin_mapping is not None:
-                frames = self.bin_mapping[bk]
-                img = load_and_sum_frames(frames, self.xrd_files, self.xrd_file_map)
+                elif self.bin_mapping is not None:
+                    frames = self.bin_mapping[bk]
+                    img = load_and_sum_frames(frames, self.xrd_files, self.xrd_file_map)
+            except (OSError, RuntimeError, KeyError, ValueError):
+                # Prefetch runs off the GUI thread, so leave user-facing error
+                # reporting to the next foreground read.
+                if generation is None:
+                    raise
+                return None
 
             if generation is not None and generation != self._source_generation:
+                return None
+            if img is None:
                 return None
             self._image_cache[bin_key_str] = img
             while len(self._image_cache) > IMAGE_CACHE_MAX:
@@ -1744,10 +1763,15 @@ class LabelingTool(QMainWindow):
 
     def _load_current_image(self):
         try:
-            return self._load_image_at(self._current_bin_idx)
-        except OSError as error:
-            self._warn_bins_unreadable(error)
+            image = self._load_image_at(self._current_bin_idx)
+        except (OSError, RuntimeError, KeyError, ValueError) as error:
+            status = getattr(self, "status_label", None)
+            if status is not None:
+                status.setText(
+                    f"Detector data temporarily unavailable: {error}. "
+                    "Reconnect the data source and retry this bin.")
             return None
+        return image
 
     def _prefetch_adjacent(self):
         generation = self._source_generation
@@ -2213,9 +2237,11 @@ class LabelingTool(QMainWindow):
 
 # ===== Entry point =====
 
-def build_window(project_root=".", scan=None, bin_size=3):
+def build_window(project_root=".", scan=None, bin_size=3, allow_raw_fallback=True):
     """Construct the labeling window without an event loop (for embedding as a tab)."""
-    return LabelingTool(project_root=project_root, scan=scan, bin_size=bin_size)
+    return LabelingTool(
+        project_root=project_root, scan=scan, bin_size=bin_size,
+        allow_raw_fallback=allow_raw_fallback)
 
 
 def launch_gui(project_root=".", scan=None):

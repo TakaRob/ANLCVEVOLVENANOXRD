@@ -967,6 +967,42 @@ def create_positions(scan, socket_dir, reduction, from_h5, output, force, root):
 
 
 # ─────────────────────────────────────────────────────────────────────
+# cache-raw — machine-local sparse raw-frame cache for interactive viewing
+# ─────────────────────────────────────────────────────────────────────
+@main.command(name='cache-raw')
+@click.option('--scan', default=None, help='Scan number/name (defaults to config scan)')
+@click.option('--bin-size', type=click.IntRange(min=1), default=1,
+              help='Grid size whose retained frames should be cached')
+@click.option('--compression', type=click.Choice(['zstd', 'gzip', 'lz4', 'none']),
+              default='zstd')
+@click.option('--force', is_flag=True, help='Replace an existing local cache')
+@click.option('--root', default='.', help='Project root directory')
+@click.pass_context
+def cache_raw(ctx, scan, bin_size, compression, force, root):
+    """Build a machine-local raw-frame cache for View/Label."""
+    from .core import io
+
+    dm = DataManager(root, scan=scan)
+    grid_path = dm.grid_mapping(bin_size=bin_size, scan=scan)
+    if not grid_path.exists():
+        click.echo(f"Building {bin_size}x{bin_size} grid mapping before caching...")
+        ctx.invoke(grid, bin_size=bin_size, scan=scan, root=root)
+    local_archive = dm.local_frame_cache_h5(scan)
+    local_grid = dm.local_grid_mapping(bin_size, scan)
+    mapping = io.load_grid_mapping(grid_path)
+    if not force and io.local_frame_cache_matches(local_archive, mapping):
+        io.save_grid_mapping(local_grid, mapping)
+        click.echo(f"Local raw cache matches the active frame selection: {local_archive}")
+        return
+
+    io.save_grid_mapping(local_grid, mapping)
+    io.build_local_frame_cache(
+        mapping, local_archive, compression=compression, log=click.echo)
+    click.echo(f"Local View/Label cache ready -> {local_archive}")
+    click.echo(f"Local grid mapping -> {local_grid}")
+
+
+# ─────────────────────────────────────────────────────────────────────
 # archive-unbinned — lossless acquisition-order detector archive
 # ─────────────────────────────────────────────────────────────────────
 @main.command(name='archive-unbinned')

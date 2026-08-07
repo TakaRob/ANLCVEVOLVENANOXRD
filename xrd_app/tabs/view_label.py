@@ -4,6 +4,61 @@ from __future__ import annotations
 
 from ..gui import labeling
 
+
+def _cache_panel(project_root, scan, bin_size, error):
+    from PyQt5.QtCore import Qt
+    from PyQt5.QtWidgets import QLabel, QPushButton, QVBoxLayout, QWidget
+
+    from ._console import JobConsole
+
+    panel = QWidget()
+    layout = QVBoxLayout(panel)
+    message = QLabel(
+        "No local detector data is available for View/Label. Build a machine-local "
+        "cache from the raw source; the copy runs in a separate process so a stalled "
+        "network mount cannot freeze the GUI.")
+    message.setWordWrap(True)
+    message.setAlignment(Qt.AlignCenter)
+    detail = QLabel(str(error))
+    detail.setWordWrap(True)
+    detail.setAlignment(Qt.AlignCenter)
+    detail.setStyleSheet("color:#888;")
+    button = QPushButton("Build local raw cache")
+    console = JobConsole()
+    console.setVisible(False)
+    layout.addStretch()
+    layout.addWidget(message)
+    layout.addWidget(detail)
+    layout.addWidget(button, alignment=Qt.AlignCenter)
+    layout.addWidget(console, 1)
+    layout.addStretch()
+
+    def finished(code):
+        if code != 0:
+            button.setEnabled(True)
+            return
+        replacement = make_tab(project_root, scan=scan, bin_size=bin_size)
+        while layout.count():
+            item = layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        layout.addWidget(replacement)
+        panel._embedded_window = replacement
+
+    def build_cache():
+        button.setEnabled(False)
+        console.setVisible(True)
+        console.run([
+            "cache-raw", "--root", project_root, "--scan", str(scan),
+            "--bin-size", str(bin_size),
+        ], on_finished=finished)
+
+    button.clicked.connect(build_cache)
+    panel._cache_button = button
+    panel._cache_console = console
+    return panel
+
 TAB_META = {
     "title": "View/Label",
     "order": 30,
@@ -23,7 +78,13 @@ def make_tab(project_root=".", scan=None, bin_size=3):
         QHBoxLayout, QPushButton, QVBoxLayout, QWidget,
     )
 
-    win = labeling.build_window(project_root, scan=scan, bin_size=bin_size)
+    # Never probe loose network-backed frames while constructing the main GUI.
+    # A stalled mount can otherwise block Qt before the application window maps.
+    try:
+        win = labeling.build_window(
+            project_root, scan=scan, bin_size=bin_size, allow_raw_fallback=False)
+    except (RuntimeError, FileNotFoundError, OSError) as error:
+        return _cache_panel(project_root, scan, bin_size, error)
 
     def save_algo():
         from .save_algorithm_dialog import SaveAlgorithmDialog
