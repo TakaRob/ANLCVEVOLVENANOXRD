@@ -956,7 +956,9 @@ class LabelingTool(QMainWindow):
             from ..core import io as _io
             local_archive = self.dm.local_frame_cache_h5()
             local_grid = self.dm.local_grid_mapping(bin_size)
-            if local_archive.is_file() and local_grid.is_file():
+            current_grid = self.dm.grid_mapping(bin_size=bin_size)
+            if (local_grid.is_file() and current_grid.is_file()
+                    and _io.local_frame_cache_matches(local_archive, current_grid)):
                 self._bin_source = _io.open_local_frame_cache(self.dm, bin_size)
                 raw_keys = self._bin_source.keys()
                 self.bins_h5_path = str(local_archive)
