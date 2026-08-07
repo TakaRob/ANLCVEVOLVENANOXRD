@@ -240,13 +240,32 @@ class XRFProject:
         """Canonical project-owned position-offset calibration."""
         return self.path("metadata_dir") / "position_offset.json"
 
+    def restore_position_offset(self):
+        """Migrate a configured external offset into the canonical project path."""
+        destination = self.position_offset_path()
+        if destination.exists():
+            relative = str(destination.relative_to(self.addon_root))
+            if (self.data.get("data_sources") or {}).get("position_offset") != relative:
+                self.data.setdefault("data_sources", {})["position_offset"] = relative
+                self.save()
+            return destination
+        configured = (self.data.get("data_sources") or {}).get("position_offset")
+        if not configured:
+            return destination
+        source = Path(configured)
+        if not source.is_absolute():
+            source = self.addon_root / source
+        if source.is_file():
+            return self.set_position_offset(source)
+        return destination
+
     def set_position_offset(self, path):
         """Copy a validated position-offset JSON to its canonical project path."""
         source = Path(path).resolve()
         destination = self.position_offset_path()
         destination.parent.mkdir(parents=True, exist_ok=True)
         if source != destination.resolve():
-            shutil.copy2(source, destination)
+            shutil.copyfile(source, destination)
         self.data.setdefault("data_sources", {})["position_offset"] = str(
             destination.relative_to(self.addon_root)
         )

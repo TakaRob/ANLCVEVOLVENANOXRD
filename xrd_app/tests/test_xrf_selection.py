@@ -100,6 +100,26 @@ def test_position_offset_is_copied_to_canonical_project_path(tmp_path):
     assert not destination.is_symlink()
 
 
+def test_position_offset_is_restored_from_legacy_external_path(tmp_path):
+    config = ProjectConfig(tmp_path, data=default_config("existing", tmp_path))
+    config.create_tree()
+    config.save()
+    project = XRFProject.load(tmp_path).create_addon()
+    destination = project.position_offset_path()
+    destination.unlink()
+    source = tmp_path / "legacy-offset.json"
+    source.write_text(json.dumps({"theta": [3.0], "y_offset": [-4.0]}))
+    project.data["data_sources"]["position_offset"] = str(source)
+    project.save()
+
+    restored = XRFProject.load(tmp_path).restore_position_offset()
+
+    assert restored == destination
+    assert json.loads(destination.read_text()) == {"theta": [3.0], "y_offset": [-4.0]}
+    reloaded = XRFProject.load(tmp_path)
+    assert reloaded.data["data_sources"]["position_offset"] == "Metadata/position_offset.json"
+
+
 def test_threshold_recalculation_uses_full_cached_intensities():
     updated = xrf_selection.apply_threshold(_selection(), "Br", 25)
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 from pathlib import Path
 
@@ -227,6 +228,7 @@ def link_dataset(scan, definitions, root):
     from .core import io
 
     project = XRFProject.load(root)
+    project.restore_position_offset()
     name = scan_name(scan)
     record = (project.data.get("scans") or {}).get(name, {})
     me7_dir = record.get("me7_dir")
@@ -291,8 +293,19 @@ def link_dataset(scan, definitions, root):
 @main.command()
 @click.option("--root", type=click.Path(path_type=Path), default=None,
               help="Optional xrd-app project root (otherwise choose in Setup)")
-def gui(root):
+@click.option("--safe-rendering", is_flag=True,
+              help="Disable GPU/GL integration when local or forwarded rendering fails")
+def gui(root, safe_rendering):
     """Launch XRF setup and analysis; no project path is required."""
+    from .cli import _prepare_qt_environment, _probe_qt_display
+
+    missing = _prepare_qt_environment(safe_rendering=safe_rendering)
+    if missing:
+        raise click.ClickException(
+            "Qt's xcb platform plugin is missing dependencies: " + ", ".join(missing)
+        )
+    if os.environ.get("SSH_CONNECTION") or os.environ.get("SSH_CLIENT") or safe_rendering:
+        _probe_qt_display()
     from .xrf_gui import launch
 
     raise SystemExit(launch(root))
@@ -314,8 +327,7 @@ def status(scan, json_output, root):
         scans = {name: scans.get(name, {})}
     report = {"project": project.data.get("name"), "root": str(project.root), "scans": {}}
     for name, record in scans.items():
-        selection_record = record.get("selection") or {}
-        path = Path(selection_record.get("path", project.selection_path(name)))
+        path = project.selection_path(name)
         entry = {"selection": str(path), "exists": path.exists()}
         if path.exists():
             try:

@@ -127,8 +127,8 @@ def test_xrf_gui_discovers_project_local_processed_files(
         },
     }
     xrf_selection.save(addon.selection_path(24), selection)
-
     window = XRFAnalysisWindow(root)
+
     try:
         assert window.scan_combo.currentText() == "Scan_0024"
         assert window.roi_table.rowCount() == 1
@@ -179,7 +179,7 @@ def test_xrf_gui_restores_last_session(application, isolated_workspace):
         assert restored.main_tabs.currentIndex() == 1
         assert restored.analysis_tabs.currentIndex() == 1
         assert restored.cut_material_combo.currentText() == "Pb"
-        assert restored.cut_minimum.value() == 7.0
+        assert restored.cut_minimum.value() == 0.0
         assert restored.size().width() == 1111
         assert restored.size().height() == 777
         assert (root / "XRF" / "Metadata" / "gui_state.json").exists()
@@ -292,6 +292,9 @@ def test_create_linked_file_does_not_load_xrd_images(
         },
     }
     xrf_selection.save(addon.selection_path(24), selection)
+    sum_path = root / "Metadata" / "Scan_0024" / "reflection_sum.npz"
+    sum_path.parent.mkdir(parents=True, exist_ok=True)
+    np.savez_compressed(sum_path, image=np.full((2, 2), 7, dtype=np.float32))
     window = XRFAnalysisWindow(root)
     try:
         monkeypatch.setattr(
@@ -303,9 +306,29 @@ def test_create_linked_file_does_not_load_xrd_images(
         assert window.create_linked_xrd_button.text() == "Created Linked .h5"
         assert window.roi_shape_load.text() == "Open ROI > Shape Check"
         assert window.roi_shape_load.isEnabled()
-        assert not (root / "Metadata" / "Scan_0024" / "reflection_sum.npz").exists()
+        window.cut_minimum.setValue(11.0)
+        assert window.create_linked_xrd_button.text() == "Created Linked .h5"
+        assert window.roi_shape_load.isEnabled()
+        with np.load(sum_path) as saved:
+            np.testing.assert_array_equal(saved["image"], np.full((2, 2), 7))
     finally:
         window.close()
+
+    reopened = XRFAnalysisWindow(root)
+    try:
+        assert reopened.cut_minimum.value() == 0.0
+        assert reopened.create_linked_xrd_button.text() == "Created Linked .h5"
+        assert reopened.roi_shape_load.isEnabled()
+        reopened.cut_minimum.setValue(11.0)
+        assert reopened.create_linked_xrd_button.text() == "Created Linked .h5"
+        reopened._save_selection()
+        assert reopened.create_linked_xrd_button.text() == "Create Linked .h5 File"
+        assert not reopened.roi_shape_load.isEnabled()
+        assert str(xrd_path.parent.parent) in reopened.project.root.joinpath(
+            "Raw", "scans.json"
+        ).read_text()
+    finally:
+        reopened.close()
 
 
 def test_material_popup_converts_units_without_changing_roi(application):

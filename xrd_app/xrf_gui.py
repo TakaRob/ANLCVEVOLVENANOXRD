@@ -589,6 +589,7 @@ class XRFAnalysisWindow(QMainWindow):
                     return False
             project.create_addon()
         project.discover_processed()
+        project.restore_position_offset()
         self.project = project
         state = self._load_state()
         self._restoring_state = True
@@ -650,14 +651,12 @@ class XRFAnalysisWindow(QMainWindow):
             material = state.get("material")
             if material and self.cut_material_combo.findText(material) >= 0:
                 self.cut_material_combo.setCurrentText(material)
-            minimum = state.get("minimum_counts")
-            if minimum is not None:
-                self.cut_minimum.setValue(float(minimum))
             main_tab = int(state.get("main_tab", 1))
             self.main_tabs.setCurrentIndex(main_tab if 0 <= main_tab < self.main_tabs.count() else 1)
             analysis_tab = int(state.get("analysis_tab", 0))
             if 0 <= analysis_tab < self.analysis_tabs.count():
                 self.analysis_tabs.setCurrentIndex(analysis_tab)
+            self._restore_linked_h5()
         else:
             self.status.setText(
                 "Raw source registered but not processed." if raw_scans
@@ -692,7 +691,6 @@ class XRFAnalysisWindow(QMainWindow):
             "main_tab": self.main_tabs.currentIndex(),
             "analysis_tab": self.analysis_tabs.currentIndex(),
             "material": self.cut_material_combo.currentText(),
-            "minimum_counts": self.cut_minimum.value(),
             "geometry": {"width": self.width(), "height": self.height()},
         }
         try:
@@ -708,8 +706,7 @@ class XRFAnalysisWindow(QMainWindow):
     def _load_scan(self, scan):
         if not scan:
             return
-        record = (self.project.data.get("scans") or {}).get(scan, {})
-        path = Path((record.get("selection") or {}).get("path", self.project.selection_path(scan)))
+        path = self.project.selection_path(scan)
         try:
             self.selection = xrf_selection.load(path)
         except (KeyError, OSError, ValueError) as exc:
@@ -1041,6 +1038,28 @@ class XRFAnalysisWindow(QMainWindow):
         self._finalize_linked_h5()
         self._preview_cut()
 
+    def _restore_linked_h5(self):
+        material = self.cut_material_combo.currentText()
+        if not xrf_selection.xrd_cut_matches(
+            self.project.root, self.scan_combo.currentText(), material, self.selection
+        ):
+            return
+        try:
+            result = xrf_selection.activate_xrd_roi_project(
+                self.project.root, self.scan_combo.currentText(), material
+            )
+        except (KeyError, OSError, ValueError):
+            return
+        self.create_linked_xrd_button.setEnabled(False)
+        self.create_linked_xrd_button.setText("Created Linked .h5")
+        self.roi_shape_load.setEnabled(True)
+        self.link_dataset_status.setText(
+            f"XRF complete: found linked .h5 for {result['selected_frames']:,} retained frames."
+        )
+        self.roi_shape_status.setText(
+            "Linked .h5 ready. Open ROI > Shape only to confirm the handoff."
+        )
+
     def _create_linked_xrd(self):
         if self.selection is None or self._link_process is not None:
             return
@@ -1123,7 +1142,6 @@ class XRFAnalysisWindow(QMainWindow):
     def _load_cut_material(self, name):
         if self.selection is None or name not in self.selection["materials"]:
             return
-        self._mark_link_pending()
         minimum = self.selection["materials"][name]["attrs"].get("minimum_counts")
         self.cut_minimum.blockSignals(True)
         self.cut_minimum.setValue(0.0 if minimum is None else float(minimum))
@@ -1141,7 +1159,6 @@ class XRFAnalysisWindow(QMainWindow):
 
     def _cut_changed(self):
         self._set_selection_saved(False)
-        self._mark_link_pending()
         self._preview_cut()
 
     def _preview_cut(self):
@@ -1221,6 +1238,13 @@ class XRFAnalysisWindow(QMainWindow):
             return
         self._preview_cut()
         scan = self.scan_combo.currentText()
+        material = self.cut_material_combo.currentText()
+        linked_cut_changed = (
+            self.create_linked_xrd_button.text() == "Created Linked .h5"
+            and not xrf_selection.xrd_cut_matches(
+                self.project.root, scan, material, self.selection
+            )
+        )
         path = self.project.selection_path(scan)
         try:
             xrf_selection.save(path, self.selection)
@@ -1232,6 +1256,8 @@ class XRFAnalysisWindow(QMainWindow):
             QMessageBox.critical(self, "Could not save selection", str(exc))
             return
         self._set_selection_saved(True)
+        if linked_cut_changed:
+            self._mark_link_pending()
         self._draw_spectrum()
         self.status.setText(f"Selection saved: {path}")
 

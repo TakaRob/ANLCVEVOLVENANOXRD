@@ -129,10 +129,43 @@ def integrate_material_rois(selection, me7_dir, definitions, progress=None):
     return validate(data)
 
 
+def xrd_cut_matches(project_root, scan, material, selection=None):
+    """Return whether the active xrd-app frame cut matches a saved XRF selection."""
+    from ..config import DataManager
+
+    project_root = Path(project_root).resolve()
+    data = selection or load(
+        project_root / "XRF" / "Processed" / f"{scan}_xrf_selection.h5"
+    )
+    if not data["attrs"].get("linked_dataset") or material not in data["materials"]:
+        return False
+    cut_path = DataManager(project_root, scan=scan).metadata_scan_dir(scan) / "xrf_frame_cut.npz"
+    if not cut_path.exists():
+        return False
+    keep = data["materials"][material]["keep"]
+    file_indices = data["frames"]["source_file_index"][keep]
+    local_indices = data["frames"]["source_frame_index"][keep]
+    expected = {
+        (Path(data["source_files"][int(index)]).name, int(local_index))
+        for index, local_index in zip(file_indices, local_indices)
+    }
+    try:
+        with np.load(cut_path) as cut:
+            if str(cut["material"]) != material:
+                return False
+            actual = set(zip(
+                (str(value) for value in cut["source_file"]),
+                (int(value) for value in cut["source_frame_index"]),
+            ))
+    except (KeyError, OSError, ValueError):
+        return False
+    return actual == expected
+
+
 def activate_xrd_roi_project(project_root, scan, material):
     """Expose a linked XRF cut to xrd-app without reading detector frames."""
     from ..config import DataManager
-    from . import io, reflection_sum
+    from . import io
 
     project_root = Path(project_root).resolve()
     dm = DataManager(project_root, scan=scan)
@@ -178,7 +211,6 @@ def activate_xrd_roi_project(project_root, scan, material):
         material=np.asarray(material),
     )
     temporary.replace(cut_path)
-    reflection_sum.sum_path(dm, scan).unlink(missing_ok=True)
     return {
         "scan": scan, "material": material, "selected_frames": int(keep.sum()),
         "selection_path": selection_path, "cut_path": cut_path,
