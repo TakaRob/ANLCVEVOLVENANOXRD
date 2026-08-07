@@ -96,4 +96,6 @@ notebooks/  tracked CLI-first tutorials
 ```
 
 See [xrd_app/docs/BINNING_STORAGE.md](xrd_app/docs/BINNING_STORAGE.md) for
-storage choices and [QSPACE.md](notebookwalkthroughthrough/QSPACE.md) for reciprocal-space workflows.
+storage choices, [xrd_app/docs/NET_X11_TROUBLESHOOTING.md](xrd_app/docs/NET_X11_TROUBLESHOOTING.md)
+for SSH/X11 failures while using `/net`, and
+[QSPACE.md](notebookwalkthroughthrough/QSPACE.md) for reciprocal-space workflows.

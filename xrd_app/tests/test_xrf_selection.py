@@ -259,16 +259,17 @@ def test_xrf_frame_cut_filters_arbitrary_saved_grid(tmp_path):
     assert cut["xrf_material_cut"] == "Br"
 
 
-def test_xrf_gui_prints_ssh_x11_recovery_notice(monkeypatch):
+def test_xrf_gui_schedules_ssh_x11_recovery_notice(monkeypatch):
+    scheduled = []
+    monkeypatch.setattr("xrd_app.app.display_preflight_error", lambda: None)
+    monkeypatch.setattr("xrd_app.app.schedule_x11_failure_notice",
+                        lambda: scheduled.append(True))
     monkeypatch.setattr("xrd_app.xrf_gui.launch", lambda *args, **kwargs: 0)
 
     result = CliRunner().invoke(main, ["gui"])
 
     assert result.exit_code == 0
-    assert "after about 8 seconds" in result.output
-    assert "X11 connection breaks" in result.output
-    assert "restart the whole computer" in result.output
-    assert "kill your window manager process" in result.output
+    assert scheduled == [True]
 
 
 def test_xrf_cli_processes_registered_raw_me7_without_grid(tmp_path):

@@ -580,12 +580,11 @@ def gui(root, scan, bin_size, fresh):
     remembered so you can pick a project in Setup. Useful when the remembered
     project is broken or slow to load.
     """
-    click.echo(
-        "If xrd-app has not loaded after about 8 seconds, or the X11 connection "
-        "breaks, restart the whole computer or kill your window manager process; a stalled "
-        "GUI/data-loading connection is likely the reason."
-    )
-    from .app import launch_app
+    from .app import display_preflight_error, launch_app, schedule_x11_failure_notice
+    display_error = display_preflight_error()
+    if display_error:
+        raise click.ClickException(display_error)
+    schedule_x11_failure_notice()
     raise SystemExit(launch_app(root, scan=scan, bin_size=bin_size, fresh=fresh))
 
 

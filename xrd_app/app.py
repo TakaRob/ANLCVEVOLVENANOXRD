@@ -631,6 +631,62 @@ def _remote_x_display():
     return False
 
 
+def schedule_x11_failure_notice(delay=8.0):
+    """Print an SSH/X11 recovery hint if GUI startup is still running."""
+    import threading
+
+    def notify():
+        print(
+            "Did X11 fail? Because this project is accessed through /net, a stalled "
+            "network connection may be the cause. If the GUI disappeared or X11 "
+            "broke, restart the whole computer or kill your window manager process.",
+            flush=True,
+        )
+
+    timer = threading.Timer(delay, notify)
+    timer.daemon = True
+    timer.start()
+    return timer
+
+
+def display_preflight_error():
+    """Return a useful error when Qt cannot reach the configured X display."""
+    import os
+    import shutil
+    import subprocess
+
+    platform = os.environ.get("QT_QPA_PLATFORM", "").lower()
+    if platform in {"offscreen", "minimal"}:
+        return None
+    display = os.environ.get("DISPLAY", "")
+    if not display:
+        return (
+            "DISPLAY is not set. Reconnect with X11 forwarding enabled "
+            "(`ssh -Y host` or `ssh -X host`) and retry.")
+
+    probe = shutil.which("xdpyinfo") or shutil.which("xset")
+    if probe:
+        command = [probe] if Path(probe).name == "xdpyinfo" else [probe, "q"]
+        try:
+            result = subprocess.run(
+                command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                timeout=3, check=False)
+        except (OSError, subprocess.TimeoutExpired):
+            result = None
+        if result is None or result.returncode != 0:
+            return (
+                f"Cannot connect to X display {display!r}. This is an X11 connection "
+                "problem, not a missing Qt xcb plugin. Reconnect with `ssh -Y host` "
+                "or `ssh -X host`; do not manually set DISPLAY=:0 in an SSH session.")
+    elif ((os.environ.get("SSH_CONNECTION") or os.environ.get("SSH_CLIENT"))
+          and (display.startswith(":") or display.startswith("unix:"))):
+        return (
+            f"SSH session is using local display {display!r}, not an X11 forwarding "
+            "display. Reconnect with `ssh -Y host` or `ssh -X host` and do not "
+            "manually set DISPLAY=:0.")
+    return None
+
+
 def _harden_env_for_remote_x():
     """Make Qt survive a forwarded X connection. Must run before QApplication.
 
