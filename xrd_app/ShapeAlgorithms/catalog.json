@@ -20,7 +20,7 @@
       "holdout_f1": null,
       "holdout_f2": null,
       "source": "manual",
-      "notes": "Fast 1x1 post-processing skew fix: drop-in for 'gaussian' that corrects serpentine/backlash column misregistration at the LINKING stage (estimates the per-row column shift from unambiguous cross-row matches, links on the corrected column with an adaptive cross-row window), then reuses the gaussian profile filter + characterization verbatim. Same default-grid bin keys, so its catalog is directly comparable to the territorial truth (TERRITORY.md / compare_to_truth.py). Neutral on already-clean (binned) grids."
+      "notes": "Fast 1x1 post-processing skew fix: drop-in for 'gaussian' that corrects serpentine/backlash column misregistration at the LINKING stage (estimates the per-row column shift from unambiguous cross-row matches, links on the corrected column with an adaptive cross-row window), then reuses the gaussian profile filter + characterization verbatim. Same default-grid bin keys, so its catalog is directly comparable to the territorial-reference shape catalog. Neutral on already-clean (binned) grids."
     },
     {
       "name": "territory",

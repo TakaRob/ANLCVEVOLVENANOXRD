@@ -2,32 +2,54 @@
 
 from __future__ import annotations
 
+import json
+import re
 import sys
 from pathlib import Path
 
 import numpy as np
-from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg
+from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg, NavigationToolbar2QT
 from matplotlib.figure import Figure
-from PyQt5.QtCore import Qt
+from PyQt5.QtCore import QProcess, Qt
 from PyQt5.QtWidgets import (
     QAbstractItemView, QApplication, QComboBox, QDialog, QDialogButtonBox,
     QDoubleSpinBox, QFileDialog, QFormLayout, QGroupBox, QHBoxLayout,
     QInputDialog, QLabel, QListWidget, QListWidgetItem, QMainWindow, QMessageBox,
-    QPushButton, QSizePolicy, QSplitter, QTableWidget, QTableWidgetItem,
+    QProgressBar, QPushButton, QSizePolicy, QSplitter, QTableWidget, QTableWidgetItem,
     QTabWidget, QVBoxLayout, QWidget,
 )
 
 from . import workspace
 from .core import xrf as xrf_core
 from .core import xrf_selection
+from .gui.lifecycle import start_process, stop_process
 from .xrf_project import XRFProject
 
 
 class PlotCanvas(FigureCanvasQTAgg):
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, scroll_zoom=False):
         self.figure = Figure(figsize=(8, 5), constrained_layout=True)
         super().__init__(self.figure)
         self.setParent(parent)
+        if scroll_zoom:
+            self.mpl_connect("scroll_event", self._zoom_at_cursor)
+
+    def _zoom_at_cursor(self, event):
+        axis = event.inaxes
+        if axis is None or event.xdata is None or event.ydata is None:
+            return
+        factor = 0.8 if event.button == "up" else 1.25
+
+        def scaled_limits(limits, center, scale):
+            if scale == "log":
+                limits = np.log10(limits)
+                center = np.log10(center)
+                return 10 ** (center + (limits - center) * factor)
+            return center + (np.asarray(limits) - center) * factor
+
+        axis.set_xlim(scaled_limits(axis.get_xlim(), event.xdata, axis.get_xscale()))
+        axis.set_ylim(scaled_limits(axis.get_ylim(), event.ydata, axis.get_yscale()))
+        self.draw_idle()
 
 
 class XRFAnalysisWindow(QMainWindow):
@@ -37,6 +59,18 @@ class XRFAnalysisWindow(QMainWindow):
         super().__init__()
         self.project = None
         self.selection = None
+        self._spectrum_process = None
+        self._spectrum_output = []
+        self._spectrum_pending = ""
+        self._spectrum_scan = None
+        self._spectrum_total = 0
+        self._shared_roi_window = None
+        self._link_process = None
+        self._link_output = []
+        self._link_pending = ""
+        self._link_then_load = None
+        self._selection_saved = False
+        self._restoring_state = False
         self.setWindowTitle("XRF Analysis")
         self.resize(1350, 850)
 
@@ -46,9 +80,11 @@ class XRFAnalysisWindow(QMainWindow):
         self.main_tabs.addTab(self.setup_page, "Setup")
         self.main_tabs.addTab(self.analysis_page, "Analysis")
         self.main_tabs.setTabEnabled(1, False)
+        self.main_tabs.currentChanged.connect(self._save_state)
         self.setCentralWidget(self.main_tabs)
 
         self._refresh_projects()
+        project_root = project_root or workspace.get_last_xrf_project()
         if project_root is not None:
             self.open_project(project_root)
 
@@ -99,7 +135,12 @@ class XRFAnalysisWindow(QMainWindow):
         buttons.addWidget(self._button("Select scan set...", self._load_scan_set))
         buttons.addWidget(self._button("Load processed selection...", self._load_processed_file))
         load_layout.addLayout(buttons)
-        load_layout.addWidget(self._button("Process registered raw ME7...", self._process_raw_me7))
+        offset_row = QHBoxLayout()
+        offset_row.addWidget(self._button("Load position offset JSON...", self._load_position_offset))
+        self.position_offset_status = QLabel("Position offset: not loaded")
+        self.position_offset_status.setWordWrap(True)
+        offset_row.addWidget(self.position_offset_status, 1)
+        load_layout.addLayout(offset_row)
         self.data_status = QLabel("Open or create a project before loading data.")
         self.data_status.setWordWrap(True)
         self.data_status.setStyleSheet("font-family: monospace;")
@@ -140,10 +181,13 @@ class XRFAnalysisWindow(QMainWindow):
         layout.addLayout(header)
 
         self.analysis_tabs = QTabWidget()
-        self.analysis_tabs.addTab(self._build_label_spectrum_page(), "Label Spectrum")
+        self.analysis_tabs.addTab(self._build_label_spectrum_page(), "Complete ME7 Spectrum")
         self.analysis_tabs.addTab(self._build_intensity_cut_page(), "Intensity Cut")
+        self.analysis_tabs.addTab(self._build_roi_shape_page(), "XRD ROI > Shape Check")
+        self.analysis_tabs.currentChanged.connect(self._save_state)
         layout.addWidget(self.analysis_tabs, 1)
         self.scan_combo.currentTextChanged.connect(self._load_scan)
+        self.scan_combo.currentTextChanged.connect(self._save_state)
         return page
 
     def _build_label_spectrum_page(self):
@@ -153,24 +197,42 @@ class XRFAnalysisWindow(QMainWindow):
 
         left = QWidget()
         left_layout = QVBoxLayout(left)
-        self.spectrum_canvas = PlotCanvas()
+        process_row = QHBoxLayout()
+        self.complete_spectrum_button = self._button(
+            "Compute and save complete ME7 spectrum...", self._process_raw_me7
+        )
+        process_row.addWidget(self.complete_spectrum_button)
+        self.spectrum_process_status = QLabel("Register raw ME7 in Setup to compute a spectrum.")
+        self.spectrum_process_status.setWordWrap(True)
+        process_row.addWidget(self.spectrum_process_status, 1)
+        left_layout.addLayout(process_row)
+        self.spectrum_progress = QProgressBar()
+        self.spectrum_progress.setFormat("%v / %m frames (%p%)")
+        self.spectrum_progress.setVisible(False)
+        left_layout.addWidget(self.spectrum_progress)
+        self.spectrum_canvas = PlotCanvas(scroll_zoom=True)
+        self.spectrum_canvas.setToolTip(
+            "Scroll over the graph to zoom at the cursor; use the toolbar to pan or reset."
+        )
+        self.spectrum_toolbar = NavigationToolbar2QT(self.spectrum_canvas, page)
+        left_layout.addWidget(self.spectrum_toolbar)
         left_layout.addWidget(self.spectrum_canvas, 3)
         table_header = QHBoxLayout()
         table_header.addWidget(QLabel("<b>Manual material integration ranges</b>"))
-        self.roi_units = QComboBox()
-        self.roi_units.addItems(["keV", "pixel"])
-        self.roi_units.currentTextChanged.connect(self._convert_roi_table)
-        table_header.addWidget(self.roi_units)
         table_header.addStretch()
         left_layout.addLayout(table_header)
-        self.roi_table = QTableWidget(0, 3)
-        self.roi_table.setHorizontalHeaderLabels(["Material", "Low", "High"])
+        self.roi_table = QTableWidget(0, 5)
+        self.roi_table.setHorizontalHeaderLabels([
+            "Material", "Pixel low", "Pixel high", "keV low", "keV high"
+        ])
+        self.roi_table.itemChanged.connect(self._sync_roi_table_range)
         left_layout.addWidget(self.roi_table, 1)
         table_buttons = QHBoxLayout()
         table_buttons.addWidget(self._button("Add material row", self._add_roi_row))
         table_buttons.addWidget(self._button("Remove selected row", self._remove_roi_rows))
         table_buttons.addWidget(self._button("Apply material ranges", self._apply_roi_table))
-        table_buttons.addWidget(self._button("Save selection", self._save_selection))
+        self.spectrum_save_button = self._button("Save selection", self._save_selection)
+        table_buttons.addWidget(self.spectrum_save_button)
         left_layout.addLayout(table_buttons)
         splitter.addWidget(left)
 
@@ -182,8 +244,8 @@ class XRFAnalysisWindow(QMainWindow):
         ))
         self.prediction_list = QListWidget()
         sidebar_layout.addWidget(self.prediction_list, 1)
-        sidebar_layout.addWidget(self._button("Predict materials", self._predict_materials))
-        sidebar_layout.addWidget(self._button("Show library...", self._show_library))
+        sidebar_layout.addWidget(self._button("Predict from library", self._predict_materials))
+        sidebar_layout.addWidget(self._button("View library...", self._show_library))
         sidebar_layout.addStretch()
         splitter.addWidget(sidebar)
         splitter.setStretchFactor(0, 4)
@@ -191,27 +253,74 @@ class XRFAnalysisWindow(QMainWindow):
         layout.addWidget(splitter)
         return page
 
+    def _build_roi_shape_page(self):
+        self.roi_shape_page = QWidget()
+        layout = QVBoxLayout(self.roi_shape_page)
+        controls = QHBoxLayout()
+        self.roi_shape_load = self._button("Open ROI > Shape Check", self._open_roi_shape_check)
+        controls.addWidget(self.roi_shape_load)
+        self.roi_shape_status = QLabel(
+            "Create the linked .h5 on Intensity Cut before opening this check."
+        )
+        self.roi_shape_status.setWordWrap(True)
+        controls.addWidget(self.roi_shape_status, 1)
+        layout.addLayout(controls)
+        self.roi_shape_host = QWidget()
+        self.roi_shape_host_layout = QVBoxLayout(self.roi_shape_host)
+        self.roi_shape_host_layout.setContentsMargins(0, 0, 0, 0)
+        self.roi_shape_host_layout.addStretch()
+        layout.addWidget(self.roi_shape_host, 1)
+        return self.roi_shape_page
+
     def _build_intensity_cut_page(self):
         page = QWidget()
         layout = QVBoxLayout(page)
         controls = QHBoxLayout()
         controls.addWidget(QLabel("Material:"))
+        previous_material = QPushButton("<")
+        previous_material.setToolTip("Previous material")
+        previous_material.setMaximumWidth(40)
+        previous_material.clicked.connect(lambda: self._step_cut_material(-1))
+        controls.addWidget(previous_material)
         self.cut_material_combo = QComboBox()
         self.cut_material_combo.currentTextChanged.connect(self._load_cut_material)
+        self.cut_material_combo.currentTextChanged.connect(self._save_state)
         controls.addWidget(self.cut_material_combo)
+        next_material = QPushButton(">")
+        next_material.setToolTip("Next material")
+        next_material.setMaximumWidth(40)
+        next_material.clicked.connect(lambda: self._step_cut_material(1))
+        controls.addWidget(next_material)
         controls.addWidget(QLabel("Minimum counts:"))
         self.cut_minimum = QDoubleSpinBox()
         self.cut_minimum.setRange(0.0, 1e15)
         self.cut_minimum.setDecimals(3)
         self.cut_minimum.setKeyboardTracking(False)
-        self.cut_minimum.valueChanged.connect(self._preview_cut)
+        self.cut_minimum.valueChanged.connect(self._cut_changed)
+        self.cut_minimum.valueChanged.connect(self._save_state)
         controls.addWidget(self.cut_minimum)
         self.cut_summary = QLabel()
         controls.addWidget(self.cut_summary, 1)
-        controls.addWidget(self._button("Save selection", self._save_selection))
+        self.cut_save_button = self._button("Save selection", self._save_selection)
+        controls.addWidget(self.cut_save_button)
+        self.create_linked_xrd_button = self._button(
+            "Create Linked .h5 File", self._create_linked_xrd
+        )
+        controls.addWidget(self.create_linked_xrd_button)
         layout.addLayout(controls)
         self.cut_canvas = PlotCanvas()
+        self.cut_canvas.mpl_connect("button_press_event", self._set_cut_from_histogram)
+        self.cut_canvas.setToolTip("Click the histogram to set the minimum-count threshold.")
         layout.addWidget(self.cut_canvas, 1)
+        self.link_dataset_status = QLabel(
+            "Per-position XRF counts load automatically; Minimum counts updates both views."
+        )
+        self.link_dataset_status.setWordWrap(True)
+        layout.addWidget(self.link_dataset_status)
+        self.link_dataset_progress = QProgressBar()
+        self.link_dataset_progress.setFormat("%v / %m frames (%p%)")
+        self.link_dataset_progress.setVisible(False)
+        layout.addWidget(self.link_dataset_progress)
         return page
 
     def _refresh_projects(self):
@@ -341,6 +450,25 @@ class XRFAnalysisWindow(QMainWindow):
         if path:
             self._run_load_data(path)
 
+    def _load_position_offset(self):
+        if self.project is None:
+            return
+        start = (self.project.data.get("data_sources") or {}).get(
+            "position_offset", str(self.project.root)
+        )
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Select position offset JSON", str(start), "JSON (*.json)"
+        )
+        if not path:
+            return
+        try:
+            xrf_core.load_position_offsets(path)
+            path = self.project.set_position_offset(path)
+        except (KeyError, OSError, ValueError) as exc:
+            QMessageBox.critical(self, "Invalid position offset", str(exc))
+            return
+        self.position_offset_status.setText(f"Position offset: {Path(path).resolve()}")
+
     def _process_raw_me7(self):
         if self.project is None:
             return
@@ -363,19 +491,85 @@ class XRFAnalysisWindow(QMainWindow):
         )
         if answer != QMessageBox.Yes:
             return
-        from click.testing import CliRunner
-        from .xrf_cli import main
-        result = CliRunner().invoke(
-            main,
-            ["process-raw", "--root", str(self.project.root), "--scan", scan],
-            catch_exceptions=False,
+        self.complete_spectrum_button.setText("Loading complete ME7 spectrum...")
+        self.complete_spectrum_button.setEnabled(False)
+        self.spectrum_progress.setRange(0, 0)
+        self.spectrum_progress.setFormat("Counting ME7 spectra...")
+        self.spectrum_progress.setVisible(True)
+        self.spectrum_process_status.setText(
+            f"{scan}: counting ME7 spectra before summing. XRD is not read in this step."
         )
-        if result.exit_code:
-            QMessageBox.critical(self, "Raw XRF processing failed", result.output)
+        self._spectrum_scan = scan
+        self._spectrum_output = []
+        self._spectrum_pending = ""
+        self._spectrum_process = QProcess(self)
+        self._spectrum_process.setProcessChannelMode(QProcess.MergedChannels)
+        self._spectrum_process.readyReadStandardOutput.connect(self._on_spectrum_output)
+        self._spectrum_process.finished.connect(self._on_spectrum_finished)
+        self._spectrum_process.errorOccurred.connect(self._on_spectrum_error)
+        start_process(
+            self._spectrum_process, sys.executable,
+            ["-m", "xrd_app.xrf_cli", "process-raw", "--root",
+             str(self.project.root), "--scan", scan],
+        )
+
+    def _on_spectrum_output(self):
+        data = bytes(self._spectrum_process.readAllStandardOutput()).decode(
+            "utf-8", "replace"
+        )
+        self._spectrum_output.append(data)
+        text = self._spectrum_pending + data
+        lines = text.split("\n")
+        self._spectrum_pending = lines.pop()
+        for line in lines:
+            match = re.search(r"PROGRESS\s+(\d+)/(\d+)\s+files", line)
+            if match:
+                processed, total = map(int, match.groups())
+                self._spectrum_total = total
+                self.spectrum_progress.setRange(0, total)
+                self.spectrum_progress.setValue(processed)
+                self.spectrum_progress.setFormat("%v / %m files (%p%)")
+                self.spectrum_process_status.setText(
+                    f"{self._spectrum_scan}: reading and summing ME7 spectra, "
+                    f"{processed:,} / {total:,} files"
+                )
+
+    def _on_spectrum_error(self, error):
+        if error == QProcess.FailedToStart:
+            self._finish_spectrum_controls(hide_progress=True)
+            status = f"Processing failed to start: {self._spectrum_process.errorString()}"
+            self.spectrum_process_status.setText(status)
+            QMessageBox.critical(self, "Raw XRF processing failed", status)
+
+    def _on_spectrum_finished(self, code, _status):
+        scan = self._spectrum_scan
+        output = "".join(self._spectrum_output).strip()
+        self._finish_spectrum_controls(hide_progress=code != 0)
+        if code != 0:
+            status = output or f"Processing failed with exit code {code}."
+            self.spectrum_process_status.setText(status)
+            QMessageBox.critical(self, "Raw XRF processing failed", status)
             return
-        self.data_status.setText(result.output.strip())
         self.project = XRFProject.load(self.project.root)
         self.open_project(self.project.root, prompt_addon=False)
+        self.scan_combo.setCurrentText(scan)
+        self._load_scan(scan)
+        self.main_tabs.setCurrentIndex(1)
+        self.analysis_tabs.setCurrentIndex(0)
+        total_files = self._spectrum_total
+        self.spectrum_progress.setRange(0, total_files)
+        self.spectrum_progress.setValue(total_files)
+        self.spectrum_progress.setFormat("Complete: %v / %m files (%p%)")
+        self.spectrum_process_status.setText(
+            f"Complete ME7 spectrum saved for {scan}: {total_files:,} / "
+            f"{total_files:,} files"
+        )
+
+    def _finish_spectrum_controls(self, hide_progress=False):
+        self.complete_spectrum_button.setText("Compute and save complete ME7 spectrum...")
+        self.complete_spectrum_button.setEnabled(True)
+        if hide_progress:
+            self.spectrum_progress.setVisible(False)
 
     def open_project(self, project_root, prompt_addon=True):
         project = XRFProject.load(project_root)
@@ -396,7 +590,10 @@ class XRFAnalysisWindow(QMainWindow):
             project.create_addon()
         project.discover_processed()
         self.project = project
+        state = self._load_state()
+        self._restoring_state = True
         workspace.set_last_project(project.root)
+        workspace.set_last_xrf_project(project.root)
         self.setWindowTitle(
             f"XRF Analysis - {project.data.get('name', project.root.name)}"
         )
@@ -416,7 +613,7 @@ class XRFAnalysisWindow(QMainWindow):
         self.scan_combo.clear()
         scans = sorted((project.data.get("scans") or {}).keys())
         self.scan_combo.addItems(scans)
-        active = project.data.get("active_scan")
+        active = state.get("active_scan") or project.data.get("active_scan")
         if active in scans:
             self.scan_combo.setCurrentText(active)
         self.scan_combo.blockSignals(False)
@@ -424,6 +621,7 @@ class XRFAnalysisWindow(QMainWindow):
         self.roi_table.setRowCount(0)
         self.prediction_list.clear()
         self.selection = None
+        self._set_selection_saved(False)
         raw_scans = [
             name for name, record in (project.data.get("scans") or {}).items()
             if record.get("me7_dir")
@@ -436,18 +634,76 @@ class XRFAnalysisWindow(QMainWindow):
             f"Raw ME7 scans: {', '.join(raw_scans) or 'none'}\n"
             f"Finalized selections: {', '.join(finalized) or 'none'}"
         )
+        position_offset = project.position_offset_path()
+        self.position_offset_status.setText(
+            f"Position offset: {position_offset if position_offset.exists() else 'not loaded'}"
+        )
+        self.spectrum_process_status.setText(
+            "Complete spectrum saved; recompute if raw inputs or calibration changed."
+            if finalized else "Ready to compute complete ME7 spectrum."
+            if raw_scans else "Register raw ME7 in Setup to compute a spectrum."
+        )
         if finalized:
             if self.scan_combo.currentText() not in finalized:
                 self.scan_combo.setCurrentText(finalized[0])
             self._load_scan(self.scan_combo.currentText())
-            self.main_tabs.setCurrentIndex(1)
+            material = state.get("material")
+            if material and self.cut_material_combo.findText(material) >= 0:
+                self.cut_material_combo.setCurrentText(material)
+            minimum = state.get("minimum_counts")
+            if minimum is not None:
+                self.cut_minimum.setValue(float(minimum))
+            main_tab = int(state.get("main_tab", 1))
+            self.main_tabs.setCurrentIndex(main_tab if 0 <= main_tab < self.main_tabs.count() else 1)
+            analysis_tab = int(state.get("analysis_tab", 0))
+            if 0 <= analysis_tab < self.analysis_tabs.count():
+                self.analysis_tabs.setCurrentIndex(analysis_tab)
         else:
             self.status.setText(
                 "Raw source registered but not processed." if raw_scans
                 else "No XRF data loaded. Use Setup -> Load Data."
             )
+        geometry = state.get("geometry") or {}
+        width, height = geometry.get("width"), geometry.get("height")
+        if width and height:
+            self.resize(max(640, int(width)), max(480, int(height)))
+        self._restoring_state = False
         self._refresh_projects()
         return True
+
+    def _state_path(self):
+        return self.project.path("metadata_dir") / "gui_state.json"
+
+    def _load_state(self):
+        if self.project is None:
+            return {}
+        path = self._state_path()
+        try:
+            with path.open() as stream:
+                return json.load(stream) or {}
+        except (OSError, ValueError):
+            return {}
+
+    def _save_state(self, *_args):
+        if self.project is None or self._restoring_state:
+            return
+        state = {
+            "active_scan": self.scan_combo.currentText(),
+            "main_tab": self.main_tabs.currentIndex(),
+            "analysis_tab": self.analysis_tabs.currentIndex(),
+            "material": self.cut_material_combo.currentText(),
+            "minimum_counts": self.cut_minimum.value(),
+            "geometry": {"width": self.width(), "height": self.height()},
+        }
+        try:
+            path = self._state_path()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            temporary = path.with_name(f".{path.name}.tmp")
+            with temporary.open("w") as stream:
+                json.dump(state, stream, indent=2)
+            temporary.replace(path)
+        except OSError:
+            pass
 
     def _load_scan(self, scan):
         if not scan:
@@ -464,6 +720,15 @@ class XRFAnalysisWindow(QMainWindow):
         self.cut_material_combo.clear()
         self.cut_material_combo.addItems(sorted(self.selection["materials"]))
         self.cut_material_combo.blockSignals(False)
+        linked = bool(self.selection["attrs"].get("linked_dataset"))
+        self.link_dataset_status.setText(
+            "Per-position XRF counts ready; press Create Linked .h5 File to finalize this cut."
+            if linked else "Create Linked .h5 File will build the XRF/XRD frame registration."
+        )
+        self.roi_shape_load.setEnabled(False)
+        self.roi_shape_status.setText(
+            "Create the linked .h5 on Intensity Cut before opening this check."
+        )
         active_calibration = self.selection["attrs"].get("energy_calibration")
         if active_calibration and "quadratic_kev" in active_calibration:
             self.calibration_quadratic.setValue(float(active_calibration["quadratic_kev"]))
@@ -475,8 +740,17 @@ class XRFAnalysisWindow(QMainWindow):
             f"{len(info['materials'])} materials | {path}"
         )
         self._refresh_roi_table()
+        self._set_selection_saved(True)
         self._draw_spectrum()
         self._load_cut_material(self.cut_material_combo.currentText())
+
+    def _set_selection_saved(self, saved):
+        self._selection_saved = saved
+        style = "background-color: #2e7d32; color: white; font-weight: bold;" if saved else ""
+        text = "Selection saved" if saved else "Save selection"
+        for button in (self.spectrum_save_button, self.cut_save_button):
+            button.setText(text)
+            button.setStyleSheet(style)
 
     def _save_calibration(self):
         if self.project is None:
@@ -492,98 +766,138 @@ class XRFAnalysisWindow(QMainWindow):
             self.selection["spectrum"]["energy_kev"] = xrf_selection.pixel_to_kev(
                 np.arange(self.selection["spectrum"]["summed_counts"].size), calibration
             )
+            self._refresh_roi_table()
+            self._set_selection_saved(False)
             self._draw_spectrum()
         self.data_status.setText("Saved project XRF energy calibration.")
 
     def _refresh_roi_table(self):
+        self.roi_table.blockSignals(True)
         self.roi_table.setRowCount(0)
-        if self.selection is None:
-            return
-        calibration = self.selection["attrs"].get("energy_calibration") or {}
-        for name, material in sorted(self.selection["materials"].items()):
-            bounds = material["attrs"].get("energy_range_kev")
-            if bounds is None and "pixel_range" in material["attrs"]:
-                bounds = xrf_selection.pixel_to_kev(
-                    material["attrs"]["pixel_range"], calibration
-                )
-            if bounds is None:
-                bounds = xrf_selection.pixel_to_kev([0, 1], calibration)
-            row = self.roi_table.rowCount()
-            self.roi_table.insertRow(row)
-            for column, value in enumerate((name, *bounds)):
-                self.roi_table.setItem(row, column, QTableWidgetItem(
-                    str(value) if column == 0 else f"{float(value):.6g}"
-                ))
+        if self.selection is not None:
+            calibration = self.selection["attrs"].get("energy_calibration") or {}
+            for name, material in sorted(self.selection["materials"].items()):
+                pixels = material["attrs"].get("pixel_range")
+                energies = material["attrs"].get("energy_range_kev")
+                if pixels is None and energies is not None:
+                    pixels = xrf_selection.kev_to_pixel(energies, calibration)
+                if pixels is None:
+                    pixels = [0, 1]
+                if energies is None:
+                    energies = xrf_selection.pixel_to_kev(pixels, calibration)
+                row = self.roi_table.rowCount()
+                self.roi_table.insertRow(row)
+                values = (name, *pixels, *energies)
+                for column, value in enumerate(values):
+                    self.roi_table.setItem(row, column, QTableWidgetItem(
+                        str(value) if column == 0 else f"{float(value):.6g}"
+                    ))
+        self.roi_table.blockSignals(False)
 
     def _add_roi_row(self):
+        calibration = self.selection["attrs"].get("energy_calibration") or {}
+        pixels = [0.0, 30.0]
+        energies = xrf_selection.pixel_to_kev(pixels, calibration)
         row = self.roi_table.rowCount()
+        self.roi_table.blockSignals(True)
         self.roi_table.insertRow(row)
-        defaults = ("New material", 1.0, 1.3) if self.roi_units.currentText() == "keV" \
-            else ("New material", 0.0, 30.0)
-        for column, value in enumerate(defaults):
-            self.roi_table.setItem(row, column, QTableWidgetItem(str(value)))
+        for column, value in enumerate(("New material", *pixels, *energies)):
+            self.roi_table.setItem(row, column, QTableWidgetItem(
+                str(value) if column == 0 else f"{float(value):.6g}"
+            ))
+        self.roi_table.blockSignals(False)
+        self._set_selection_saved(False)
+        self._draw_spectrum()
 
     def _remove_roi_rows(self):
         rows = sorted({index.row() for index in self.roi_table.selectedIndexes()}, reverse=True)
         for row in rows:
             self.roi_table.removeRow(row)
+        if rows:
+            self._set_selection_saved(False)
         self._draw_spectrum()
 
-    def _convert_roi_table(self, units):
+    def _sync_roi_table_range(self, item):
         if self.selection is None:
             return
+        self._set_selection_saved(False)
+        if item.column() == 0:
+            self._draw_spectrum()
+            return
+        source_columns = (1, 2) if item.column() in (1, 2) else (3, 4)
+        target_columns = (3, 4) if source_columns == (1, 2) else (1, 2)
+        try:
+            values = [
+                float(self.roi_table.item(item.row(), column).text())
+                for column in source_columns
+            ]
+        except (AttributeError, ValueError):
+            return
         calibration = self.selection["attrs"].get("energy_calibration") or {}
-        for row in range(self.roi_table.rowCount()):
-            values = [float(self.roi_table.item(row, column).text()) for column in (1, 2)]
-            converted = xrf_selection.pixel_to_kev(values, calibration) if units == "keV" \
-                else xrf_selection.kev_to_pixel(values, calibration)
-            for column, value in zip((1, 2), converted):
-                self.roi_table.item(row, column).setText(f"{float(value):.6g}")
+        converted = (
+            xrf_selection.pixel_to_kev(values, calibration)
+            if source_columns == (1, 2)
+            else xrf_selection.kev_to_pixel(values, calibration)
+        )
+        self.roi_table.blockSignals(True)
+        for column, value in zip(target_columns, converted):
+            target = self.roi_table.item(item.row(), column)
+            if target is None:
+                target = QTableWidgetItem()
+                self.roi_table.setItem(item.row(), column, target)
+            target.setText(f"{float(value):.6g}")
+        self.roi_table.blockSignals(False)
         self._draw_spectrum()
 
     def _roi_definitions(self):
         definitions = {}
-        units = self.roi_units.currentText()
         for row in range(self.roi_table.rowCount()):
             name = self.roi_table.item(row, 0).text().strip()
             if not name:
                 continue
-            low, high = sorted(
+            pixel_low, pixel_high = sorted(
                 float(self.roi_table.item(row, column).text()) for column in (1, 2)
+            )
+            kev_low, kev_high = sorted(
+                float(self.roi_table.item(row, column).text()) for column in (3, 4)
             )
             old = self.selection["materials"].get(name, {}).get("attrs", {})
             definitions[name] = {
                 "display_name": name,
                 "minimum_counts": old.get("minimum_counts"),
-                "energy_range_kev" if units == "keV" else "pixel_range": [low, high],
+                "pixel_range": [pixel_low, pixel_high],
+                "energy_range_kev": [kev_low, kev_high],
             }
         return definitions
 
     def _apply_roi_table(self):
         if self.selection is None:
             return
-        record = (self.project.data.get("scans") or {}).get(self.scan_combo.currentText(), {})
-        me7_dir = record.get("me7_dir")
-        if not me7_dir:
-            QMessageBox.warning(
-                self, "Raw ME7 required",
-                "Applying manual material ranges requires the raw ME7 source for this scan.",
-            )
-            return
-        try:
-            self.selection = xrf_selection.integrate_material_rois(
-                self.selection, me7_dir, self._roi_definitions()
-            )
-        except (FileNotFoundError, KeyError, OSError, ValueError) as exc:
-            QMessageBox.critical(self, "Could not integrate material ranges", str(exc))
-            return
+        definitions = self._roi_definitions()
+        size = self.selection["frames"]["global_frame_index"].size
+        self.selection["materials"] = {
+            name: {
+                "intensity": np.full(size, np.nan),
+                "keep": np.ones(size, dtype=bool),
+                "attrs": attrs,
+            }
+            for name, attrs in definitions.items()
+        }
+        self.selection["attrs"]["linked_dataset"] = False
+        self.selection = xrf_selection.validate(self.selection)
         self.cut_material_combo.blockSignals(True)
         self.cut_material_combo.clear()
         self.cut_material_combo.addItems(sorted(self.selection["materials"]))
         self.cut_material_combo.blockSignals(False)
-        self._refresh_roi_table()
+        self.link_dataset_status.setText(
+            "Material ranges changed; Create Linked .h5 File will rebuild the link."
+        )
+        self.roi_shape_load.setEnabled(False)
+        self.roi_shape_status.setText(
+            "Create the linked .h5 on Intensity Cut before opening this check."
+        )
+        self._set_selection_saved(False)
         self._draw_spectrum()
-        self._load_cut_material(self.cut_material_combo.currentText())
 
     def _predict_materials(self):
         self.prediction_list.clear()
@@ -634,7 +948,8 @@ class XRFAnalysisWindow(QMainWindow):
             bounds = definition.get("energy_range_kev")
             if bounds is None:
                 bounds = xrf_selection.pixel_to_kev(definition["pixel_range"], calibration)
-            axis.axvspan(*bounds, alpha=0.2, label=name)
+            color = "#2e7d32" if self._selection_saved else "#1976d2"
+            axis.axvspan(*bounds, color=color, alpha=0.28, label=name)
         for observed, line in getattr(self, "_predicted_lines", []):
             axis.axvline(observed, color="0.45", linestyle=":", linewidth=0.8)
             index = int(np.argmin(np.abs(spectrum["energy_kev"] - observed)))
@@ -652,13 +967,181 @@ class XRFAnalysisWindow(QMainWindow):
         axis.grid(alpha=0.2)
         self.spectrum_canvas.draw_idle()
 
+    def _create_linked_dataset(self):
+        if self.selection is None or self._link_process is not None:
+            return
+        material = self.cut_material_combo.currentText()
+        if material in self.selection["materials"]:
+            self.selection["materials"][material]["attrs"]["minimum_counts"] = (
+                self.cut_minimum.value()
+            )
+        scan = self.scan_combo.currentText()
+        definitions_path = self.project.cache_scan_dir(scan) / "material_ranges.json"
+        definitions_path.parent.mkdir(parents=True, exist_ok=True)
+        with definitions_path.open("w") as stream:
+            json.dump(self._roi_definitions(), stream, indent=2)
+        self.link_dataset_progress.setRange(0, 0)
+        self.link_dataset_progress.setFormat("Matching ME7/XRD frames...")
+        self.link_dataset_progress.setVisible(True)
+        self.link_dataset_status.setText(
+            f"{scan}: matching ME7 and XRD acquisition frames."
+        )
+        self._link_output = []
+        self._link_pending = ""
+        self._link_process = QProcess(self)
+        self._link_process.setProcessChannelMode(QProcess.MergedChannels)
+        self._link_process.readyReadStandardOutput.connect(self._on_link_output)
+        self._link_process.finished.connect(self._on_link_finished)
+        start_process(
+            self._link_process, sys.executable,
+            ["-m", "xrd_app.xrf_cli", "link-dataset", "--root",
+             str(self.project.root), "--scan", scan, "--definitions",
+             str(definitions_path)],
+        )
+
+    def _on_link_output(self):
+        data = bytes(self._link_process.readAllStandardOutput()).decode("utf-8", "replace")
+        self._link_output.append(data)
+        lines = (self._link_pending + data).split("\n")
+        self._link_pending = lines.pop()
+        for line in lines:
+            match = re.search(r"PROGRESS\s+(\d+)/(\d+)\s+frames", line)
+            if match:
+                done, total = map(int, match.groups())
+                self.link_dataset_progress.setRange(0, total)
+                self.link_dataset_progress.setValue(done)
+                self.link_dataset_progress.setFormat("%v / %m frames (%p%)")
+                self.link_dataset_status.setText(
+                    f"Integrating material ranges: {done:,} / {total:,} frames"
+                )
+
+    def _on_link_finished(self, code, _status):
+        output = "".join(self._link_output).strip()
+        self._link_process = None
+        if code != 0:
+            self._link_then_load = None
+            self.create_linked_xrd_button.setEnabled(True)
+            self.create_linked_xrd_button.setText("Create Linked .h5 File")
+            self.link_dataset_progress.setVisible(False)
+            self.link_dataset_status.setText(output or f"XRF/XRD linking failed (exit {code}).")
+            return
+        scan = self.scan_combo.currentText()
+        self._load_scan(scan)
+        total = self.selection["frames"]["global_frame_index"].size
+        self.link_dataset_progress.setRange(0, total)
+        self.link_dataset_progress.setValue(total)
+        self.link_dataset_progress.setFormat("Complete: %v / %m frames (%p%)")
+        self.link_dataset_status.setText(
+            f"Per-position XRF counts ready for {total:,} matched frames."
+        )
+        material = self._link_then_load
+        self._link_then_load = None
+        if material:
+            self.cut_material_combo.setCurrentText(material)
+        self._finalize_linked_h5()
+        self._preview_cut()
+
+    def _create_linked_xrd(self):
+        if self.selection is None or self._link_process is not None:
+            return
+        material = self.cut_material_combo.currentText()
+        if material not in self.selection["materials"]:
+            return
+        self._save_selection()
+        if not self.selection["attrs"].get("linked_dataset"):
+            self._link_then_load = material
+            self.create_linked_xrd_button.setEnabled(False)
+            self.create_linked_xrd_button.setText("Creating Linked .h5 File...")
+            self._create_linked_dataset()
+            return
+        self._finalize_linked_h5()
+
+    def _finalize_linked_h5(self):
+        material = self.cut_material_combo.currentText()
+        try:
+            result = xrf_selection.activate_xrd_roi_project(
+                self.project.root, self.scan_combo.currentText(), material
+            )
+        except (KeyError, OSError, ValueError) as exc:
+            self.create_linked_xrd_button.setEnabled(True)
+            self.create_linked_xrd_button.setText("Create Linked .h5 File")
+            self.link_dataset_status.setText(f"Could not create linked .h5: {exc}")
+            return
+        self.create_linked_xrd_button.setEnabled(False)
+        self.create_linked_xrd_button.setText("Created Linked .h5")
+        self.roi_shape_load.setEnabled(True)
+        self.link_dataset_status.setText(
+            f"XRF complete: linked .h5 created for {result['selected_frames']:,} retained "
+            "frames; no XRD images were read."
+        )
+        self.roi_shape_status.setText(
+            "Linked .h5 ready. Open ROI > Shape only to confirm the handoff."
+        )
+
+    def _open_roi_shape_check(self):
+        if self.selection is None or not self.selection["attrs"].get("linked_dataset"):
+            self.roi_shape_status.setText(
+                "Create the linked .h5 on Intensity Cut before opening this check."
+            )
+            return
+        if self.create_linked_xrd_button.text() != "Created Linked .h5":
+            self.roi_shape_status.setText(
+                "Press Create Linked .h5 File on Intensity Cut to finalize this cut first."
+            )
+            return
+        if self._shared_roi_window is not None:
+            self._shared_roi_window.close()
+            self._shared_roi_window.deleteLater()
+        while self.roi_shape_host_layout.count():
+            item = self.roi_shape_host_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        from .gui.roi_shape import ROIShapeWindow
+        self._shared_roi_window = ROIShapeWindow(
+            self.project.root, scan=self.scan_combo.currentText(), bin_size=3, embedded=False
+        )
+        self.roi_shape_host_layout.addWidget(self._shared_roi_window)
+        self.roi_shape_status.setText(
+            "Standard xrd-app ROI > Shape opened from the linked .h5 cut."
+        )
+
+    def _step_cut_material(self, amount):
+        count = self.cut_material_combo.count()
+        if count:
+            self.cut_material_combo.setCurrentIndex(
+                (self.cut_material_combo.currentIndex() + amount) % count
+            )
+
+    def _set_cut_from_histogram(self, event):
+        if (event.button != 1 or event.xdata is None
+                or not self.cut_canvas.figure.axes
+                or event.inaxes is not self.cut_canvas.figure.axes[0]):
+            return
+        self.cut_minimum.setValue(max(0.0, float(event.xdata)))
+
     def _load_cut_material(self, name):
         if self.selection is None or name not in self.selection["materials"]:
             return
+        self._mark_link_pending()
         minimum = self.selection["materials"][name]["attrs"].get("minimum_counts")
         self.cut_minimum.blockSignals(True)
         self.cut_minimum.setValue(0.0 if minimum is None else float(minimum))
         self.cut_minimum.blockSignals(False)
+        self._preview_cut()
+
+    def _mark_link_pending(self):
+        if self.create_linked_xrd_button.text() == "Created Linked .h5":
+            self.create_linked_xrd_button.setEnabled(True)
+            self.create_linked_xrd_button.setText("Create Linked .h5 File")
+            self.roi_shape_load.setEnabled(False)
+            self.roi_shape_status.setText(
+                "The active cut changed; create the linked .h5 again before checking it."
+            )
+
+    def _cut_changed(self):
+        self._set_selection_saved(False)
+        self._mark_link_pending()
         self._preview_cut()
 
     def _preview_cut(self):
@@ -671,6 +1154,14 @@ class XRFAnalysisWindow(QMainWindow):
         values = material["intensity"]
         finite = np.isfinite(values)
         minimum = self.cut_minimum.value()
+        material["attrs"]["minimum_counts"] = minimum
+        if not finite.any():
+            self.cut_summary.setText("Loading per-position XRF counts...")
+            self.cut_canvas.figure.clear()
+            axis = self.cut_canvas.figure.add_subplot(111)
+            axis.text(0.5, 0.5, "Loading XRF histogram...", ha="center", va="center")
+            self.cut_canvas.draw_idle()
+            return
         keep = finite & (values >= minimum)
         material["keep"] = keep
         material["attrs"]["minimum_counts"] = minimum
@@ -685,11 +1176,16 @@ class XRFAnalysisWindow(QMainWindow):
         if finite_values.size and np.allclose(finite_values, np.round(finite_values)) \
                 and finite_values.max() - finite_values.min() <= 500:
             bins = np.arange(np.floor(finite_values.min()), np.ceil(finite_values.max()) + 2) - 0.5
-        axes[0].hist(finite_values, bins=bins, log=True, color="#2b6f9f", alpha=0.85)
-        axes[0].axvline(minimum, color="red", linestyle=":", linewidth=2)
+        axes[0].hist(finite_values, bins=bins, log=True, color="tab:blue", alpha=0.85)
+        axes[0].axvline(
+            minimum, color="tab:red", linestyle=":", linewidth=2,
+            label=f"minimum = {minimum:g}",
+        )
+        axes[0].legend()
         axes[0].set(
-            title=f"{name}: positions vs integrated counts",
-            xlabel="Integrated XRF counts", ylabel="Positions",
+            title=(f"{name}: scan positions vs integrated counts\n"
+                   f"cut = {100 * (~keep & finite).sum() / max(1, finite.sum()):.2f}%"),
+            xlabel="Integrated XRF counts per scan position", ylabel="Scan positions",
         )
         x, y = self.selection["frames"]["x"], self.selection["frames"]["y"]
         spatial = np.isfinite(x) & np.isfinite(y)
@@ -699,14 +1195,26 @@ class XRFAnalysisWindow(QMainWindow):
             x[selected], y[selected], c=values[selected], s=3,
             cmap="viridis", edgecolors="none",
         )
+        axes[1].set_facecolor("white")
         axes[1].set(
-            title=f"{name}: retained XRF intensity map",
-            xlabel="X position", ylabel="Corrected Y position",
+            title=f"{name}: integrated XRF counts in real space",
+            xlabel="X position (um)", ylabel="Corrected Y position (um)",
         )
         axes[1].set_aspect("equal")
         if selected.any():
             figure.colorbar(artist, ax=axes[1], label="Integrated XRF counts")
         self.cut_canvas.draw_idle()
+
+    def closeEvent(self, event):  # noqa: N802 (Qt signature)
+        self._save_state()
+        if self._shared_roi_window is not None:
+            self._shared_roi_window.close()
+            self._shared_roi_window = None
+        stop_process(self._spectrum_process)
+        stop_process(self._link_process)
+        self._spectrum_process = None
+        self._link_process = None
+        super().closeEvent(event)
 
     def _save_selection(self):
         if self.selection is None or self.project is None:
@@ -723,7 +1231,9 @@ class XRFAnalysisWindow(QMainWindow):
         except (OSError, ValueError) as exc:
             QMessageBox.critical(self, "Could not save selection", str(exc))
             return
-        self.status.setText(f"Saved {path}")
+        self._set_selection_saved(True)
+        self._draw_spectrum()
+        self.status.setText(f"Selection saved: {path}")
 
 
 def launch(project_root=None):

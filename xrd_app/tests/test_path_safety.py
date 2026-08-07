@@ -47,7 +47,12 @@ def test_workspace_project_creation_stays_contained_and_refuses_existing(tmp_pat
     root = workspace.create_project("safe project", workspace=tmp_path)
     original = (root / "config.yaml").read_text()
 
+    package = Path(workspace.__file__).resolve().parent
     assert root == tmp_path.resolve() / "safe project"
+    assert (root / "Metadata" / "reflections.json").read_bytes() == (
+        package / "assets" / "reflections.json").read_bytes()
+    assert (root / "Metadata" / "tth.tiff").is_file()
+    assert (root / "Algorithms" / "PeakAlgorithms" / "default_detector.py").is_file()
     with pytest.raises(FileExistsError, match="refusing to overwrite"):
         workspace.create_project("safe project", workspace=tmp_path)
     assert (root / "config.yaml").read_text() == original

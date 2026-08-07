@@ -22,9 +22,9 @@ Two kinds of quantity, with different geometry needs:
 goniometer circles + tilt and is the basis for a future silx-LUT 3D rebin). It is
 an **optional** dependency (``pip install 'xrd-app[qspace]'``); the |Q| and
 geometry-recovery paths are pure numpy/scipy and work without it. The
-``xrayutilities`` area-detector conversion was validated against an independent
-lab-frame calculation (:func:`q_vectors_labframe`) to machine precision — see
-``notebooks/qspace_poc.py``.
+``xrayutilities`` area-detector conversion is cross-checked against the
+independent lab-frame calculation (:func:`q_vectors_labframe`) in
+``tests/test_qspace.py``.
 """
 
 from __future__ import annotations

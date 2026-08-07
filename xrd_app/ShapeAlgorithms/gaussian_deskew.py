@@ -9,7 +9,7 @@ into *horizontal slices* (it spans scan columns within a row but not across rows
 This is the **fast 1×1 post-processing** skew fix: it operates on the existing
 1×1 grid's peaks (same bin keys), correcting skew at the *linking* stage, so its
 output catalog stays on the default grid and is directly comparable to the
-territorial truth (see ``TERRITORY.md`` / ``compare_to_truth.py``).
+territorial-reference shape catalog.
 
 Why the baseline slices it
 --------------------------

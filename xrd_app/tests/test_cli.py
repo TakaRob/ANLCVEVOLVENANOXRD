@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -6,6 +7,7 @@ from click.testing import CliRunner
 
 from xrd_app.cli import (_same_grid_lattice, bin, grid, main, make_bins, peaks,
                          roi_shapes, run_pipeline)
+from xrd_app.config import ProjectConfig
 from xrd_app.core import catalogs, io
 
 
@@ -84,6 +86,51 @@ def test_init_requires_name_without_prompting(tmp_path):
 
     assert result.exit_code == 2
     assert "Missing option '--name'" in result.stderr
+
+
+def test_init_creates_editable_project_defaults(tmp_path):
+    result = CliRunner().invoke(
+        main, ["init", "--name", "test-project", "--root", str(tmp_path)]
+    )
+    package = Path(__file__).resolve().parent.parent
+
+    assert result.exit_code == 0, result.output
+    assert (tmp_path / "Metadata" / "reflections.json").read_bytes() == (
+        package / "assets" / "reflections.json").read_bytes()
+    assert (tmp_path / "Metadata" / "tth.tiff").read_bytes() == (
+        package / "assets" / "tth.tiff").read_bytes()
+    detector = tmp_path / "Algorithms" / "PeakAlgorithms" / "default_detector.py"
+    assert detector.read_bytes() == (
+        package / "PeakAlgorithms" / "5x5_tophat_band_adaptive_snr.py").read_bytes()
+    catalog = json.loads((detector.parent / "catalog.json").read_text())
+    assert catalog["detectors"][0]["file"] == detector.name
+
+
+def test_link_replaces_calibrations_at_canonical_paths(tmp_path):
+    runner = CliRunner()
+    assert runner.invoke(main, [
+        "init", "--name", "test-project", "--root", str(tmp_path),
+    ]).exit_code == 0
+    source_dir = tmp_path / "incoming"
+    source_dir.mkdir()
+    tth = source_dir / "custom-name.tif"
+    reflections = source_dir / "custom-name.json"
+    tth.write_bytes(b"replacement tiff")
+    reflections.write_text('[{"name": "custom", "two_theta": 8, "width": 0.4}]')
+
+    result = runner.invoke(main, [
+        "link", "--root", str(tmp_path), "--tth", str(tth),
+        "--reflections", str(reflections),
+    ])
+
+    assert result.exit_code == 0, result.output
+    assert (tmp_path / "Metadata" / "tth.tiff").read_bytes() == tth.read_bytes()
+    assert (tmp_path / "Metadata" / "reflections.json").read_bytes() == reflections.read_bytes()
+    assert not (tmp_path / "Metadata" / "tth.tiff").is_symlink()
+    assert not (tmp_path / "Metadata" / "reflections.json").is_symlink()
+    config = ProjectConfig.load(tmp_path)
+    assert config.get("data_sources", "tth_map") is None
+    assert config.get("data_sources", "reflections") is None
 
 
 def test_init_refuses_to_overwrite_existing_project(tmp_path):

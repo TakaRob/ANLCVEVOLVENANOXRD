@@ -5,6 +5,8 @@ the actual load/deadtime/channel-sum/ROI/registration paths — no network data.
 """
 from __future__ import annotations
 
+import json
+
 import numpy as np
 import pytest
 
@@ -57,6 +59,14 @@ def test_energy_to_bin_range():
     # clipped to [0, N_BINS]
     lo3, hi3 = xrf.energy_to_bin_range(50.0, 100.0, 10.0, 0.0)
     assert lo3 == 0 and hi3 >= 1
+
+
+def test_position_offset_uses_nearest_then_interpolates(tmp_path):
+    path = tmp_path / "position_offset.json"
+    path.write_text(json.dumps({"theta": [2, 0, 4], "y_offset": [-20, 0, -60]}))
+
+    assert xrf.position_offset_at_theta(path, 2.005) == -20
+    assert xrf.position_offset_at_theta(path, 3.0) == -40
 
 
 def test_fileloc_to_bin():

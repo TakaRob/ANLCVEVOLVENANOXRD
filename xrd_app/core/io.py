@@ -331,6 +331,37 @@ def save_grid_mapping(path, mapping: dict) -> Path:
     return path
 
 
+def _filter_grid_with_xrf_cut(cut_path, grid_mapping: dict) -> dict:
+    """Filter grid bins by retained raw file/frame identities when a cut exists."""
+    cut_path = Path(cut_path)
+    if not cut_path.exists():
+        return grid_mapping
+    with np.load(cut_path) as cut:
+        retained = set(zip(
+            (str(value) for value in cut["source_file"]),
+            (int(value) for value in cut["source_frame_index"]),
+        ))
+        material = str(cut["material"])
+    file_names = [Path(path).name for path in grid_mapping.get("xrd_files", [])]
+    keep_globals = {
+        global_index
+        for global_index, (file_index, local_index) in enumerate(
+            grid_mapping.get("frame_map", [])
+        )
+        if 0 <= int(file_index) < len(file_names)
+        and (file_names[int(file_index)], int(local_index)) in retained
+    }
+    grid = dict(grid_mapping)
+    grid["bins"] = {
+        key: [index for index in indices if int(index) in keep_globals]
+        for key, indices in grid_mapping.get("bins", {}).items()
+    }
+    grid["bins"] = {key: indices for key, indices in grid["bins"].items() if indices}
+    grid["n_bins"] = len(grid["bins"])
+    grid["xrf_material_cut"] = material
+    return grid
+
+
 def load_grid_mapping(grid_mapping: Union[str, Path, dict]) -> dict:
     """Accept an HDF5 path or an already-loaded grid mapping."""
     if isinstance(grid_mapping, dict):
@@ -358,7 +389,7 @@ def load_grid_mapping(grid_mapping: Union[str, Path, dict]) -> dict:
                 key: json.loads(value.decode() if isinstance(value, bytes) else str(value))
                 for key, value in zip(territory_keys, handle["territory_json"][:])
             }
-        return result
+        return _filter_grid_with_xrf_cut(path.parent / "xrf_frame_cut.npz", result)
 
 
 def validate_grid_mapping_bin_size(grid_mapping, expected_bin_size) -> dict:
@@ -524,12 +555,20 @@ def is_recreated_csv(csv_path: Union[str, Path]) -> bool:
 def _read_positions_h5(h5_path: Union[str, Path]):
     """Read ``(x, y)`` µm arrays from a Lozano-style position HDF5.
 
-    Layout: ``entry/data/Position/{X_Position,Y_Position}`` — one already-reduced
-    value per frame (contrast the raw SOCKETSERVER stream, which
-    :mod:`core.positions` reduces). Returns two 1-D float arrays.
+    Layout is either ``entry/data/Position/{X_Position,Y_Position}`` or the
+    beamline prefilter layout ``entry/data/{X_Position,Y_Position}``, with one
+    already-reduced value per frame. Returns two 1-D float arrays.
     """
     with h5py.File(h5_path, "r") as f:
-        grp = f[H5_POSITION_GROUP]
+        if H5_POSITION_GROUP in f:
+            grp = f[H5_POSITION_GROUP]
+        elif "entry/data/X_Position" in f and "entry/data/Y_Position" in f:
+            grp = f["entry/data"]
+        else:
+            raise ValueError(
+                f"{Path(h5_path).name} has no X_Position/Y_Position datasets "
+                f"under {H5_POSITION_GROUP} or entry/data"
+            )
         x = np.asarray(grp["X_Position"][()], dtype=float).ravel()
         y = np.asarray(grp["Y_Position"][()], dtype=float).ravel()
     return x, y
@@ -1764,6 +1803,12 @@ class _RawSource(BinImageSource):
                     (int(grid_row[gi]), int(grid_col[gi])), []).append(gi)
             self._bins, _, _ = build_bin_mapping(
                 n_rows, n_cols2, bin_size, grid_to_frames)
+        cut_grid = _filter_grid_with_xrf_cut(
+            dm.metadata_scan_dir(scan) / "xrf_frame_cut.npz",
+            {"xrd_files": self._xrd_files, "frame_map": self._frame_map,
+             "bins": self._bins},
+        )
+        self._bins = cut_grid["bins"]
         self._cache = OrderedDict()
 
     def keys(self) -> list:
@@ -1821,6 +1866,8 @@ def open_bin_source(dm, bin_size, scan=None, n_cols=None, grid_mapping=None,
     gm = grid_mapping or dm.grid_mapping(bin_size=bin_size, scan=scan,
                                          variant=variant)
     grid_variant = _grid_variant(gm)
+    cut_path = dm.metadata_scan_dir(scan) / "xrf_frame_cut.npz"
+    force_raw = cut_path.exists()
     if grid_mapping and variant and variant != grid_variant:
         raise ValueError(
             f"Grid mapping variant {grid_variant!r} does not match requested "
@@ -1834,12 +1881,13 @@ def open_bin_source(dm, bin_size, scan=None, n_cols=None, grid_mapping=None,
     # The ordinary 1x1 bins file may contain collision sums and float conversion.
     # Prefer the lossless archive plus mapping there; explicit variants (notably
     # territory) and coarser prebuilt bins retain their exact-file precedence.
-    if bin_size == 1 and not variant and archive.exists() and gm and Path(gm).exists():
+    if (not force_raw and bin_size == 1 and not variant and archive.exists()
+            and gm and Path(gm).exists()):
         return _ArchiveSource(archive, gm)
-    if h5 and os.path.exists(h5):
+    if not force_raw and h5 and os.path.exists(h5):
         return _H5Source(h5, bin_size=bin_size,
                          grid_mapping=gm if gm and Path(gm).exists() else None,
                          variant=variant)
-    if archive.exists() and gm and Path(gm).exists():
+    if not force_raw and archive.exists() and gm and Path(gm).exists():
         return _ArchiveSource(archive, gm)
     return _RawSource(dm, bin_size, scan=scan, n_cols=n_cols, grid_mapping=gm)

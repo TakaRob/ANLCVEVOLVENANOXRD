@@ -1,15 +1,18 @@
 # Q-space mapping — `xrd-app qspace`
 
+The GUI for this is hidden in XRD-APP GUI
 Convert detector pixels (+ the sample θ of a rocking scan) into **3D reciprocal-
 space vectors** `Q = (qx, qy, qz)`. This is the third geometry layer of the app:
-the pipeline otherwise works in 2θ-radial + χ-azimuth space (`core/geometry.py`,
-`core/rocking.py`); `core/qspace.py` adds the full 3D scattering vector so a θ
+the pipeline otherwise works in 2θ-radial + χ-azimuth space
+(`xrd_app/core/geometry.py`, `xrd_app/core/rocking.py`);
+`xrd_app/core/qspace.py` adds the full 3D scattering vector so a θ
 series can be assembled into a reciprocal-space map (RSM) and **lattice tilt**
 separated from **microstrain**.
 
-> Built on [`xrayutilities`](https://xrayutilities.sourceforge.io/) (the geometry
-> engine, validated to machine precision against an independent lab-frame
-> calculation) and, for the tilt-accurate path, [`pyFAI`](https://pyfai.readthedocs.io/).
+> Built on [`xrayutilities`](https://xrayutilities.sourceforge.io/) for the
+> default 3D geometry path and [`pyFAI`](https://pyfai.readthedocs.io/) for
+> calibrated `.poni` geometry. Both paths are cross-checked against independent
+> lab-frame calculations in the q-space tests.
 
 ---
 
@@ -20,12 +23,13 @@ directions:
 
 | Direction | Physical meaning | How to read it |
 |-----------|------------------|----------------|
-| **Radial** — `\|Q\| = 4π·sin(θ)/λ` | **microstrain** (lattice spacing `d = 2π/\|Q\|`) | shift in `\|Q\|` vs a reference reflection = Δd/d |
-| **Transverse** — direction of `Q` at fixed `\|Q\|` | **tilt / mosaicity** (grain orientation) | spread/drift of the `Q` direction across θ |
+| **Radial** — `\|Q\| = 4π·sin(θ)/λ` | lattice spacing `d = 2π/\|Q\|` | strain requires comparison with a justified unstrained/reference value |
+| **Transverse** — direction of `Q` at fixed `\|Q\|` | grain orientation / tilt | spread or drift of the `Q` direction across sample theta |
 
-`\|Q\|` is **exact from the 2θ map alone** — no geometry fit needed. Splitting
-`\|Q\|` into `(qx,qy,qz)` needs the beam center + sample-detector distance (and,
-for full accuracy, the detector tilt); see *Geometry* below.
+`qmagnitude_map(tth, λ)` obtains radial `\|Q\|` directly from the supplied 2θ
+map. The CLI output instead stores `q_mag = sqrt(qx²+qy²+qz²)` from the selected
+3D geometry path, so the default flat-fit result can inherit fit residual from
+unmodeled detector tilt. A calibrated `--poni` includes the supplied tilt model.
 
 ---
 
@@ -74,8 +78,10 @@ median-subtracted, thresholded (`--min-intensity`), and histogrammed by its
 per axis, default 128 → a 128³ volume), `--min-intensity`,
 `--subtract-median/--no-subtract-median`, `--in-dir`, `--out`.
 
-**Output** `Study/rsm.npz`: `volume` + per-voxel `counts` (coverage) on a
-`(nx,ny,nz)` grid, the `qx/qy/qz` `_edges` and `_centers`, and three max-intensity
+**Output** `Study/rsm.npz`: `volume` plus per-voxel `counts` of retained detector
+pixels after finite-value filtering, subtraction, and thresholding. It is not a
+threshold-independent geometric coverage map. The file also contains the
+`qx/qy/qz` `_edges` and `_centers`, and three max-intensity
 2D projections (`proj_qx_qy`, `proj_qx_qz`, `proj_qy_qz`) for quick viewing
 without 3D tooling. A `.summary.json` reports grid shape, q-ranges, total/peak
 intensity and fill fraction.
@@ -99,16 +105,16 @@ plt.xlabel("qx (1/Å)"); plt.ylabel("qy (1/Å)")
 ## Geometry: flat fit vs. `.poni`
 
 **Default (no `--poni`).** The beam center and sample-detector distance are
-recovered by a least-squares **flat-detector** fit of the 2θ map
-(`core/qspace.recover_geometry`). The per-scan `fit-RMS` printed to the console is
-the residual — for this detector it is ~50 mdeg, i.e. **unmodeled detector
-tilt**. `\|Q\|` is still exact; only the *direction* of `Q` carries this
-~50 mdeg (~0.01 Å⁻¹) error.
+recovered by a least-squares flat-detector fit of the 2θ map
+(`xrd_app.core.qspace.recover_geometry`). The printed `fit-RMS` measures mismatch
+between that model and the supplied map. The resulting vectors and stored
+`q_mag` are exact for the fitted flat geometry, not necessarily for every
+original 2θ-map pixel.
 
-**Tilt-accurate (`--poni`).** A pyFAI `.poni` carries the full geometry including
-tilt (`rot1/rot2/rot3`), so per-pixel directions are exact. `pyFAI` computes the
-lab-frame pixel positions; the app assembles `Q` and applies the θ rotation in the
-same frame as the default path (cross-checked in `tests/test_qspace.py`).
+**Calibrated (`--poni`).** A pyFAI `.poni` carries distance, beam-center
+parameters, and rotations (`rot1/rot2/rot3`), allowing detector tilt to be
+modeled. The resulting directions are as accurate as the supplied calibration.
+The frame conversion is cross-checked in `xrd_app/tests/test_qspace.py`.
 
 ### Getting a real `.poni`
 Calibrate on a standard (LaB₆ / CeO₂) with pyFAI:
@@ -135,9 +141,9 @@ calibration for tilt accuracy.
 
 | File | Contents |
 |------|----------|
-| `<scan>_qmap.npz` | `qx, qy, qz, q_mag` (detector-shaped, 1/Å) + geometry/meta (`beam_row`, `beam_col`, `distance_m`, `pixel_m`, `rms_deg`, `geometry_source`, `theta_deg`, `energy_ev`, `wavelength_A`) |
-| `<scan>_qmap.summary.json` | energy, λ, θ, geometry, `\|Q\|` range, #features annotated |
-| `<scan>_features_q.csv` | every detected feature (from `Labels/<scan>`) tagged with `qx, qy, qz, q_mag` at its **detector** pixel (`detector_y`, `detector_x`) — *not* its spatial scan-grid bin |
+| `<scan>_qmap.npz` | Detector-shaped `qx, qy, qz, q_mag`, scan/geometry metadata, and optional `intensity` when requested and available |
+| `<scan>_qmap.summary.json` | Energy, wavelength, theta, geometry, q range, and feature count |
+| `<scan>_features_q.csv` | Written when the selected default shape/combined catalog has features with detector coordinates; tags each at rounded/clipped `(detector_y, detector_x)` |
 
 Load a q-map:
 
@@ -149,10 +155,11 @@ print("distance", float(d["distance_m"]), "θ", float(d["theta_deg"]))
 ```
 
 ### Physics check (do this)
-A feature labeled `(002)` (ref 2θ = 15.01°) must land near `\|Q\| ≈ 1.96 Å⁻¹`
-(`d ≈ 3.16 Å`). If a feature's `q_mag` disagrees with `4π·sin(θ_com/2)/λ` for its
-own `tth_com`, the geometry or the pixel mapping is wrong — not a real signal.
-(Per `CLAUDE.md`: validate against physics, not just code.)
+A feature labeled `(002)` (ref 2θ = 15.01°) should land near
+`\|Q\| ≈ 1.96 Å⁻¹` (`d ≈ 3.16 Å`). Compare the stored geometry-derived `q_mag`
+with the direct radial value `4π·sin(tth_pixel/2)/λ`. On the default path, a
+systematic discrepancy can reveal flat-fit residual or detector tilt; a large
+feature-specific discrepancy suggests incorrect pixel or catalog assignment.
 
 ---
 
@@ -179,9 +186,9 @@ qx, qy, qz = qs.q_vectors_from_poni("calib.poni", energy_ev=15000.0, theta_deg=2
 ---
 
 ## Notes & next steps
-- **θ source.** `--theta` overrides; otherwise θ comes from
-  `core/tracking.THETA_BY_SCAN` (the 203–214 table). Scans not in the table need
-  `--theta`.
+- **Theta source.** `--theta` overrides; otherwise theta comes from
+  `xrd_app.core.tracking.THETA_BY_SCAN`. For an unknown scan the CLI warns and
+  uses `0.0` degrees, so pass `--theta` explicitly to avoid a zero-angle map.
 - **One frame.** The flat (xrayutilities) and `.poni` (pyFAI) paths return `Q` in
   the same lab frame (beam +x, vertical z; sample rocks about z), so their outputs
   are directly comparable.
@@ -189,10 +196,8 @@ qx, qy, qz = qs.q_vectors_from_poni("calib.poni", energy_ev=15000.0, theta_deg=2
   bins at each θ, so a broad radial background rides under the Bragg spots;
   `--subtract-median` (default) removes the flat part, `--min-intensity` trims the
   rest. For clean per-grain work prefer the feature q-points.
-- **Proof of concept / validation:** `xrd_app/notebooks/qspace_poc.py`.
-- **GUI.** The **Reciprocal Space** tab (`xrd-app gui`, or standalone
-  `python -m xrd_app.tabs.rsm`) renders the `rsm.npz` projections with the
-  per-grain feature cloud overlaid — pick the plane (qx–qy / qx–qz / qy–qz),
-  toggle the heatmap/log/cloud, and color the cloud by reflection, θ, or
-  intensity. It's render-only over `core.rsm.load_rsm` / `load_feature_cloud`;
-  build the data with `xrd-app qspace` then `xrd-app rsm` first.
+- **GUI.** The Reciprocal Space tab (`xrd-app gui`, or standalone
+  `python -m xrd_app.tabs.rsm`) supports 2D max-intensity projections and a 3D
+  volume with the feature cloud overlaid. Install the `gl` extra for the
+  PyOpenGL-backed 3D view. Build data with `qspace` then `rsm`, or orchestrate the
+  complete registered study with `xrd-app run-study --with-rsm`.

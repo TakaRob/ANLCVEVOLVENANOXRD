@@ -26,7 +26,7 @@ dependencies = [
 # gracefully (the Convert-.poni button and `qspace --poni` warn when absent).
 [project.optional-dependencies]
 poni = ["pyFAI"]            # .poni → tth conversion (core/geometry.py) + qspace --poni tilt path
-qspace = ["xrayutilities"]  # pixel → 3D reciprocal-space (q) mapping (core/qspace.py; see QSPACE.md)
+qspace = ["xrayutilities"]  # pixel → 3D reciprocal-space mapping; see notebookwalkthroughthrough/QSPACE.md
 gl = ["PyOpenGL"]           # 3D RSM volume view (gui/rsm_view.py; degrades to 2D + a hint when absent)
 notebook = ["ipykernel", "jupyter"]
 
@@ -37,7 +37,7 @@ xrf-app = "xrd_app.xrf_cli:main"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["xrd_app*"]
-exclude = ["xrd_app.tests*", "xrd_app.notebooks*"]
+exclude = ["xrd_app.tests*"]
 namespaces = false
 
 [tool.setuptools]
@@ -55,15 +55,12 @@ include-package-data = false
     "CombinedAlgorithms/catalog.json",
     "CombinedAlgorithms/*.py",
     "CombinedAlgorithms/**/*.py",
-    "NoiseReduction/*.py",
 ]
 
 [tool.setuptools.exclude-package-data]
 "*" = [
     "tests/*",
     "tests/**/*",
-    "notebooks/*",
-    "notebooks/**/*",
     "__pycache__/*",
     "**/__pycache__/*",
     "*.pyc",

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 from pathlib import Path
 from typing import List
 
@@ -35,6 +36,14 @@ DEFAULT_REFLECTIONS = [
 def default_reflections() -> List[dict]:
     """A fresh copy of the default perovskite reflection set."""
     return [dict(r) for r in DEFAULT_REFLECTIONS]
+
+
+def copy_bundled(json_path) -> Path:
+    """Copy the bundled reflection set to an editable project-owned file."""
+    destination = Path(json_path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    return Path(shutil.copyfile(Path(__file__).parent.parent / "assets" / "reflections.json",
+                                destination))
 
 
 def whole_frame_reflections(label: str = WHOLE_FRAME_LABEL) -> List[dict]:

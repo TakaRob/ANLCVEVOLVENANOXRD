@@ -29,6 +29,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Optional
@@ -123,7 +124,7 @@ def default_config(name: str, root: Path, scan_number: Optional[int] = None) -> 
             "tth_map": None,
             "reflections": None,
             "grid_mapping": None,
-            "detector_script": None,
+            "detector_script": "Algorithms/PeakAlgorithms/default_detector.py",
         },
         # Map of bin_size (int) -> path to the pre-binned HDF5 file.
         "bins": {},
@@ -171,9 +172,43 @@ class ProjectConfig:
         return self.config_path.exists()
 
     def create_tree(self) -> None:
-        """Create the standard project sub-directories."""
+        """Create the standard tree and seed project-owned editable defaults."""
         for d in PROJECT_DIRS:
             (self.root / d).mkdir(parents=True, exist_ok=True)
+
+        package = Path(__file__).parent
+        metadata = self.root / "Metadata"
+        algorithms = self.root / "Algorithms" / "PeakAlgorithms"
+        algorithms.mkdir(parents=True, exist_ok=True)
+        defaults = (
+            (package / "assets" / "reflections.json", metadata / "reflections.json"),
+            (package / "assets" / "tth.tiff", metadata / "tth.tiff"),
+            (package / "PeakAlgorithms" / "5x5_tophat_band_adaptive_snr.py",
+             algorithms / "default_detector.py"),
+        )
+        for source, destination in defaults:
+            if not destination.exists():
+                shutil.copy2(source, destination)
+
+        catalog = algorithms / "catalog.json"
+        if not catalog.exists():
+            with catalog.open("w") as stream:
+                json.dump({
+                    "description": "Project-owned peak detectors. Copy default_detector.py "
+                                   "and add another catalog entry to include an alternative.",
+                    "metric": "holdout_f2 is the primary ranking metric",
+                    "detectors": [{
+                        "name": "default_detector",
+                        "file": "default_detector.py",
+                        "role": "detector",
+                        "bin_size": None,
+                        "holdout_f1": None,
+                        "holdout_f2": None,
+                        "source": "project default",
+                        "notes": "Editable copy of the bundled production detector.",
+                    }],
+                }, stream, indent=2)
+                stream.write("\n")
 
     # ----- convenience accessors --------------------------------------
     def get(self, *keys, default=None):

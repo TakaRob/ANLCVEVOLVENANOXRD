@@ -13,33 +13,14 @@ dist/
 .ipynb_checkpoints/
 .pytest_cache/
 
-# ── Nested / external repositories (cloned separately) ──
-/CVEvolve/
-/mictools/
-
-# ── Raw & bulk data: LINK at runtime, never commit ──
-/raw_scans/
-/Visualizationss/
-/203 other/
-data/raw_scans/
-data/bins/
-
-# ── Per-project runtime workspace ──
-/config.yaml
-/data/
-/runs/
-/hutch/
-/mlruns/
-**/mlruns/
-**/sessions/
+# ── Local archive ──
+/Ignore/
 
 # ── XRD-app projects & workspaces (GUI-created at runtime; never commit) ──
-# A project is a config.yaml-rooted dir with this standard tree
-# (Raw/Binned/Metadata/Labels/Figures/CVEvolve/Study). Ignore the in-repo test
-# workspaces and that data tree wherever it appears. Tracked xrd_app CVEvolve
+# Ignore runtime data trees wherever they appear. Tracked xrd_app CVEvolve
 # source/assets are intentionally not matched by these runtime-output patterns.
-/TakaTest/
-/MockWorkspace/
+**/mlruns/
+**/sessions/
 **/Raw/
 **/Binned/
 **/Metadata/
@@ -55,7 +36,6 @@ data/bins/
 **/*cvevolve*/mlruns/
 
 # ── Generated analysis outputs ──
-/results/
 **/results/
 **/holdout_data/
 **/test_data/
@@ -72,7 +52,7 @@ data/bins/
 !xrd_app/assets/
 !xrd_app/assets/tth.tiff
 
-# ── Notebooks (large; force-add a specific one with `git add -f` if needed) ──
+# ── Generated Jupyter documents; tracked tutorials use notebooks/*.py ──
 *.ipynb
 
 # ── Images / preview renders ──
@@ -95,6 +75,3 @@ data/bins/
 Thumbs.db
 .vscode/
 .idea/
-
-# ── Generated report artifact (regenerated from TakajiReport.md) ──
-TakajiReport.docx

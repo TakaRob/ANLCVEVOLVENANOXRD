@@ -7,6 +7,7 @@ import shutil
 from pathlib import Path
 
 import click
+import h5py
 import numpy as np
 
 from .config import DataManager
@@ -66,7 +67,7 @@ def load_data(source, scan, root):
         except (KeyError, OSError, ValueError) as exc:
             raise click.ClickException(
                 f"Unsupported processed file {source}; choose a canonical XRF selection "
-                f"or the directory containing a legacy notebook bundle ({exc})"
+                f"or a directory containing canonical selections ({exc})"
             ) from exc
         scan_value = scan or selection["attrs"].get("scan")
         if scan_value is None:
@@ -120,11 +121,9 @@ def load_data(source, scan, root):
 
 @main.command(name="process-raw")
 @click.option("--scan", required=True, help="Registered scan number/name")
-@click.option("--grid-mapping", type=click.Path(exists=True, dir_okay=False, path_type=Path),
-              default=None, help="Parent xrd-app 1x1 grid mapping")
 @click.option("--root", type=click.Path(path_type=Path), default=Path("."),
               help="xrd-app project root")
-def process_raw(scan, grid_mapping, root):
+def process_raw(scan, root):
     """Build an editable canonical selection from registered raw ME7 data."""
     from .core import io
 
@@ -136,32 +135,25 @@ def process_raw(scan, grid_mapping, root):
     me7_dir = record.get("me7_dir")
     if not me7_dir:
         raise click.ClickException(f"No raw ME7 directory registered for {name}")
-    dm = DataManager(project.root, scan=name)
-    grid_path = Path(grid_mapping) if grid_mapping else dm.grid_mapping(bin_size=1, scan=name)
-    if not grid_path.exists():
-        raise click.ClickException(
-            f"No 1x1 grid mapping for {name}: {grid_path}. Build it in xrd-app first."
-        )
-    grid = io.load_grid_mapping(grid_path)
-    frame_map = np.asarray(grid.get("frame_map", []), dtype=np.int64)
-    if frame_map.size == 0:
-        raise click.ClickException("Grid mapping has no frame registration")
+    me7_files = xrf_core.me7_files(me7_dir)
+    if not me7_files:
+        raise click.ClickException(f"No scan_*.h5 ME7 files in {me7_dir}")
     config_path = project.metadata_scan_dir(name) / "xrf_elements.json"
     config = xrf_core.read_config(config_path)
     project.metadata_scan_dir(name).mkdir(parents=True, exist_ok=True)
     if not config_path.exists():
+        config["channels"] = list(range(6))
+        config["deadtime_correction"] = False
         xrf_core.write_config(config, config_path)
-    click.echo(f"Building per-frame XRF spectrum store for {name}...")
-    store = xrf_core.build_point_store(
-        me7_dir, grid, config["channels"], config["deadtime_correction"], log=click.echo
+    click.echo(f"Summing complete ME7 spectrum for {name}...")
+    spectrum = xrf_core.grand_sum_spectrum(
+        me7_dir, config["channels"], config["deadtime_correction"],
+        progress=lambda done, total: click.echo(f"PROGRESS {done}/{total} files"),
     )
     calibration = project.data.get("calibration") or config["calibration"]
     energy = xrf_selection.pixel_to_kev(np.arange(xrf_core.N_BINS), calibration)
-    x = np.full(len(frame_map), np.nan, dtype=float)
-    y = np.full(len(frame_map), np.nan, dtype=float)
-    positions = dm.position_csv(scan=name)
-    if positions.exists():
-        x, y = io.load_positions_xy(positions, len(frame_map))
+    sample_theta_deg = None
+    y_position_offset = None
     definitions = {}
     for element in config["elements"]:
         center_kev = float(element.get("observed_ev", element["line_ev"])) / 1000.0
@@ -184,106 +176,116 @@ def process_raw(scan, grid_mapping, root):
             ],
             "minimum_counts": None,
         }
-    source_files = [str(path) for path in grid.get("xrd_files", [])]
+    source_files = [str(path) for path in me7_files]
     base = {
         "attrs": {
             "scan": int(name.split("_")[1]),
-            "n_total_frames": len(frame_map),
-            "source_kind": "raw_me7",
+            "n_total_frames": 0,
+            "source_kind": "raw_me7_spectrum",
+            "linked_dataset": False,
             "channels": config["channels"],
             "deadtime_correction": config["deadtime_correction"],
             "energy_calibration": calibration,
+            "sample_theta_deg": sample_theta_deg,
+            "y_position_offset": y_position_offset,
         },
         "source_files": source_files,
         "frames": {
-            "global_frame_index": np.arange(len(frame_map)),
-            "source_file_index": frame_map[:, 0],
-            "source_frame_index": frame_map[:, 1],
-            "x": x,
-            "y": y,
+            "global_frame_index": np.asarray([], dtype=np.int64),
+            "source_file_index": np.asarray([], dtype=np.int32),
+            "source_frame_index": np.asarray([], dtype=np.int64),
+            "x": np.asarray([], dtype=float),
+            "y": np.asarray([], dtype=float),
         },
         "materials": {
             material: {
-                "intensity": np.zeros(len(frame_map), dtype=float),
-                "keep": np.ones(len(frame_map), dtype=bool),
+                "intensity": np.asarray([], dtype=float),
+                "keep": np.asarray([], dtype=bool),
                 "attrs": attrs,
             }
             for material, attrs in definitions.items()
         },
-        "spectrum": {"energy_kev": energy, "summed_counts": store.sum(axis=0)},
+        "spectrum": {"energy_kev": energy, "summed_counts": spectrum},
     }
     selection = xrf_selection.validate(base)
-    for material, attrs in definitions.items():
-        lo, hi = attrs["pixel_range"]
-        values = store[:, lo:hi].sum(axis=1, dtype=np.float64)
-        selection["materials"][material]["intensity"] = values
-        selection["materials"][material]["keep"] = np.ones(values.size, dtype=bool)
-    selection = xrf_selection.validate(selection)
     destination = project.selection_path(name)
     xrf_selection.save(destination, selection)
     info = xrf_selection.summary(selection)
     project.register_selection(name, destination, info["materials"], info["selection_hash"])
-    point_path = project.cache_scan_dir(name) / f"{name}_xrf_points.npz"
-    cache_calibration = config["calibration"] if "ev_per_bin" not in calibration else calibration
-    xrf_core.save_point_store(
-        point_path, store, config["channels"], config["deadtime_correction"],
-        cache_calibration,
-    )
-    click.echo(f"Processed {name} -> {destination}")
+    click.echo(f"Saved complete ME7 spectrum for {name} -> {destination}")
 
 
-@main.command(name="import-legacy")
-@click.option("--linker", type=click.Path(exists=True, dir_okay=False, path_type=Path),
-              required=True, help="Legacy Scan_NNNN_xrf_xrd_links.h5")
-@click.option("--masks", type=click.Path(exists=True, dir_okay=False, path_type=Path),
-              default=None, help="Legacy threshold mask NPZ (auto-resolved by default)")
-@click.option("--roi-config", type=click.Path(exists=True, dir_okay=False, path_type=Path),
-              default=None, help="Legacy xrf_rois.json")
-@click.option("--spectrum", type=click.Path(exists=True, dir_okay=False, path_type=Path),
-              default=None, help="Legacy ME7 spectrum NPZ")
-@click.option("--registration", type=click.Path(exists=True, dir_okay=False, path_type=Path),
-              default=None, help="Legacy XRF/XRD registration NPZ")
-@click.option("--intensities", type=click.Path(exists=True, dir_okay=False, path_type=Path),
-              default=None, help="Legacy full ROI intensity NPZ")
-@click.option("--scan", required=True, help="Scan number/name")
-@click.option("--output", type=click.Path(path_type=Path), default=None,
-              help="Canonical output (default: Processed/<scan>_xrf_selection.h5)")
+@main.command(name="link-dataset")
+@click.option("--scan", required=True, help="Processed scan number/name")
+@click.option("--definitions", required=True,
+              type=click.Path(exists=True, dir_okay=False, path_type=Path),
+              help="Material range definitions JSON")
 @click.option("--root", type=click.Path(path_type=Path), default=Path("."),
-              help="XRF project root")
-def import_legacy(linker, masks, roi_config, spectrum, registration, intensities,
-                  scan, output, root):
-    """Import the current prefilter notebook outputs into an XRF project."""
+              help="xrd-app project root")
+def link_dataset(scan, definitions, root):
+    """Register ME7/XRD frames and build per-point material intensities."""
+    from .core import io
+
     project = XRFProject.load(root)
-    if not project.exists():
-        raise click.ClickException(
-            f"No XRF add-on found at {project.config_path}; run xrf-app init"
-        )
     name = scan_name(scan)
-    out = output or project.selection_path(name)
-    try:
-        selection = xrf_selection.import_legacy_linker(
-            linker, mask_path=masks, roi_config_path=roi_config,
-            spectrum_path=spectrum, registration_path=registration,
-            intensity_path=intensities, scan=int(name.split("_")[1]),
-        )
-        xrf_selection.save(out, selection)
-        loaded = xrf_selection.load(out)
-    except (FileNotFoundError, KeyError, OSError, ValueError) as exc:
-        raise click.ClickException(str(exc)) from exc
-    info = xrf_selection.summary(loaded)
-    project.register_selection(name, out, info["materials"], info["selection_hash"])
-    click.echo(f"Imported {name} -> {out}")
-    for material, values in info["materials"].items():
-        click.echo(
-            f"  {material}: {values['retained_frames']:,} retained "
-            f"({values['retained_percent']:.2f}%)"
-        )
-    unresolved = loaded["attrs"].get("unresolved_frame_identities", 0)
-    if unresolved:
-        click.echo(
-            f"  Warning: {unresolved:,} frames rejected by every material have no "
-            "source/local identity in the retained-only legacy linker."
-        )
+    record = (project.data.get("scans") or {}).get(name, {})
+    me7_dir = record.get("me7_dir")
+    selection_path = project.selection_path(name)
+    if not me7_dir or not selection_path.exists():
+        raise click.ClickException("Compute the complete ME7 spectrum first")
+    selection = xrf_selection.load(selection_path)
+    xrd_files = io.scan_h5_files(Path(me7_dir).parent / "XRD", int(name.split("_")[1]))
+    registration = xrf_core.register_raw_frames(me7_dir, xrd_files)
+    frame_map = np.asarray(registration["frame_map"], dtype=np.int64)
+    global_indices = np.asarray(registration["global_frame_indices"], dtype=np.int64)
+    selection["source_files"] = registration["xrd_files"]
+    selection["frames"] = {
+        "global_frame_index": global_indices,
+        "source_file_index": frame_map[:, 0],
+        "source_frame_index": frame_map[:, 1],
+        "x": np.full(global_indices.size, np.nan),
+        "y": np.full(global_indices.size, np.nan),
+    }
+    selection["attrs"]["n_total_frames"] = registration["n_total_xrd_frames"]
+    selection["attrs"]["linked_dataset"] = True
+    dm = DataManager(project.root, scan=name)
+    raw_root = Path(me7_dir).parent.parent.parent
+    positions = raw_root / "processed" / "SOCKETSERVER" / f"{name}_position.h5"
+    if positions.exists():
+        all_x, all_y = io.load_positions_xy(positions, registration["n_total_xrd_frames"])
+        master = raw_root / f"{name}.h5"
+        offset_path = project.position_offset_path()
+        if master.exists() and offset_path.exists():
+            with h5py.File(master, "r") as handle:
+                theta = np.asarray(handle[
+                    "entry/instrument/bluesky/streams/baseline/sample_theta/value"
+                ][:], dtype=float)
+            all_y += xrf_core.position_offset_at_theta(offset_path, float(np.nanmean(theta)))
+        selection["frames"]["x"] = all_x[global_indices]
+        selection["frames"]["y"] = all_y[global_indices]
+    with definitions.open() as stream:
+        material_definitions = json.load(stream)
+    selection["materials"] = {
+        material: {
+            "intensity": np.full(global_indices.size, np.nan),
+            "keep": np.ones(global_indices.size, dtype=bool),
+            "attrs": attrs,
+        }
+        for material, attrs in material_definitions.items()
+    }
+    selection = xrf_selection.integrate_material_rois(
+        selection, me7_dir, material_definitions,
+        progress=lambda done, total: click.echo(f"PROGRESS {done}/{total} frames"),
+    )
+    selection["attrs"]["linked_dataset"] = True
+    xrf_selection.save(selection_path, selection)
+    info = xrf_selection.summary(selection)
+    project.register_selection(name, selection_path, info["materials"], info["selection_hash"])
+    click.echo(
+        f"Built XRF/XRD frame registration for {name}: {global_indices.size:,} matched frames; "
+        f"unmatched ME7/XRD {registration['unmatched_me7']}/"
+        f"{registration['unmatched_xrd']}"
+    )
 
 
 @main.command()
@@ -337,3 +339,7 @@ def status(scan, json_output, root):
                 f"    {material}: {values['retained_frames']:,} retained "
                 f"({values['retained_percent']:.2f}%)"
             )
+
+
+if __name__ == "__main__":
+    main()

@@ -3,16 +3,6 @@
   "metric": "holdout_f2 is the primary ranking metric; holdout_f1 is the fallback (spatially validated; higher is better)",
   "detectors": [
     {
-      "name": "baseline",
-      "bin_size": null,
-      "file": "baseline.py",
-      "role": "detector",
-      "holdout_f1": null,
-      "holdout_f2": null,
-      "source": "manual",
-      "notes": "Binned baseline: radial background subtraction + percentile threshold + connected components. Generic reference, runs on any binned size."
-    },
-    {
       "name": "5x5_tophat_band_adaptive_snr",
       "bin_size": null,
       "file": "5x5_tophat_band_adaptive_snr.py",
@@ -24,44 +14,11 @@
       "notes": "Developed on 5x5 (CVEvolve). Kept the variant computing integrated_intensity; runs on any binned size."
     },
     {
-      "name": "5x5_tophat_dual_snr_detector",
-      "bin_size": null,
-      "file": "5x5_tophat_dual_snr_detector.py",
-      "role": "detector",
-      "holdout_f1": 0.7778,
-      "holdout_f2": null,
-      "source": "cvevolve",
-      "dev_bin": "5x5",
-      "notes": "Developed on 5x5 (CVEvolve)."
-    },
-    {
       "name": "5x5_tuned_multiscale_tophat_tight_bands",
       "bin_size": null,
       "file": "5x5_tuned_multiscale_tophat_tight_bands.py",
       "role": "detector",
       "holdout_f1": 0.7706,
-      "holdout_f2": null,
-      "source": "cvevolve",
-      "dev_bin": "5x5",
-      "notes": "Developed on 5x5 (CVEvolve)."
-    },
-    {
-      "name": "5x5_tuned_multiscale_tophat_dual_snr",
-      "bin_size": null,
-      "file": "5x5_tuned_multiscale_tophat_dual_snr.py",
-      "role": "detector",
-      "holdout_f1": 0.7691,
-      "holdout_f2": null,
-      "source": "cvevolve",
-      "dev_bin": "5x5",
-      "notes": "Developed on 5x5 (CVEvolve)."
-    },
-    {
-      "name": "5x5_log_tophat_hybrid_detector",
-      "bin_size": null,
-      "file": "5x5_log_tophat_hybrid_detector.py",
-      "role": "detector",
-      "holdout_f1": 0.768,
       "holdout_f2": null,
       "source": "cvevolve",
       "dev_bin": "5x5",

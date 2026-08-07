@@ -11,6 +11,14 @@ _BASELINE = (Path(__file__).resolve().parent.parent
              / "CombinedAlgorithms" / "1x1_baseline.py")
 
 
+def test_copy_bundled_creates_identical_editable_file(tmp_path):
+    destination = tmp_path / "Metadata" / "reflections.json"
+    bundled = Path(refl_io.__file__).resolve().parent.parent / "assets" / "reflections.json"
+
+    assert refl_io.copy_bundled(destination) == destination
+    assert destination.read_bytes() == bundled.read_bytes()
+
+
 def test_whole_frame_is_one_unlimited_reflection():
     refls = refl_io.whole_frame_reflections()
     assert refls == [{

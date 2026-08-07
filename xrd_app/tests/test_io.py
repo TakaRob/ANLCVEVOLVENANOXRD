@@ -144,6 +144,20 @@ def test_unbinned_archive_roundtrip_and_metadata(tmp_path):
     assert n_frames == 3
 
 
+def test_load_positions_accepts_prefilter_h5_layout(tmp_path):
+    positions = tmp_path / "positions.h5"
+    with h5py.File(positions, "w") as handle:
+        group = handle.create_group("entry/data")
+        group.create_dataset("X_Position", data=[1.0, 2.0])
+        group.create_dataset("Y_Position", data=[3.0, 4.0])
+
+    x, y = io.load_positions_xy(positions, 3)
+
+    np.testing.assert_allclose(x[:2], [1.0, 2.0])
+    np.testing.assert_allclose(y[:2], [3.0, 4.0])
+    assert np.isnan(x[2]) and np.isnan(y[2])
+
+
 def test_archive_source_sums_cells_and_regions_without_raw(tmp_path):
     dm = _project(tmp_path)
     raw = dm.xrd_frames_dir(scan=7)

@@ -31,7 +31,6 @@ def test_catalog_offers_only_production_detector_contract(tmp_path):
     detectors = dm.list_detectors()
 
     assert detectors
-    assert "5x5_tophat_dual_snr_detector" not in {d["name"] for d in detectors}
     for entry in detectors:
         module = io.load_module(entry["_path"])
         assert all(callable(getattr(module, name, None)) for name in REQUIRED_DETECTOR_API)
@@ -168,6 +167,20 @@ def test_dynamic_import_identity_tracks_path_and_content(tmp_path):
     assert (mod1.VALUE, mod2.VALUE, mod3.VALUE) == (1, 2, 3)
 
 
+def test_tracked_notebooks_are_portable_percent_scripts():
+    notebooks = sorted(Path("notebooks").glob("[0-9][0-9]_*.py"))
+
+    assert notebooks
+    for notebook in notebooks:
+        source = notebook.read_text()
+        compile(source, str(notebook), "exec")
+        assert "# %%" in source
+        assert "/home/" not in source
+        assert "/mnt/" not in source
+        assert "xrd-app gui" not in source
+        assert "xrf-app gui" not in source
+
+
 def test_packaging_excludes_development_trees_and_keeps_runtime_assets():
     config = tomllib.loads(Path("pyproject.toml").read_text())
     discovery = config["tool"]["setuptools"]["packages"]["find"]
@@ -176,11 +189,9 @@ def test_packaging_excludes_development_trees_and_keeps_runtime_assets():
     excluded_data = setuptools["exclude-package-data"]["*"]
 
     assert "xrd_app.tests*" in discovery["exclude"]
-    assert "xrd_app.notebooks*" in discovery["exclude"]
     assert discovery["namespaces"] is False
     assert setuptools["include-package-data"] is False
     assert "PeakAlgorithms/catalog.json" in package_data
     assert "PeakAlgorithms/*.py" in package_data
     assert "tests/**/*" in excluded_data
-    assert "notebooks/**/*" in excluded_data
     assert "**/*.pyc" in excluded_data

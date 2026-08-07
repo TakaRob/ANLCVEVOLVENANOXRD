@@ -24,6 +24,7 @@ perovskite/halide element set below; see :func:`default_config`.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Sequence
 
@@ -233,6 +234,85 @@ def me7_files(me7_dir) -> List[Path]:
     return sorted(Path(me7_dir).glob("scan_*.h5"))
 
 
+def load_position_offsets(path) -> tuple:
+    """Load and validate the notebook-style theta/Y-offset calibration JSON."""
+    with Path(path).open() as stream:
+        data = json.load(stream)
+    theta = np.asarray(data["theta"], dtype=float)
+    y_offset = np.asarray(data["y_offset"], dtype=float)
+    if theta.ndim != 1 or theta.size == 0 or theta.shape != y_offset.shape:
+        raise ValueError("position_offset theta and y_offset must be non-empty equal arrays")
+    order = np.argsort(theta)
+    return theta[order], y_offset[order]
+
+
+def position_offset_at_theta(path, sample_theta_deg: float) -> float:
+    """Resolve Y correction using the notebook's exact-match/interpolation rule."""
+    theta, y_offset = load_position_offsets(path)
+    nearest = int(np.argmin(np.abs(theta - sample_theta_deg)))
+    if abs(theta[nearest] - sample_theta_deg) <= 0.01:
+        return float(y_offset[nearest])
+    return float(np.interp(sample_theta_deg, theta, y_offset))
+
+
+def register_raw_frames(me7_dir, xrd_files: Sequence[Path]) -> dict:
+    """Register matching ME7/XRD file numbers and frames in acquisition order."""
+    import h5py
+
+    def numbered(files):
+        found = {}
+        for path in files:
+            match = re.search(r"_(\d+)\.h5$", Path(path).name, re.IGNORECASE)
+            if not match:
+                continue
+            number = int(match.group(1))
+            if number in found:
+                raise ValueError(f"Duplicate scan file number {number}")
+            found[number] = Path(path)
+        return found
+
+    me7_by_number = numbered(me7_files(me7_dir))
+    xrd_by_number = numbered(xrd_files)
+    common_numbers = sorted(me7_by_number.keys() & xrd_by_number.keys())
+    if not common_numbers:
+        raise FileNotFoundError("ME7 and XRD have no matching scan file numbers")
+
+    frame_map = []
+    global_frame_indices = []
+    matched_me7 = []
+    unmatched_me7 = 0
+    unmatched_xrd = 0
+    global_start = 0
+    matched_xrd = []
+    for file_index, number in enumerate(common_numbers):
+        xrd_path = xrd_by_number[number]
+        me7_path = me7_by_number[number]
+        matched_xrd.append(xrd_path)
+        with h5py.File(xrd_path, "r") as handle:
+            data = handle[H5_DATASET]
+            xrd_count = int(data.shape[0]) if data.ndim == 3 else 1
+        with h5py.File(me7_path, "r") as handle:
+            me7_count = int(handle[H5_DATASET].shape[0])
+        mapped_count = min(me7_count, xrd_count)
+        frame_map.extend([file_index, local_index] for local_index in range(mapped_count))
+        global_frame_indices.extend(global_start + local_index
+                                    for local_index in range(mapped_count))
+        matched_me7.append(me7_path)
+        unmatched_me7 += me7_count - mapped_count
+        unmatched_xrd += xrd_count - mapped_count
+        global_start += xrd_count
+
+    return {
+        "xrd_files": [str(path) for path in matched_xrd],
+        "me7_files": matched_me7,
+        "frame_map": frame_map,
+        "global_frame_indices": global_frame_indices,
+        "n_total_xrd_frames": global_start,
+        "unmatched_me7": unmatched_me7,
+        "unmatched_xrd": unmatched_xrd,
+    }
+
+
 def fileloc_to_bin(grid_mapping: dict) -> Dict[tuple, str]:
     """Map ``(file_index, local_index) → bin_key`` from a grid mapping.
 
@@ -289,7 +369,8 @@ def _summed_spectra(h5, channels: Sequence[int], deadtime: bool) -> np.ndarray:
 # ─────────────────────────────────────────────────────────────────────
 def grand_sum_spectrum(me7_dir, channels: Sequence[int], deadtime: bool = True,
                        max_files: Optional[int] = None,
-                       log: Callable[[str], None] = lambda *_: None) -> np.ndarray:
+                       log: Callable[[str], None] = lambda *_: None,
+                       progress: Optional[Callable[[int, int], None]] = None) -> np.ndarray:
     """Master MCA spectrum: enabled channels summed over *all* spatial points.
 
     Accumulated file-by-file (memory-light). ``max_files`` subsamples rows for a
@@ -303,10 +384,12 @@ def grand_sum_spectrum(me7_dir, channels: Sequence[int], deadtime: bool = True,
         step = max(1, len(files) // max_files)
         files = files[::step]
     acc = np.zeros(N_BINS, dtype=np.float64)
-    for fp in files:
+    for index, fp in enumerate(files, start=1):
         with h5py.File(fp, "r") as h5:
             if H5_DATASET in h5:
                 acc += _summed_spectra(h5, channels, deadtime).sum(axis=0)
+        if progress is not None:
+            progress(index, len(files))
     log(f"  grand sum over {len(files)} files")
     return acc
 
@@ -370,7 +453,8 @@ def point_spectrum(me7_dir, grid_mapping: dict, bin_key: str,
 
 def build_point_store(me7_dir, grid_mapping: dict, channels: Sequence[int],
                       deadtime: bool = True,
-                      log: Callable[[str], None] = lambda *_: None) -> np.ndarray:
+                      log: Callable[[str], None] = lambda *_: None,
+                      files: Optional[Sequence[Path]] = None) -> np.ndarray:
     """Per-global-frame deadtime-corrected, channel-summed MCA spectra.
 
     Returns a ``(n_global_frames, N_BINS)`` integer array indexed by the grid
@@ -387,13 +471,14 @@ def build_point_store(me7_dir, grid_mapping: dict, channels: Sequence[int],
     n_global = len(frame_map)
     if not n_global:
         raise ValueError("grid mapping has no frame_map")
-    files = me7_files(me7_dir)
+    files = list(files) if files is not None else me7_files(me7_dir)
     if not files:
         raise FileNotFoundError(f"No ME7 files (scan_*.h5) in {me7_dir}")
     by_file: Dict[int, List[tuple]] = {}
     for gi, (fi, li) in enumerate(frame_map):
         by_file.setdefault(int(fi), []).append((gi, int(li)))
     store = np.zeros((n_global, N_BINS), dtype=np.uint32)   # counts → small ints
+    processed = 0
     for fi in sorted(by_file):
         if fi >= len(files):
             continue
@@ -405,7 +490,8 @@ def build_point_store(me7_dir, grid_mapping: dict, channels: Sequence[int],
         for gi, li in by_file[fi]:
             if 0 <= li < npts:
                 store[gi] = np.rint(spectra[li]).astype(np.uint32)
-        log(f"  {files[fi].name}: stored {len(by_file[fi])} frames")
+        processed += len(by_file[fi])
+        log(f"PROGRESS {processed}/{n_global} frames")
     return store
 
 

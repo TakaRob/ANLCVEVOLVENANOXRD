@@ -238,7 +238,7 @@ def characterize_features(features, beam_center=None, tth_map=None, ref_tth_map=
                 var = np.dot(wn, (ta - mu) ** 2)
                 # Radial breadth: FWHM of Δ2θ across the feature's bins. (Was
                 # named "strain_breadth"; renamed for honesty — it is not a
-                # calibrated strain. See TERMINOLOGY.md §3.3.)
+                # calibrated strain; it is only within-shape radial breadth.)
                 feature_info["tth_fwhm"] = round(2.3548 * np.sqrt(var), 4)
 
         if beam_center is not None:

@@ -1,15 +1,36 @@
-"""
-2-theta Band + Fast Top-Hat + Adaptive Thresholding Bragg Peak Detector
+"""Default project-editable Bragg peak detector.
 
-Multi-stage detector for Bragg peaks in spatially-binned XRD images.
+New projects receive this file as
+``Algorithms/PeakAlgorithms/default_detector.py``. Edit that project copy, not
+this bundled source. To add another detector, duplicate the project file under a
+new ``.py`` name and add a matching entry to the adjacent ``catalog.json``.
+A catalog entry needs ``name``, ``file``, ``role: detector``, and ``bin_size``
+(null means any binned size); scores and notes are optional.
 
-Pipeline:
-1. Robust non-parametric radial median background subtraction
-2. Fast white top-hat via min-max filters to extract compact bright features
-3. 2-theta band masking: restrict search to narrow bands around known reflections
-4. Per-band adaptive thresholding using MAD-based statistics
-5. Connected component analysis with size + compactness filtering
-6. Cross-band duplicate suppression
+The xrd-app binned detector contract consists of these five callables:
+
+``precompute_tth(tth_map) -> object``
+    Input: 2-D float array giving 2-theta in degrees for each detector pixel.
+    Output: reusable radial-bin data passed unchanged to background subtraction.
+``radial_median_subtract(image, tth_data) -> cleaned_image``
+    Input: one 2-D binned detector image and the precomputed object.
+    Output: same-shape float image after radial background subtraction.
+``fast_tophat(cleaned_image, size=15) -> feature_image``
+    Input/output: same-shape 2-D arrays; highlights compact bright features.
+``build_tth_band_masks(tth_map, degs, deg_labels, tth_tolerance=0.4) -> dict``
+    Inputs: the 2-theta map plus parallel reflection-angle and label lists.
+    Output: ``{label: boolean_mask}``, each mask matching the image shape.
+``detect_in_band(feature_image, cleaned_image, band_mask, label, ...) -> list``
+    Output: peak dictionaries. Each requires integer ``x`` and ``y``, ``label``,
+    and numeric ``snr``. Include ``peak_val`` and ``integrated_intensity`` so
+    downstream shape characterization retains useful intensity measurements.
+    Coordinates are detector pixels: x is column and y is row.
+
+xrd-app supplies keyword tuning arguments to these functions, so compatible
+replacements should retain the current parameters or accept ``**kwargs``.
+The pipeline below performs radial median subtraction, white top-hat filtering,
+reflection-band masking, MAD-based thresholding, connected-component filtering,
+and cross-band duplicate suppression.
 """
 
 import numpy as np

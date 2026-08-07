@@ -3,7 +3,7 @@
 # were recovered by a flat-detector fit of tth.tiff, and Rot1/Rot2/Rot3 are 0
 # (NO tilt). Feeding it to `xrd-app qspace --poni` therefore reproduces the
 # no-poni flat path. Replace it with a REAL .poni from pyFAI-calib on a
-# calibrant (LaB6 / CeO2) to get tilt-accurate Q directions. See docs/QSPACE.md.
+# calibrant (LaB6 / CeO2) to get tilt-accurate Q directions. See QSPACE.md.
 #
 # Nota: C-Order, 1 refers to the Y axis, 2 to the X axis
 poni_version: 2.1

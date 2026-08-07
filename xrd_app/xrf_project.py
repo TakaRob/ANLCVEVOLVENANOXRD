@@ -2,14 +2,15 @@
 
 from __future__ import annotations
 
+import json
 import re
+import shutil
 from pathlib import Path
 
 import h5py
 import yaml
 
-from .config import ProjectConfig, DataManager, default_config as default_xrd_config
-from .core import reflections
+from .config import ProjectConfig, default_config as default_xrd_config
 
 ADDON_DIR = "XRF"
 CONFIG_FILENAME = "xrf_config.yaml"
@@ -42,6 +43,7 @@ def default_config(name):
         "data_sources": {
             "me7_root": None,
             "position_root": None,
+            "position_offset": None,
             "xrd_identity_root": None,
         },
         "calibration": dict(DEFAULT_CALIBRATION),
@@ -111,8 +113,6 @@ class XRFProject:
             )
             config.create_tree()
             config.save()
-            metadata = DataManager(config=config).metadata_dir
-            reflections.save(reflections.default_reflections(), metadata / "reflections.json")
         return self.create_addon(name)
 
     def create_addon(self, name=None):
@@ -132,6 +132,11 @@ class XRFProject:
         active_scan = (xrd_config.data.get("scan") or {}).get("name")
         if active_scan:
             self.data["active_scan"] = active_scan
+        offset = self.path("metadata_dir") / "position_offset.json"
+        with offset.open("w") as stream:
+            json.dump({"theta": [0.0], "y_offset": [0.0]}, stream, indent=2)
+            stream.write("\n")
+        self.data["data_sources"]["position_offset"] = "Metadata/position_offset.json"
         self.save()
         return self
 
@@ -230,6 +235,23 @@ class XRFProject:
             "offset_kev": float(calibration["offset_kev"]),
         }
         self.save()
+
+    def position_offset_path(self):
+        """Canonical project-owned position-offset calibration."""
+        return self.path("metadata_dir") / "position_offset.json"
+
+    def set_position_offset(self, path):
+        """Copy a validated position-offset JSON to its canonical project path."""
+        source = Path(path).resolve()
+        destination = self.position_offset_path()
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        if source != destination.resolve():
+            shutil.copy2(source, destination)
+        self.data.setdefault("data_sources", {})["position_offset"] = str(
+            destination.relative_to(self.addon_root)
+        )
+        self.save()
+        return destination
 
     def register_raw_me7(self, scan, path, save=True):
         name = scan_name(scan)

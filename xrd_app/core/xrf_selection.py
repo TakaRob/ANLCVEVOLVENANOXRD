@@ -59,7 +59,7 @@ def kev_to_pixel(energy_kev, calibration):
     ) / float(calibration.get("ev_per_bin", 10.0))
 
 
-def integrate_material_rois(selection, me7_dir, definitions):
+def integrate_material_rois(selection, me7_dir, definitions, progress=None):
     """Reintegrate selected material ROIs from registered raw ME7 files."""
     from . import xrf
 
@@ -97,6 +97,7 @@ def integrate_material_rois(selection, me7_dir, definitions):
 
     frame_files = data["frames"]["source_file_index"]
     frame_locals = data["frames"]["source_frame_index"]
+    processed = 0
     for file_index, source_file in enumerate(data["source_files"]):
         path = me7_by_name.get(Path(source_file).name)
         if path is None:
@@ -113,6 +114,9 @@ def integrate_material_rois(selection, me7_dir, definitions):
         for material in materials.values():
             lo, hi = material["attrs"]["pixel_range"]
             material["intensity"][valid] = spectra[local_indices, lo:hi].sum(axis=1)
+        processed += valid.size
+        if progress is not None:
+            progress(processed, size)
 
     for name, material in materials.items():
         minimum = material["attrs"].get("minimum_counts")
@@ -123,6 +127,99 @@ def integrate_material_rois(selection, me7_dir, definitions):
         )
     data["materials"] = materials
     return validate(data)
+
+
+def activate_xrd_roi_project(project_root, scan, material):
+    """Expose a linked XRF cut to xrd-app without reading detector frames."""
+    from ..config import DataManager
+    from . import io, reflection_sum
+
+    project_root = Path(project_root).resolve()
+    dm = DataManager(project_root, scan=scan)
+    selection_path = project_root / "XRF" / "Processed" / f"{scan}_xrf_selection.h5"
+    data = load(selection_path)
+    if not data["attrs"].get("linked_dataset"):
+        raise ValueError("XRF/XRD frame registration has not been built")
+    if material not in data["materials"]:
+        raise KeyError(material)
+
+    xrd_files = [Path(path) for path in data["source_files"]]
+    scan_dir = xrd_files[0].parent.parent
+    info = io.scan_info(scan_dir, deep=False)
+    registry = dm.scans_registry()
+    registry[scan] = {key: info[key] for key in
+                      ("dir", "frames_dir", "n_files", "n_frames", "shape")}
+    dm.write_scans_registry(registry)
+    dm.config.data["scans"] = registry
+    dm.config.data.setdefault("detector", {})["shape"] = info.get("shape")
+    if not (dm.config.data.get("scan") or {}).get("name"):
+        dm.config.data["scan"] = {
+            "name": scan, "number": DataManager.scan_number_of(scan),
+        }
+    raw_root = scan_dir.parent.parent
+    notebook_positions = raw_root / "processed" / "SOCKETSERVER" / f"{scan}_position.h5"
+    if notebook_positions.exists():
+        dm.config.data.setdefault("data_sources", {})["position_csv"] = str(
+            notebook_positions
+        )
+    dm.config.save()
+
+    keep = data["materials"][material]["keep"]
+    file_indices = data["frames"]["source_file_index"][keep]
+    local_indices = data["frames"]["source_frame_index"][keep]
+    source_names = np.asarray([
+        Path(data["source_files"][int(index)]).name for index in file_indices
+    ])
+    cut_path = dm.metadata_scan_dir(scan) / "xrf_frame_cut.npz"
+    cut_path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = cut_path.with_name(".xrf_frame_cut.tmp.npz")
+    np.savez_compressed(
+        temporary, source_file=source_names, source_frame_index=local_indices,
+        material=np.asarray(material),
+    )
+    temporary.replace(cut_path)
+    reflection_sum.sum_path(dm, scan).unlink(missing_ok=True)
+    return {
+        "scan": scan, "material": material, "selected_frames": int(keep.sum()),
+        "selection_path": selection_path, "cut_path": cut_path,
+    }
+
+
+def sum_selected_xrd(selection, material, progress=None):
+    """Sum raw XRD frames retained by one material's XRF threshold mask."""
+    data = validate(selection)
+    if material not in data["materials"]:
+        raise KeyError(material)
+    keep = data["materials"][material]["keep"]
+    file_indices = data["frames"]["source_file_index"]
+    local_indices = data["frames"]["source_frame_index"]
+    selected = np.flatnonzero(keep & (local_indices >= 0))
+    if not selected.size:
+        raise ValueError(f"Material {material!r} retains no registered XRD frames")
+
+    image = None
+    processed = 0
+    for file_index, source_file in enumerate(data["source_files"]):
+        rows = selected[file_indices[selected] == file_index]
+        if not rows.size:
+            continue
+        locals_for_file = np.sort(local_indices[rows])
+        with h5py.File(source_file, "r") as handle:
+            dataset = handle["entry/data/data"]
+            if np.any(locals_for_file >= dataset.shape[0]):
+                raise ValueError(f"XRD file {Path(source_file).name} has fewer frames than registration")
+            for start in range(0, locals_for_file.size, 8):
+                batch_indices = locals_for_file[start:start + 8]
+                batch = np.asarray(dataset[batch_indices], dtype=np.float64)
+                batch_sum = batch.sum(axis=0)
+                image = batch_sum if image is None else image + batch_sum
+                processed += batch_indices.size
+                if progress is not None:
+                    progress(processed, int(selected.size))
+    if image is None:
+        raise ValueError(f"No readable XRD frames retained for {material!r}")
+    np.clip(image, 0, 1e9, out=image)
+    return image, int(selected.size)
 
 
 def apply_threshold(selection, material, minimum_counts):
@@ -352,184 +449,3 @@ def summary(selection):
             for name, material in data["materials"].items()
         },
     }
-
-
-def import_legacy_linker(link_path, mask_path=None, roi_config_path=None,
-                         spectrum_path=None, registration_path=None,
-                         intensity_path=None, scan=None):
-    """Convert the current notebook linker and sidecars to a canonical selection.
-
-    The linker contains retained rows only. A mask sidecar is therefore required
-    to preserve rejected positions and the full acquisition-index registration.
-    """
-    link_path = Path(link_path)
-    mask_path = Path(mask_path) if mask_path else link_path.with_name(
-        link_path.name.replace("xrf_xrd_links.h5", "xrf_threshold_masks.npz")
-    )
-    if not mask_path.exists():
-        raise FileNotFoundError(
-            f"Legacy mask sidecar is required to reconstruct rejected frames: {mask_path}"
-        )
-
-    with h5py.File(link_path, "r") as handle:
-        group = handle["links"]
-        link_material = _decode(group["Material"][:])
-        link_global = np.asarray(group["Global Frame Index"][:], dtype=np.int64)
-        link_intensity = np.asarray(group["XRF Intensity"][:], dtype=float)
-        link_x = np.asarray(group["X"][:], dtype=float)
-        link_y = np.asarray(group["Y"][:], dtype=float)
-        link_file = _decode(group["XRD File Link"][:])
-        link_local = np.asarray(group["XRD Frame Index"][:], dtype=np.int64)
-        link_scan = handle.attrs.get("scan")
-
-    with np.load(mask_path, allow_pickle=False) as masks:
-        names = _decode(masks["names"][:]).tolist()
-        global_indices = np.asarray(masks["global_frame_indices"][:], dtype=np.int64)
-        keep_masks = np.asarray(masks["keep_masks"][:], dtype=bool)
-        minimum_counts = np.asarray(masks["minimum_counts"][:], dtype=float)
-    if keep_masks.shape != (len(names), len(global_indices)):
-        raise ValueError("Legacy keep_masks shape does not match names/global indices")
-    if np.unique(global_indices).size != global_indices.size:
-        raise ValueError("Legacy global frame indices are not unique")
-
-    index_of = {int(value): index for index, value in enumerate(global_indices)}
-    source_files = sorted(set(link_file.tolist()))
-    source_index = {path: index for index, path in enumerate(source_files)}
-    frame_file = np.full(global_indices.size, -1, dtype=np.int32)
-    frame_local = np.full(global_indices.size, -1, dtype=np.int64)
-    frame_x = np.full(global_indices.size, np.nan, dtype=float)
-    frame_y = np.full(global_indices.size, np.nan, dtype=float)
-    materials = {
-        name: {
-            "intensity": np.full(global_indices.size, np.nan, dtype=float),
-            "keep": keep_masks[index].copy(),
-            "attrs": {
-                "display_name": name,
-                "minimum_counts": None if np.isnan(minimum_counts[index])
-                else float(minimum_counts[index]),
-            },
-        }
-        for index, name in enumerate(names)
-    }
-    for material, global_index, intensity, x, y, path, local in zip(
-        link_material, link_global, link_intensity, link_x, link_y, link_file, link_local
-    ):
-        if int(global_index) not in index_of:
-            raise ValueError(f"Link global index {global_index} is absent from mask sidecar")
-        index = index_of[int(global_index)]
-        file_index = source_index[str(path)]
-        if frame_file[index] not in (-1, file_index) or frame_local[index] not in (-1, int(local)):
-            raise ValueError(f"Conflicting XRD identity for global frame {global_index}")
-        frame_file[index] = file_index
-        frame_local[index] = int(local)
-        frame_x[index] = float(x)
-        frame_y[index] = float(y)
-        if str(material) in materials:
-            materials[str(material)]["intensity"][index] = float(intensity)
-
-    # The full ROI intensity cache restores values for rejected as well as retained
-    # positions, allowing thresholds to be changed without rereading raw ME7.
-    intensity_path = Path(intensity_path) if intensity_path else link_path.with_name(
-        link_path.name.replace("xrf_xrd_links.h5", "xrf_roi_intensities.npz")
-    )
-    if intensity_path.exists():
-        with np.load(intensity_path, allow_pickle=False) as intensities:
-            cached_materials = _decode(intensities["materials"][:]).tolist()
-            cached_values = np.asarray(intensities["intensities"], dtype=float)
-        if cached_values.shape != (len(cached_materials), len(global_indices)):
-            raise ValueError("Legacy ROI intensity cache shape does not match registration")
-        for row, name in enumerate(cached_materials):
-            if name in materials:
-                materials[name]["intensity"] = cached_values[row].copy()
-
-    # Complete identities for frames cut by every material from the registration
-    # cache when available. The cache preserves acquisition ordering and positions.
-    registration_path = Path(registration_path) if registration_path else link_path.with_name(
-        link_path.name.replace("xrf_xrd_links.h5", "xrf_xrd_registration.npz")
-    )
-    if registration_path.exists():
-        with np.load(registration_path, allow_pickle=False) as registration:
-            signature = json.loads(str(registration["signature"]))
-            file_numbers = np.asarray(registration["file_numbers"], dtype=int)
-            xrd_counts = np.asarray(registration["xrd_counts"], dtype=int)
-            x_values = np.asarray(registration["x_position"], dtype=float)
-            y_values = np.asarray(registration["y_position_raw"], dtype=float)
-            y_values += float(registration["y_offset"])
-        registered_names = signature.get("xrd_files", [])
-        if len(registered_names) != len(file_numbers) or len(xrd_counts) != len(file_numbers):
-            raise ValueError("Legacy registration file arrays are inconsistent")
-        linked_by_name = {Path(path).name: path for path in source_files}
-        for name in registered_names:
-            if name not in linked_by_name:
-                candidate = next((path for path in source_files if Path(path).name == name), None)
-                if candidate is None:
-                    # Derive the raw directory from any retained link.
-                    candidate = str(Path(source_files[0]).with_name(name)) if source_files else name
-                linked_by_name[name] = candidate
-        source_files = [linked_by_name[name] for name in registered_names]
-        source_index = {path: index for index, path in enumerate(source_files)}
-        global_start = 0
-        for file_index, count in enumerate(xrd_counts):
-            for local_index in range(int(count)):
-                global_index = global_start + local_index
-                index = index_of.get(global_index)
-                if index is not None:
-                    frame_file[index] = file_index
-                    frame_local[index] = local_index
-            global_start += int(count)
-        if x_values.size <= int(global_indices.max(initial=-1)) or y_values.size <= int(global_indices.max(initial=-1)):
-            raise ValueError("Legacy registration positions do not cover selected global indices")
-        frame_x = x_values[global_indices]
-        frame_y = y_values[global_indices]
-
-    # Without the registration cache, the retained-only linker cannot identify
-    # frames cut by every material. Preserve global identity and mark them unresolved.
-    unresolved = frame_file < 0
-    frame_file[unresolved] = 0
-    frame_local[unresolved] = -1
-
-    roi_config_path = Path(roi_config_path) if roi_config_path else link_path.with_name(
-        link_path.name.replace("xrf_xrd_links.h5", "xrf_rois.json")
-    )
-    config = {}
-    if roi_config_path.exists():
-        with roi_config_path.open() as stream:
-            config = json.load(stream)
-        for name, material in materials.items():
-            roi = (config.get("rois") or {}).get(name, {})
-            for key in ("energy_range_kev", "pixel_range"):
-                if key in roi:
-                    material["attrs"][key] = roi[key]
-
-    spectrum = None
-    spectrum_path = Path(spectrum_path) if spectrum_path else link_path.with_name(
-        link_path.name.replace("xrf_xrd_links.h5", "me7_spectrum.npz")
-    )
-    if spectrum_path.exists():
-        with np.load(spectrum_path, allow_pickle=False) as saved:
-            spectrum = {
-                "energy_kev": saved["energy_kev"],
-                "summed_counts": saved["spectrum"],
-            }
-
-    return validate({
-        "attrs": {
-            "scan": int(scan if scan is not None else link_scan),
-            "n_total_frames": int(global_indices.max() + 1) if global_indices.size else 0,
-            "source_kind": "legacy_xrf_prefilter",
-            "channels": config.get("channels", []),
-            "deadtime_correction": config.get("deadtime_correction"),
-            "energy_calibration": config.get("energy_calibration"),
-            "unresolved_frame_identities": int(unresolved.sum()),
-        },
-        "source_files": source_files or ["unresolved"],
-        "frames": {
-            "global_frame_index": global_indices,
-            "source_file_index": frame_file,
-            "source_frame_index": frame_local,
-            "x": frame_x,
-            "y": frame_y,
-        },
-        "materials": materials,
-        "spectrum": spectrum,
-    })

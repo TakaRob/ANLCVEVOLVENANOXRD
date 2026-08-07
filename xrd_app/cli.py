@@ -1,8 +1,8 @@
 """xrd-app command-line interface.
 
 The CLI is the engine: every "big button" in the GUI shells out to one of these
-commands, and everything is usable headless. See ``README.md`` and
-``xrd_app/PATHWAYS.md`` for the supported workflows.
+commands, and everything is usable headless. See ``README.md`` for the supported
+workflows.
 """
 
 import os
@@ -49,13 +49,8 @@ def init(project_name, scan_number, root):
             f"Project already exists at {root}; refusing to overwrite {config_path}.")
     cfg = ProjectConfig(root, data=default_config(project_name, root, scan_number))
     cfg.create_tree()
-    cfg.save()
-
-    # Seed an editable default reflection set so the project resolves reflections
-    # from its own Metadata/ (not the hidden bundled fallback) out of the box.
-    from .core import reflections as refl_io
     mdir = DataManager(config=cfg).metadata_dir
-    refl_io.save(refl_io.default_reflections(), mdir / "reflections.json")
+    cfg.save()
 
     click.echo(f"Project '{project_name}' initialized at {cfg.root}")
     click.echo(f"  Reflections: {mdir / 'reflections.json'} "
@@ -95,9 +90,9 @@ def whole_frame_reflections(scan, project, root):
 # Maps a --link option to (config data_sources key, destination sub-dir).
 # Sub-dir None means "record the absolute path only" (no copy/symlink).
 _LINK_TARGETS = {
-    'tth': ('tth_map', 'Metadata'),
-    'reflections': ('reflections', 'Metadata'),
-    'detector': ('detector_script', None),
+    'tth': ('tth_map', 'Metadata', 'tth.tiff'),
+    'reflections': ('reflections', 'Metadata', 'reflections.json'),
+    'detector': ('detector_script', None, None),
 }
 _LINK_ROOTS = {
     'raw_root': 'raw_root',
@@ -113,7 +108,7 @@ _LINK_ROOTS = {
 @click.option('--position-root', help='Dir containing scan_NNNN_position.csv files (multi-scan)')
 @click.option('--position-csv', help='A single scan position CSV → Metadata/<scan>/positions.csv')
 @click.option('--poni', help='Path to a pyFAI .poni (recorded; conversion deferred)')
-@click.option('--copy', is_flag=True, help='Copy files instead of symlinking')
+@click.option('--copy', is_flag=True, help='Copy files instead of symlinking (calibration files are always copied)')
 @click.option('--scan', default=None, help='Scan number/name (for per-scan --position-csv)')
 @click.option('--root', default='.', help='Project root directory')
 def link(tth, reflections, detector, raw_root, position_root, position_csv,
@@ -162,7 +157,7 @@ def link(tth, reflections, detector, raw_root, position_root, position_csv,
                                 else "positions.h5")
             if other.exists() or other.is_symlink():
                 other.unlink()
-            stored = _place(src, dest_dir / dest_name, copy)
+            stored = _place(src, dest_dir / dest_name, copy=True)
             click.echo(f"  positions: {stored}")
 
     provided = {'tth': tth, 'reflections': reflections, 'detector': detector}
@@ -174,7 +169,7 @@ def link(tth, reflections, detector, raw_root, position_root, position_csv,
     for opt, source_path in provided.items():
         if not source_path:
             continue
-        config_key, sub_dir = _LINK_TARGETS[opt]
+        config_key, sub_dir, dest_name = _LINK_TARGETS[opt]
         source = Path(source_path).resolve()
         if not source.exists():
             click.echo(f"Warning: {source} does not exist — skipping.")
@@ -185,8 +180,10 @@ def link(tth, reflections, detector, raw_root, position_root, position_csv,
             continue
         dest_dir = metadata_dir if sub_dir == 'Metadata' else cfg.root / sub_dir
         dest_dir.mkdir(parents=True, exist_ok=True)
-        stored = _place(source, dest_dir / source.name, copy)
-        cfg.data['data_sources'][config_key] = str(stored)
+        stored = _place(source, dest_dir / dest_name, copy=True)
+        # Canonical project files resolve without a config pointer, preserving
+        # the normal per-scan -> project fallback order.
+        cfg.data['data_sources'][config_key] = None
         click.echo(f"  {config_key}: {stored}")
 
     cfg.save()
@@ -196,6 +193,8 @@ def link(tth, reflections, detector, raw_root, position_root, position_csv,
 def _place(source: Path, dest: Path, copy: bool) -> Path:
     """Copy or symlink ``source`` to ``dest``; return the path to store in config."""
     try:
+        if source.resolve() == dest.resolve():
+            return dest.resolve()
         if dest.exists() or dest.is_symlink():
             if dest.is_dir() and not dest.is_symlink():
                 shutil.rmtree(dest)
@@ -876,8 +875,8 @@ def territory_build(ctx, target_size, scan, algorithm, snr, compression, root):
     Chains territory-grid → bin → peaks → shapes (all ``--variant territory`` at
     1×1, with coordinate linking) so the Territory Map and the Device-View
     "Territorial reference available →" button can be produced without running
-    the four steps by hand. This is the one-button version of the TERRITORY.md
-    chain — the GUI's "Build territorial reference" button shells out to it.
+    the four steps by hand. The GUI's "Build territorial reference" button shells
+    out to this command.
     """
     dm = DataManager(root, scan=scan)
     # The peak set name shapes will pick up (same rule peaks/batch use).

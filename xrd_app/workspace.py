@@ -101,6 +101,21 @@ def set_last_project(root) -> None:
     save_settings(s)
 
 
+def get_last_xrf_project() -> Optional[Path]:
+    """Path to the last XRF project, or None if its add-on no longer exists."""
+    last = load_settings().get("last_xrf_project")
+    if not last:
+        return None
+    path = Path(last)
+    return path if (path / "XRF" / "xrf_config.yaml").exists() else None
+
+
+def set_last_xrf_project(root) -> None:
+    settings = load_settings()
+    settings["last_xrf_project"] = str(Path(root).resolve())
+    save_settings(settings)
+
+
 # ----- project discovery / creation ---------------------------------------
 def is_project(path) -> bool:
     return (Path(path) / CONFIG_FILENAME).exists()
@@ -159,19 +174,6 @@ def create_project(name: str, workspace: Optional[Path] = None,
     cfg = ProjectConfig(root, data=default_config(name, root, scan_number))
     cfg.create_tree()
     cfg.save()
-
-    # Seed an editable default reflection set so a GUI-created project resolves
-    # reflections from its own Metadata/ out of the box — identical to what
-    # ``xrd-app init`` does. Without this, a project made via New project… would
-    # silently fall back to the hidden bundled set (no "Project default" in the
-    # reflections selector). Best-effort: a seeding failure must not block
-    # project creation.
-    try:
-        from .core import reflections as refl_io
-        mdir = DataManager(config=cfg).metadata_dir
-        refl_io.save(refl_io.default_reflections(), mdir / "reflections.json")
-    except Exception:
-        pass
 
     set_last_project(root)
     return root

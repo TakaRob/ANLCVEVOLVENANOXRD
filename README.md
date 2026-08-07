@@ -1,40 +1,45 @@
 # xrd-app
 
-A single-GUI workflow tool for nano-XRD Bragg-peak analysis (ISN 26-ID-C, APS),
-built as a friendly face over a scriptable CLI: every "big button" in the GUI
-shells out to a CLI command, and the previously-separate GUIs are combined into
-one tabbed window.
+A GUI and scriptable CLI for reproducible nano-XRD Bragg-peak analysis at the
+ISN beamline, APS. Persistent and long-running workflows are available through
+the CLI; the GUI provides project setup, execution controls, and result views.
 
 ## Install
 
 ```bash
-pip install -e .            # core
-pip install -e '.[poni]'    # + pyFAI for .poni → tth conversion
+python3 -m pip install -e .                    # core application
+python3 -m pip install -e '.[poni]'            # + pyFAI calibration support
+python3 -m pip install -e '.[qspace,poni,gl]'  # full reciprocal-space support
 ```
 
 ## Quick start
 
 ```bash
-xrd-app init --name MyProject --root /path/to/project
-xrd-app scan-detect --root /path/to/project --scans-dir /path/to/Scans
-xrd-app link --root /path/to/project --tth tth.tiff --reflections reflections.json
-xrd-app make-bins --root /path/to/project --scan 203 --bin-size 3
-xrd-app run-pipeline --root /path/to/project --scan 203 --bin-size 3
-xrd-app gui --root /path/to/project
+xrd-app init --name MyProject --root "/path/to/project"
+xrd-app scan-detect --root "/path/to/project" --scans-dir "/path/to/Scans"
+xrd-app link --root "/path/to/project" --tth "/path/to/tth.tiff" \
+  --reflections "/path/to/reflections.json" --position-root "/path/to/positions"
+xrd-app make-bins --root "/path/to/project" --scan 203 --bin-size 3 \
+  --normalize-frames
+xrd-app run-pipeline --root "/path/to/project" --scan 203 --bin-size 3
+xrd-app gui --root "/path/to/project"
 ```
 
 Every command supports `--help`, and defaults are shown there. Commands return a
 nonzero exit status for usage errors and failed work, making them suitable for
 shell scripts and schedulers. Paths supplied as command options are interpreted
 relative to the current working directory unless the option explicitly says
-otherwise.
+otherwise. Production binning requires measured real `(X,Y)` positions. `grid`
+can use a linked position CSV/HDF5 or build one from supported SOCKETSERVER data;
+it fails rather than silently reconstructing the skew-prone file-row lattice.
 
 ## Pipeline
 
 - **Peak finding** (Phase 1): run a detector over every spatial bin → per-bin peaks.
-- **Shape finding** (Phase 2): link peaks across neighboring bins (Union-Find),
-  keep gaussian-like features, characterize `rocking_fwhm` / `strain_breadth` /
-  `chi_deg`. A *shape* is a peak that holds up across bins.
+- **Shape finding** (Phase 2): link peaks across neighboring spatial bins,
+  validate their intensity profiles, and characterize `chi_deg`, `chi_fwhm`, and
+  `tth_fwhm`. These within-shape breadths are not rocking-curve widths; true
+  rocking FWHM comes from `track` followed by `rocking` across sample theta.
 - **CVEvolve**: build a seeded dev/holdout split (`build-holdout`) from verified
   labels or an algorithm's peak/shape set, then evolve a detector (`run-cvevolve`).
 
@@ -45,13 +50,15 @@ available for inspection and recovery.
 
 | Area | Commands |
 |---|---|
-| Project setup | `init`, `link`, `status`, `scan-detect`, `convert-poni` |
+| Project setup | `init`, `link`, `status`, `scan-detect`, `convert-poni`, `whole-frame-reflections` |
 | Binning | `create-positions`, `grid`, `territory-grid`, `archive-unbinned`, `bin`, `make-bins`, `territory-build` |
-| Peak and shape analysis | `detectors`, `peaks`, `shapes`, `run-combined`, `run-pipeline`, `batch`, `reflection-sum` |
+| Peak and shape analysis | `detectors`, `peaks`, `shapes`, `run-combined`, `run-pipeline`, `batch` |
 | Manual ROI analysis | `roi-detect`, `roi-shapes`, `roi-save`, `roi-cvevolve-init` |
-| Cross-scan studies | `aggregate`, `track`, `rocking`, `predict`, `scan-table`, `register-study`, `list-studies`, `run-study` |
-| Derived maps | `hd-device-map`, `combined-device`, `qspace`, `rsm`, `xrf` |
-| Optimization | `build-holdout`, `cvevolve-init`, `run-cvevolve`, `save-algorithm` |
+| Cross-scan studies | `aggregate`, `track`, `rocking`, `predict`, `combined-device`, `scan-table`, `register-study`, `list-studies`, `run-study` |
+| Linked XRF/XRD | `xrf`, `linked-xrd-track` |
+| Reciprocal space | `qspace`, `rsm` |
+| Optimization | `build-holdout`, `cvevolve-init`, `run-cvevolve`, `register-cvevolve`, `save-algorithm` |
+| Reporting | `reflection-sum`, `hd-device-map`, `report` |
 | Interfaces | `gui`, `roi`, `roifeature` |
 | Provenance | `lineage` |
 
@@ -63,22 +70,30 @@ panels mirror the relevant command help.
 
 ```
 <project>/
-  Raw/        scans.json registry + links to external scan dirs
-  Binned/     pre-binned xrd_NxN_bins.h5 (per scan)
-  Metadata/   tth.tiff, reflections.json (+ generated .py), grid maps, gui_state
-  Labels/     per-scan algorithm outputs (*_peaks/*_shapes) + manual labels
-  Figures/    saved PNGs
-  CVEvolve/   dev/holdout splits + sessions
+  config.yaml
+  Raw/         scans.json registry of external scan locations
+  Binned/      per-scan unbinned archives and NxN/variant bin files
+  Metadata/    calibration, measured positions, grids, sums, and XRF maps
+  Labels/      peak, shape, ROI, combined, HD-map, lineage, and CSV products
+  Figures/     exported figures and PDF reports
+  CVEvolve/    optimizer sessions and dev/holdout data
+  Algorithms/  project-owned detector modules and catalogs
+  Study*/      cross-scan products, created by study commands
+  XRF/         optional xrf-app add-on
 ```
+
+## Tutorials
+
+The tracked [notebooks](notebooks/README.md) are CLI-first, percent-format Python
+notebooks for new users. They explain each scientific stage, print commands and
+results, and block detector-frame work until `RUN_HEAVY = True` is set explicitly.
 
 ## Layout of this repo
 
 ```
-xrd_app/            the package (CLI, app, core/, gui/, tabs/, algorithms)
-cvevolve_*/         CVEvolve configs, prompts, and holdout sets per bin size
-docs/               research and deployment reference material
+xrd_app/    application package (CLI, core, GUI, tabs, algorithms)
+notebooks/  tracked CLI-first tutorials
 ```
 
-Workflow details: [PIPELINE_WALKTHROUGH.md](PIPELINE_WALKTHROUGH.md) and
-[xrd_app/PATHWAYS.md](xrd_app/PATHWAYS.md). Domain vocabulary is defined in
-[TERMINOLOGY.md](TERMINOLOGY.md).
+See [xrd_app/docs/BINNING_STORAGE.md](xrd_app/docs/BINNING_STORAGE.md) for
+storage choices and [QSPACE.md](notebookwalkthroughthrough/QSPACE.md) for reciprocal-space workflows.

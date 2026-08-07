@@ -613,7 +613,8 @@ class SetupTab(QWidget):
                 "Positions (*.csv *.h5 *.hdf5);;CSV (*.csv);;HDF5 (*.h5 *.hdf5)")
             if not path:
                 return
-            args = ["link", "--root", self.project_root, "--position-csv", path]
+            args = ["link", "--root", self.project_root, "--position-csv", path,
+                    "--copy"]
             if self.scan:
                 args += ["--scan", str(self.scan)]
             self._run_setup_job(args)
@@ -652,7 +653,8 @@ class SetupTab(QWidget):
         path = _pick_file(
             self, "Select tth.tiff", self.project_root or "", "TIFF (*.tif *.tiff)")
         if path:
-            self._run_setup_job(["link", "--root", self.project_root, "--tth", path])
+            self._run_setup_job(["link", "--root", self.project_root, "--tth", path,
+                                 "--copy"])
 
     def _convert_poni(self):
         path = _pick_file(
@@ -678,30 +680,17 @@ class SetupTab(QWidget):
         self._refresh_summary()
 
     def _load_reflections_file(self):
-        """Pick the reflection set used by every GUI for the active scan."""
+        """Replace the editable project-level ``Metadata/reflections.json``."""
         if not self.project_root:
             return
         dm = DataManager(self.project_root, scan=self.scan)
-        if not dm._scan():
-            QMessageBox.information(
-                self, "No active scan",
-                "Select a scan first (top-left), then load its reflections.")
-            return
-        start = str(dm.metadata_scan_dir(self.scan))
         path = _pick_file(
-            self, "Select a reflections file", start,
+            self, "Select a reflections file", str(dm.metadata_dir),
             "Reflection JSON (reflections.json *.json)")
         if not path:
             return
-        dm.set_reflection_source(path, self.scan)
-        # Refresh the host header selector + rebuild scan-dependent tabs.
-        if self._host is not None:
-            if hasattr(self._host, "_populate_reflections"):
-                self._host._populate_reflections()
-            if hasattr(self._host, "_refresh_context"):
-                self._host._refresh_context()
-        self.console._append(f"[reflections set for {dm._scan()} → {path}]\n")
-        self._refresh_summary()
+        self._run_setup_job(["link", "--root", self.project_root,
+                             "--reflections", path, "--copy"])
 
 
 def make_tab(project_root=".", scan=None, bin_size=3):

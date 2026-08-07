@@ -14,7 +14,7 @@ alongside so unsampled voxels are distinguishable from sampled-but-dark ones.
 
 The intensity is summed over the whole illuminated (x,y) map at each θ, so this is
 a sample-integrated RSM. For a per-grain reciprocal-space view use the feature
-q-coordinates in ``<scan>_features_q.csv`` instead (see QSPACE.md).
+q-coordinates in ``<scan>_features_q.csv`` instead (see the q-space tutorial docs).
 """
 
 from __future__ import annotations
